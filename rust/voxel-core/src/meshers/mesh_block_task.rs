@@ -1094,11 +1094,29 @@ mod tests {
     struct ConstantSdfGenerator {
         value: f32,
     }
+
     impl VoxelGenerator for ConstantSdfGenerator {
         fn generate_block(&self, input: VoxelQueryData<'_>) -> GenResult {
             input
                 .buffer
                 .clear_channel_f(ChannelId::Sdf.index(), self.value);
+            GenResult::default()
+        }
+    }
+
+    /// Writes a distinct SDF value per call (`-(call_index + 1)`), so tests can
+    /// detect a stale reused scratch buffer: duplicated values across neighbour
+    /// regions mean the previous region's data leaked into the next.
+    struct CountingDistinctSdfGenerator {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl VoxelGenerator for CountingDistinctSdfGenerator {
+        fn generate_block(&self, input: VoxelQueryData<'_>) -> GenResult {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst) as f32;
+            input
+                .buffer
+                .clear_channel_f(ChannelId::Sdf.index(), -(n + 1.0));
             GenResult::default()
         }
     }
@@ -1320,6 +1338,60 @@ mod tests {
                 .unwrap();
 
         assert_eq!(origin, Vector3i::new(62, -98, 126));
+    }
+
+    #[test]
+    fn generate_missing_regions_fills_every_missing_neighbour_with_one_scratch() {
+        // Only the central block is resident; all 26 neighbours are missing
+        // and must be generated. Each call writes a distinct SDF, so a stale
+        // scratch buffer (B4 regression) would show duplicated values across
+        // neighbour regions instead of the per-call ramp.
+        let mut data = VoxelData::new();
+        let bs = data.block_size() as i32;
+        data.set_bounds(Box3i::new(
+            Vector3i::splat(-bs * 4),
+            Vector3i::splat(bs * 8),
+        ));
+        data.set_streaming_enabled(false);
+        data.set_full_load_completed(true);
+        data.try_set_voxel(0, Vector3i::zero(), ChannelId::Type.index());
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let generator = CountingDistinctSdfGenerator {
+            calls: calls.clone(),
+        };
+
+        let mut dst = VoxelBuffer::with_size(Vector3i::zero());
+        try_gather_voxels_cpu(
+            &mut dst,
+            1,
+            1,
+            1u32 << ChannelId::Sdf.index(),
+            Some(&generator),
+            &data,
+            0,
+            Vector3i::zero(),
+        )
+        .unwrap();
+
+        // All 26 non-central neighbours were missing and generated. With
+        // min/max padding of 1 each, the 3×3×3 gather still queues every
+        // non-resident neighbour region (clipping happens at copy time, not
+        // at queue time), so the generator runs once per missing neighbour.
+        assert!(
+            calls.load(Ordering::SeqCst) >= 26,
+            "expected at least 26 generator calls for missing neighbours, got {}",
+            calls.load(Ordering::SeqCst)
+        );
+        // The scratch buffer is reused across regions (B4), so each region's
+        // generated value must land in dst at the correct (clipped) offset.
+        // The central block's own SDF was never set, so any negative SDF
+        // inside the padding halo must come from the generator.
+        let halo_sdf = dst.get_voxel_f(0, 0, 0, ChannelId::Sdf.index());
+        assert!(
+            halo_sdf < 0.0,
+            "expected generator-filled negative SDF in the padding halo, got {halo_sdf}"
+        );
     }
 
     #[test]
