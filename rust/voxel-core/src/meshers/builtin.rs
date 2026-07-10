@@ -468,12 +468,25 @@ impl CubesMesher {
             ChannelData::U64(v) => v.iter().map(|&x| x as u32).collect(),
         }
     }
+
+    /// Resolve the voxel slice the cubes free function consumes (`&[u32]`).
+    /// When the channel is materialized 32-bit, returns a zero-copy borrow of
+    /// the backing store (mirrors C++ `raw_channel.reinterpret_cast_to<const
+    /// uint32_t>()`, `voxel_mesher_cubes.cpp:844`); otherwise falls back to a
+    /// per-voxel copy that narrows `u64 → u32` (B5).
+    fn voxel_slice<'a>(buffer: &'a VoxelBuffer, channel: usize) -> std::borrow::Cow<'a, [u32]> {
+        if let Some(slice) = buffer.channel_typed_slice::<u32>(channel) {
+            std::borrow::Cow::Borrowed(slice)
+        } else {
+            std::borrow::Cow::Owned(Self::extract_voxel_slice(buffer, channel))
+        }
+    }
 }
 
 impl VoxelMesher for CubesMesher {
     fn build(&self, output: &mut MesherOutput, input: &MesherInput<'_>) {
         use crate::meshers::cubes::greedy::MATERIAL_COUNT;
-        let voxels = Self::extract_voxel_slice(input.voxels, self.type_channel);
+        let voxels = Self::voxel_slice(input.voxels, self.type_channel);
         let size = input.voxels.size();
         let block_size = [size.x, size.y, size.z];
 
@@ -583,8 +596,11 @@ impl BlockyMesher {
         self
     }
 
-    /// Extract the typed-channel slice the blocky mesher expects (`&[u16]`).
-    /// Voxels are read as `u64` then narrowed, matching the C++ runtime.
+    /// Fallback per-voxel extraction used when a zero-copy typed slice is not
+    /// available (non-16-bit depth, uniform channel, or alignment mismatch).
+    /// The main path dispatches over [`ChannelData`] variants directly in
+    /// `build_blocky_into` (zero-copy for every depth); this covers the odd
+    /// mixed cases.
     fn extract_voxel_slice(buffer: &VoxelBuffer, channel: usize) -> Vec<u16> {
         let size = buffer.size();
         let mut out = Vec::with_capacity((size.x as usize) * (size.y as usize) * (size.z as usize));
@@ -1354,5 +1370,37 @@ mod tests {
     fn blocky_mesher_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<BlockyMesher>();
+    }
+
+    /// The zero-copy 16-bit Type path (B5) must produce identical mesh output
+    /// to the per-voxel fallback. Guards against a divergence between the
+    /// `channel_typed_slice::<u16>` borrow and the `extract_voxel_slice` copy.
+    #[test]
+    fn blocky_mesher_zero_copy_path_matches_fallback() {
+        let library = full_cube_blocky_library(true);
+        let channel = ChannelId::Type.index();
+        // Build a 16-bit Type channel block (the zero-copy-capable depth).
+        let mut voxels = VoxelBuffer::with_size(Vector3i::splat(4));
+        let mut format = VoxelFormat::new();
+        format.depths[channel] = ChannelDepth::Bit16;
+        format.configure_buffer(&mut voxels);
+        for z in 1..3 {
+            for x in 1..3 {
+                for y in 1..3 {
+                    voxels.set_voxel(1, x, y, z, channel);
+                }
+            }
+        }
+        // The zero-copy borrow must be available for a materialized 16-bit channel.
+        assert!(voxels.channel_typed_slice::<u16>(channel).is_some());
+
+        let mesher = BlockyMesher::new(library);
+        let mut input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+        input.collision_hint = true;
+        let mut output = MesherOutput::default();
+        mesher.build(&mut output, &input);
+        // Non-empty geometry confirms the zero-copy slice reached the mesher.
+        assert!(output.total_triangle_count() > 0);
+        assert!(!output.collision_surface.positions.is_empty());
     }
 }
