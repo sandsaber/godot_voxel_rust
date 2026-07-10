@@ -1148,6 +1148,39 @@ impl VoxelBuffer {
         self.channels[channel_index].defval
     }
 
+    /// Zero-copy typed view of a channel's backing store, when the channel is
+    /// materialized (`Compression::None`) and `T` matches the channel's bit
+    /// depth. Mirrors C++ `get_channel_as_bytes_read_only` +
+    /// `Span::reinterpret_cast_to<T>()`.
+    ///
+    /// Returns `None` (so the caller can fall back to a slower per-voxel path)
+    /// when the channel is uniform (no backing array) or the depth does not
+    /// match `size_of::<T>()`. Since D7 the backing store is a typed
+    /// [`ChannelData`] variant, so alignment is guaranteed by the `Vec` itself
+    /// and `bytemuck` is only a checked bit-pattern cast.
+    #[inline]
+    pub fn channel_typed_slice<T: bytemuck::Pod>(&self, channel_index: usize) -> Option<&[T]> {
+        let ch = &self.channels[channel_index];
+        if ch.compression != Compression::None {
+            return None;
+        }
+        match &ch.data {
+            ChannelData::U8(v) if std::mem::size_of::<T>() == 1 => bytemuck::try_cast_slice(v).ok(),
+            ChannelData::U16(v) if std::mem::size_of::<T>() == 2 => {
+                bytemuck::try_cast_slice(v).ok()
+            }
+            ChannelData::U32(v) if std::mem::size_of::<T>() == 4 => {
+                bytemuck::try_cast_slice(v).ok()
+            }
+            ChannelData::U64(v) if std::mem::size_of::<T>() == 8 => {
+                bytemuck::try_cast_slice(v).ok()
+            }
+            // Uniform channel (empty backing array) or depth mismatch: no
+            // typed view for this `T`.
+            _ => None,
+        }
+    }
+
     /// Copy an entire channel from `other`. Matches `copy_channel_from`.
     pub fn copy_channel_from(&mut self, other: &VoxelBuffer, channel_index: usize) {
         assert_eq!(
@@ -1873,6 +1906,40 @@ mod tests {
         vb.channels[ChannelId::Sdf.index()].depth = ChannelDepth::Bit32;
         vb.set_voxel_f(1.25, 0, 0, 0, ChannelId::Sdf.index());
         assert_eq!(vb.get_voxel_f(0, 0, 0, ChannelId::Sdf.index()), 1.25);
+    }
+
+    #[test]
+    fn channel_typed_slice_returns_matching_slice_when_materialized() {
+        // 16-bit SDF channel, 2x2x2 = 8 voxels → 16 bytes backing store.
+        let mut vb = VoxelBuffer::with_size(Vector3i::new(2, 2, 2));
+        vb.set_voxel_f(1.0, 0, 0, 0, ChannelId::Sdf.index());
+        vb.set_voxel_f(-1.0, 1, 1, 1, ChannelId::Sdf.index());
+        // Materialized (non-uniform) after the writes.
+        assert_eq!(
+            vb.channel_compression(ChannelId::Sdf.index()),
+            Compression::None
+        );
+        let slice: &[i16] = vb
+            .channel_typed_slice::<i16>(ChannelId::Sdf.index())
+            .expect("materialized 16-bit channel must cast");
+        assert_eq!(slice.len(), 8);
+        // Index 0 raw value decodes to ~1.0 via clamp snorm × scale_inv.
+        let back0 = crate::storage::funcs::s16_to_snorm(slice[0]) * QUANTIZED_SDF_16_BITS_SCALE_INV;
+        assert!((back0 - 1.0).abs() < 0.02, "got {back0}");
+    }
+
+    #[test]
+    fn channel_typed_slice_none_for_uniform_or_wrong_depth() {
+        let mut vb = VoxelBuffer::with_size(Vector3i::new(2, 2, 2));
+        // Uniform by default → no typed slice.
+        assert!(vb
+            .channel_typed_slice::<i16>(ChannelId::Sdf.index())
+            .is_none());
+        // Materialize, but ask for the wrong depth.
+        vb.set_voxel_f(1.0, 0, 0, 0, ChannelId::Sdf.index());
+        assert!(vb
+            .channel_typed_slice::<f32>(ChannelId::Sdf.index())
+            .is_none());
     }
 
     #[test]

@@ -146,8 +146,8 @@ fn scale_for_lod(v: Vector3i, lod_index: u32) -> Vector3i {
 /// LOD data and triangle indices into `output`. The vertex-reuse cache `cache`
 /// is reset and used internally; pass a thread-local `Cache` for reuse across
 /// calls.
-pub fn build_regular_mesh(
-    input: &dyn RegularMesherInput,
+pub fn build_regular_mesh<S: RegularMesherInput + ?Sized>(
+    input: &S,
     params: &BuildRegularMeshParams,
     cache: &mut Cache,
     output: &mut MeshArrays,
@@ -486,7 +486,7 @@ pub fn build_regular_mesh(
 // ---------------------------------------------------------------------------
 
 /// Central-difference gradient at a corner. Matches `get_corner_gradient`.
-fn get_corner_gradient(input: &dyn RegularMesherInput, data_index: usize) -> Vector3f {
+fn get_corner_gradient<S: RegularMesherInput + ?Sized>(input: &S, data_index: usize) -> Vector3f {
     // We need the block strides; pull them from the input's block size.
     let bs = input.block_size();
     let n010 = 1usize;
