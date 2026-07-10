@@ -71,3 +71,10 @@ harness = false
 [[bench]]
 name = "variable_lod_bench"
 harness = false
+
+# End-to-end mesh-block-task benchmark (gather + build) and a multi-threaded
+# scaling scenario. Measures H2 at the MeshBlockTask::run level, not just the
+# transvoxel kernel — closes AUDIT.md §9.4.
+[[bench]]
+name = "block_task_bench"
+harness = false
