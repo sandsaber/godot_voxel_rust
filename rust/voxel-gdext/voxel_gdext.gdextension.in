@@ -1,7 +1,7 @@
 [configuration]
 
 entry_symbol = "gdext_rust_init"
-compatibility_minimum = 4.2
+compatibility_minimum = 4.7
 # Reloadable on Linux/macOS (class changes hot-reload without editor restart).
 # Disable if you hit gdext reload issues during development.
 reloadable = true
@@ -11,7 +11,7 @@ reloadable = true
 # first with `cargo build -p voxel-gdext` (debug) or `--release`, then either
 # copy it next to this file or point the paths at target/.
 #
-# Godot 4.2+ uses plain "<os>.<arch>" keys (no .debug/.release suffix in 4.7).
+# Godot 4.7 uses plain "<os>.<arch>" keys (no .debug/.release suffix).
 # Linux x86_64:
 linux.x86_64 = "res://rust/target/debug/libvoxel_gdext.so"
 # macOS (universal arm64+x86_64 if you lipo them; here arm64):

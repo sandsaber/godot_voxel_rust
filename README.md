@@ -1,33 +1,42 @@
 Voxel Tools for Godot
 =========================
 
-A voxel terrain engine for Godot Engine 4, **fully ported from C++ to Rust**.
+A Rust-first voxel terrain engine for Godot Engine 4, ported from
+[Zylann/godot_voxel](https://github.com/Zylann/godot_voxel).
 
-This fork is a **pure Rust GDExtension** — no C++ module code remains. The
-engine core (`voxel-core`) is engine-agnostic and fully unit-testable; the
-thin Godot binding (`voxel-gdext`) exposes 79 functional classes via
-`#[func]` methods. Loads in Godot 4.7+.
+The runtime is a **pure Rust GDExtension** — no C++ module code remains. The
+engine core (`voxel-core`) is engine-agnostic and fully unit-testable. The thin
+Godot binding (`voxel-gdext`) registers 79 classes under their canonical
+upstream names. Feature completeness varies by subsystem; see
+[Status](doc/source/status.md) and [Roadmap](ROADMAP.md).
 
-> **Verified by independent audit (2026-07-30):** 1489 tests pass (0 failed),
-> `cargo clippy --workspace --all-targets` is warning-clean, `cargo fmt --check`
-> passes, and `voxel-core` cross-compiles to Android `aarch64`.
+> **Verified locally on 2026-08-10:** 1494 default-feature tests and 1496
+> all-feature tests pass (0 failed), strict Clippy and rustfmt are clean, the
+> Godot 4.7.1 smoke suite passes, and `voxel-core` cross-compiles to Android
+> `aarch64`.
 
 ![Blocky screenshot](doc/source/images/blocky_screenshot.webp)
 ![Smooth screenshot](doc/source/images/smooth_screenshot.webp)
 
-Features
+Working end-to-end in Godot
 ---------------------------
 
-- Realtime 3D terrain editable in-game (overhangs, tunnels, creation/destruction)
-- Polygon-based: voxels are transformed into chunked meshes via the Transvoxel algorithm
-- Godot physics integration + fast Minecraft-like collisions
-- Infinite terrains via multi-LOD paging (LodOctree + transition cells)
-- Voxel data streaming (memory, region files, generators)
-- Minecraft-style blocky terrain with baked ambient occlusion
-- Smooth terrain with level of detail (Transvoxel + SINGLE_S4 texturing)
-- Procedural graph generator (24+ node types, expression nodes, image lookups)
-- Voxel instancing system (scatter foliage, rocks on surfaces)
-- **Pure Rust** — cross-compiles to Android (aarch64/x86_64), iOS, macOS
+- Viewer-driven terrain paging, generation and mesh upload through `VoxelTerrain`
+- Smooth SDF terrain with Transvoxel, transition cells and SINGLE_S4 texturing
+- Cubes meshing, memory/region streams and trimesh collision generation
+- Flat, waves, noise, heightmap, image and graph generators
+- Direct SDF voxel editing and DDA raycasting
+- Pure-Rust core cross-compilation to Android, iOS and macOS
+
+Implemented in core, but not yet complete in the Godot product surface:
+
+- Blocky meshing has baked models and ambient occlusion, but terrain cannot yet
+  receive a baked block library.
+- `VoxelTerrain` supports multiple LOD maps; the separate `VoxelLodTerrain`
+  class is still an octree facade without its own paging/rendering.
+- Instancing currently provides scatter math and counts, not MultiMesh output.
+- Graph `ExpressionNode`/`Image2D` runtime wiring and the full visual editor are
+  still pending.
 
 Building
 ---------------
@@ -50,8 +59,9 @@ Testing
 ```bash
 cd rust
 cargo test --workspace                      # 1494 tests (0 failed)
-cargo clippy --workspace --all-targets      # warning-clean
-cargo fmt --check                           # clean
+cargo test --workspace --all-features       # 1496 tests (0 failed)
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all -- --check
 ```
 
 Project structure
@@ -60,7 +70,7 @@ Project structure
 ```
 rust/
 ├── voxel-core/          # Engine-agnostic Rust core (all logic)
-│   ├── src/             # 800 unit tests
+│   ├── src/             # 800+ unit tests
 │   └── tests/           # 674 parity tests + integration + transvoxel parity
 ├── voxel-gdext/         # Godot GDExtension binding (79 classes)
 │   ├── src/             # #[func] methods delegating to voxel-core
@@ -73,13 +83,15 @@ rust/
 Status
 ---------------
 
-The C++ → Rust migration is **complete**. The original C++ module is fully
-removed; the project is a pure-Rust GDExtension verified in Godot 4.7.1:
+The runtime migration from C++ to Rust is complete: Rust is the source of truth
+and the old C++ module has been removed. Full upstream feature parity is not
+complete yet:
 
 - **1494 tests pass** (800 unit + 674 parity + 5 integration + 5 transvoxel
   parity + 1 stress + 5 TSan + 3 gdext unit + 1 doc-test), clippy/fmt clean.
-- **79 Godot classes** functional, registered under canonical upstream names
-  (`VoxelBuffer`, `VoxelMesherBlocky`, `VoxelTerrain`, …).
+- **79 Godot classes** are registered under canonical upstream names
+  (`VoxelBuffer`, `VoxelMesherBlocky`, `VoxelTerrain`, …); some are deliberately
+  partial facades or placeholders documented in the status matrix.
 - Full paging + generation + meshing pipeline runs end-to-end (verified headless:
   210 mesh blocks generated).
 

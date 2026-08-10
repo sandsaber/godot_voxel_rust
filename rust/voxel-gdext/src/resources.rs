@@ -642,7 +642,7 @@ impl VoxelInstanceLibraryGD {
 #[class(base = Resource, tool, rename = VoxelInstanceLibraryItem)]
 pub struct VoxelInstanceLibraryItemGD {
     base: Base<Resource>,
-    #[var]
+    #[var(get = get_item_name, set = set_item_name)]
     name: GString,
     #[var]
     density: f32,
@@ -670,6 +670,18 @@ impl IResource for VoxelInstanceLibraryItemGD {
 
 #[godot_api]
 impl VoxelInstanceLibraryItemGD {
+    /// Item name. Custom accessor names avoid shadowing Resource methods while
+    /// preserving the canonical `name` property in GDScript.
+    #[func]
+    fn get_item_name(&self) -> GString {
+        self.name.clone()
+    }
+
+    #[func]
+    fn set_item_name(&mut self, name: GString) {
+        self.name = name;
+    }
+
     /// Effective scale range midpoint (functional delegate).
     #[func]
     fn get_average_scale(&self) -> f32 {

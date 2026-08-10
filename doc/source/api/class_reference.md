@@ -403,7 +403,7 @@ A reusable function within the voxel graph editor; compiles a sub-graph and samp
 
 **Properties**
 
-- `name: GString`
+- `name: GString` — accessed explicitly through `get_function_name` / `set_function_name`
 
 **Methods**
 
@@ -584,7 +584,7 @@ Defines a single blocky voxel type (model + attributes).
 
 **Properties**
 
-- `name: GString`
+- `name: GString` — accessed explicitly through `get_type_name` / `set_type_name`
 - `transparent: bool`
 - `solid: bool`
 
@@ -785,7 +785,7 @@ One entry in a `VoxelInstanceLibrary`, defining what to scatter and how.
 
 **Properties**
 
-- `name: GString`
+- `name: GString` — accessed explicitly through `get_item_name` / `set_item_name`
 - `density: f32`
 - `min_scale: f32`
 - `max_scale: f32`

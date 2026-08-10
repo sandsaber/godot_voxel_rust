@@ -64,7 +64,7 @@ One scatter item definition.
 
 | Property | Type | Default | Notes |
 |---|---|---|---|
-| `name` | string | `"Item"` | Item name. |
+| `name` | string | `"Item"` | Item name (`get_item_name` / `set_item_name`). |
 | `density` | float | `0.1` | Placement density. |
 | `min_scale` | float | `0.8` | Minimum random scale. |
 | `max_scale` | float | `1.2` | Maximum random scale. |

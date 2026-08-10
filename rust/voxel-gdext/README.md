@@ -7,9 +7,12 @@ in [`voxel-core`](../voxel-core); this crate wraps it into Godot classes.
 
 ## Status
 
-**Phase 5 — complete.** 79 Godot classes are registered and functional (all carry
-`#[func]` methods delegating to `voxel-core`). The extension loads in Godot 4.7+
-and the full paging/generation/meshing pipeline runs end-to-end.
+The Rust binding foundation is complete: 79 Godot classes are registered and
+the `VoxelTerrain` paging/generation/meshing pipeline runs end-to-end on Godot
+4.7+. Individual classes have different parity levels. In particular, blocky
+library binding, standalone `VoxelLodTerrain` rendering, full terrain tools and
+instancer rendering remain partial; see the repository
+[status matrix](../../doc/source/status.md) and [roadmap](../../ROADMAP.md).
 
 ### Class names
 
@@ -54,8 +57,9 @@ terrain.add_child(viewer)   # viewer must be a child of the terrain
 
 ### Verified
 
-Tested headless against Godot 4.7.1.stable on Linux x86_64 (2026-07-30).
-The `smoke_test/` Godot project ships two runnable checks plus a driver script.
+Tested headless against Godot 4.7.1.stable on Linux x86_64 and macOS arm64,
+most recently on 2026-08-10. The `smoke_test/` Godot project ships three
+runnable checks plus a driver script.
 
 **Reproducing on a clean checkout** — the compiled library is a git-ignored build
 artifact, so build it first. The driver does everything:
@@ -66,8 +70,8 @@ cd rust
 ./voxel-gdext/smoke_test/run_smoke_test.sh --release
 ```
 
-It (1) `cargo build`s `voxel-gdext`, (2) copies the `.so`/`.dylib` next to the
-`.gdextension`, then runs:
+It (1) builds `voxel-gdext`, (2) copies the host `.so`/`.dylib`/`.dll` next to
+the `.gdextension`, (3) creates Godot's generated extension list, then runs:
 
 - **`api_test.gd`** (`godot --headless --script api_test.gd`) — class
   registration, `VoxelTerrain` instantiate, `set_generator`, property round-trip,
@@ -78,9 +82,11 @@ It (1) `cargo build`s `voxel-gdext`, (2) copies the `.so`/`.dylib` next to the
   `VoxelViewer` in the tree and pumps real frames: paging generates **210 mesh
   blocks** by frame 10, and the live edition path is verified (`set_voxel_sdf`
   returns true, `get_voxel_sdf` reads back -1.0).
+- **`smoke_test.tscn`** — loads a scene containing canonical `VoxelTerrain` and
+  `VoxelViewer` nodes and verifies the basic runtime surface.
 
 ```
-Initialize godot-rust (API v4.7.stable.official, runtime v4.7.1.stable.arch_linux, safeguards strict)
+Initialize godot-rust (API v4.7.stable.official, runtime v4.7.1.stable.official, safeguards strict)
 voxel-gdext: Scene stage initialized (voxel-core v0.1.0)
 [runtime] PASS set_voxel_sdf/get_voxel_sdf (set=true sdf=-1.000000)
 [runtime] frame 10 — mesh_block_count=210

@@ -753,7 +753,9 @@ impl VoxelGeneratorMultipassGD {
 #[class(base = Resource, tool, rename = VoxelGraphFunction)]
 pub struct VoxelGraphFunctionGD {
     base: Base<Resource>,
-    /// Function name. Plain field exposed via get/set_name #[func]s.
+    /// Function name. Class-specific accessor names avoid shadowing Resource
+    /// methods while preserving the canonical `name` property in GDScript.
+    #[var(get = get_function_name, set = set_function_name)]
     name: GString,
     /// Cached compiled graph (rebuilt on parameter change).
     compiled: Option<voxel_core::generators::graph::CompiledGraph>,
@@ -771,14 +773,13 @@ impl IResource for VoxelGraphFunctionGD {
 
 #[godot_api]
 impl VoxelGraphFunctionGD {
-    /// Function name.
     #[func]
-    fn get_name(&self) -> GString {
+    fn get_function_name(&self) -> GString {
         self.name.clone()
     }
 
     #[func]
-    fn set_name(&mut self, name: GString) {
+    fn set_function_name(&mut self, name: GString) {
         self.name = name;
     }
 
@@ -905,7 +906,7 @@ impl VoxelMeshSDFGD {
 #[class(base = Resource, tool, rename = VoxelBlockyType)]
 pub struct VoxelBlockyTypeGD {
     base: Base<Resource>,
-    #[var]
+    #[var(get = get_type_name, set = set_type_name)]
     name: GString,
     #[var]
     transparent: bool,
@@ -926,6 +927,18 @@ impl IResource for VoxelBlockyTypeGD {
 
 #[godot_api]
 impl VoxelBlockyTypeGD {
+    /// Type name, exposed through class-specific accessors so it does not
+    /// shadow Resource methods.
+    #[func]
+    fn get_type_name(&self) -> GString {
+        self.name.clone()
+    }
+
+    #[func]
+    fn set_type_name(&mut self, name: GString) {
+        self.name = name;
+    }
+
     /// Whether entities can pass through this type (not solid).
     #[func]
     fn is_passable(&self) -> bool {

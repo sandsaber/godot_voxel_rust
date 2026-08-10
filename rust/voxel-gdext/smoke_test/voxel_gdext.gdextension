@@ -1,9 +1,12 @@
 [configuration]
 
 entry_symbol = "gdext_rust_init"
-compatibility_minimum = 4.2
+compatibility_minimum = 4.7
 reloadable = true
 
 [libraries]
 
 linux.x86_64 = "res://libvoxel_gdext.so"
+linux.arm64 = "res://libvoxel_gdext.so"
+macos = "res://libvoxel_gdext.dylib"
+windows.x86_64 = "res://voxel_gdext.dll"

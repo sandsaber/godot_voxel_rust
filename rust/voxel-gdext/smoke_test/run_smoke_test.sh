@@ -3,8 +3,9 @@
 #
 # The compiled `.so`/`.dylib`/`.dll` is a build artifact (git-ignored), so on a
 # clean checkout it must be produced before Godot can load the GDExtension.
-# This script does that, copies the artifact next to the .gdextension, then runs
-# both checks. Requires `cargo` and `godot` on PATH.
+# This script does that, copies the artifact next to the .gdextension, registers
+# it in the generated Godot extension list, then runs all checks. Requires
+# `cargo` and `godot` on PATH.
 #
 # Usage:  ./voxel-gdext/smoke_test/run_smoke_test.sh [--release]
 set -euo pipefail
@@ -23,14 +24,31 @@ done
 
 cd "$REPO_RUST"
 echo ">> building voxel-gdext ($PROFILE)..."
-cargo build -p voxel-gdext ${PROFILE:+$([ "$PROFILE" = release ] && echo --release)}
+CARGO_ARGS=(build -p voxel-gdext)
+if [[ "$PROFILE" == "release" ]]; then
+	CARGO_ARGS+=(--release)
+fi
+cargo "${CARGO_ARGS[@]}"
 
-# Copy the artifact next to the .gdextension (which points at res://libvoxel_gdext.so).
-EXT="so"; [[ "$(uname -s)" == "Darwin" ]] && EXT="dylib"
-SRC="$REPO_RUST/target/$PROFILE/libvoxel_gdext.$EXT"
-DST="$SCRIPT_DIR/libvoxel_gdext.$EXT"
+# Copy the host artifact next to the .gdextension. Rust uses a different
+# library prefix on Windows, so select the complete filename rather than only
+# the extension.
+case "$(uname -s)" in
+	Linux*) LIB_NAME="libvoxel_gdext.so" ;;
+	Darwin*) LIB_NAME="libvoxel_gdext.dylib" ;;
+	MINGW*|MSYS*|CYGWIN*) LIB_NAME="voxel_gdext.dll" ;;
+	*) echo "unsupported smoke-test host: $(uname -s)" >&2; exit 2 ;;
+esac
+SRC="$REPO_RUST/target/$PROFILE/$LIB_NAME"
+DST="$SCRIPT_DIR/$LIB_NAME"
 cp -f "$SRC" "$DST"
 echo ">> copied $SRC -> $DST"
+
+# A clean checkout has no `.godot/extension_list.cfg` because it is generated
+# editor state. Script-only Godot runs do not scan for new `.gdextension`
+# descriptors, so register this dedicated smoke extension explicitly.
+mkdir -p "$SCRIPT_DIR/.godot"
+printf '%s\n' 'res://voxel_gdext.gdextension' > "$SCRIPT_DIR/.godot/extension_list.cfg"
 
 echo
 echo ">> [1/3] API test (class registration + func surface)..."

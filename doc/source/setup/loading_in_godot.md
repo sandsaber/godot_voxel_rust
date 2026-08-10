@@ -16,7 +16,7 @@ built (paths are relative to the `.gdextension` file):
 ```ini
 [configuration]
 entry_symbol = "gdext_rust_init"
-compatibility_minimum = 4.2
+compatibility_minimum = 4.7
 reloadable = true
 
 [libraries]

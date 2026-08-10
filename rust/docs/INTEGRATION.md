@@ -5,8 +5,8 @@ GDScript. So yes — you must **compile** the library for your platform, then po
 a `.gdextension` file at it. This guide covers desktop (Linux/Windows/macOS),
 mobile (Android), and iOS.
 
-> Godot **4.2+** is required (`compatibility_minimum = 4.2`). Verified on
-> **Godot 4.7.1**. The binding uses the `godot` crate (godot-rust 0.5.4,
+> Godot **4.7+** is required (`compatibility_minimum = 4.7`). Verified on
+> **Godot 4.7.1**. The binding uses the `godot` crate (godot-rust 0.5.x,
 > `api-4-7`).
 
 ---
@@ -29,7 +29,7 @@ Then open the Godot project — the editor loads the library on startup, and the
 
 - **Rust toolchain** matching `rust/rust-toolchain.toml` (Rust 1.96.1). `rustup`
   auto-installs it on first `cargo` invocation in `rust/`.
-- **Godot 4.2+** (4.7 recommended) to run the project.
+- **Godot 4.7+** to run the project.
 - For non-Linux desktop/mobile targets: the platform's C/C++ toolchain (see
   below). This is because `voxel-gdext` depends on **`godot-cpp`** (a C++ library
   the `godot` crate builds from source), and that C++ must be cross-compiled for
@@ -146,7 +146,7 @@ Then edit it so the `[libraries]` paths point at your built artifact. Paths are
 ```ini
 [configuration]
 entry_symbol = "gdext_rust_init"
-compatibility_minimum = 4.2
+compatibility_minimum = 4.7
 reloadable = true              # hot-reload class changes on Linux/macOS without editor restart
 
 [libraries]

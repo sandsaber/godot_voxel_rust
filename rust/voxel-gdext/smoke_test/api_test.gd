@@ -22,6 +22,7 @@ func _init() -> void:
 		"VoxelGeneratorWaves", "VoxelGeneratorFlat",
 		"VoxelBuffer", "VoxelMesherBlocky", "VoxelMesherTransvoxel",
 		"VoxelStreamMemory", "VoxelColorPalette", "VoxelBoxMover",
+		"VoxelGraphFunction", "VoxelInstanceLibraryItem", "VoxelBlockyType",
 	]
 	var missing := 0
 	for c in classes:
@@ -83,6 +84,19 @@ func _init() -> void:
 		buf.set_voxel(0, 0, 0, 0, 7)
 		var iv = buf.get_voxel(0, 0, 0, 0)
 		_ok(int(iv) == 7, "VoxelBuffer set_voxel/get_voxel round-trips (got %d)" % int(iv))
+
+	# 8. Name-like properties use class-specific accessors. Generic
+	#    get_name/set_name methods shadow Resource methods and become errors in
+	#    godot-rust 0.6.
+	var graph_function: Resource = ClassDB.instantiate("VoxelGraphFunction")
+	graph_function.name = "smoke_function"
+	_ok(graph_function.get_function_name() == "smoke_function", "VoxelGraphFunction.name round-trips")
+	var instance_item: Resource = ClassDB.instantiate("VoxelInstanceLibraryItem")
+	instance_item.name = "smoke_item"
+	_ok(instance_item.get_item_name() == "smoke_item", "VoxelInstanceLibraryItem.name round-trips")
+	var blocky_type: Resource = ClassDB.instantiate("VoxelBlockyType")
+	blocky_type.name = "smoke_type"
+	_ok(blocky_type.get_type_name() == "smoke_type", "VoxelBlockyType.name round-trips")
 
 	print("=== result: %d failure(s) ===" % failures)
 	quit(1 if failures > 0 else 0)
