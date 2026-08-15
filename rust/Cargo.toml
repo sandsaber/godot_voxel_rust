@@ -19,7 +19,7 @@ description = "Rust port of godot_voxel core (engine-agnostic voxel engine)"
 opt-level = 3
 lto = "fat"
 codegen-units = 1
-panic = "abort"
+panic = "unwind"
 
 [profile.bench]
 inherits = "release"

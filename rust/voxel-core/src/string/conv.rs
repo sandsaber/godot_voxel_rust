@@ -234,6 +234,7 @@ mod tests {
         assert_eq!(&buf[..n], b"-9223372036854775807");
     }
 
+    #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "buffer too small")]
     fn int_to_string_buffer_too_small_panics_in_debug() {
@@ -243,6 +244,13 @@ mod tests {
         // is skipped (returns 0), but tests run in debug.
         let mut tiny = [0u8; 2];
         let _ = int32_to_string_base10(123456, &mut tiny);
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn int_to_string_buffer_too_small_returns_zero_in_release() {
+        let mut tiny = [0u8; 2];
+        assert_eq!(int32_to_string_base10(123456, &mut tiny), 0);
     }
 
     #[test]

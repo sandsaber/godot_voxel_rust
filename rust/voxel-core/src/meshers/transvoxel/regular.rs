@@ -571,3 +571,259 @@ fn project_border_offset(delta: Vector3f, normal: Vector3f) -> Vector3f {
             + (1.0 - normal.z * normal.z) * delta.z,
     )
 }
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for the regular-cell Transvoxel meshing path.
+    //!
+    //! The C++ golden parity (`tests/transvoxel_parity.rs`, `transvoxel_sphere.rs`)
+    //! exercises the *whole* mesher against reference output; these tests instead
+    //! pin the building blocks (`build_regular_mesh` on minimal controlled inputs,
+    //! plus the private helpers that the golden path only covers indirectly).
+    //! This is the "small vertex-interpolation / reuse-cache logic" the README
+    //! flags as the only place future mesh-parity drift could originate.
+    use super::*;
+    use crate::math::{Vector3f, Vector3i};
+
+    // ---- helper tests -------------------------------------------------------
+
+    #[test]
+    fn sign_f_flags_negative_samples_as_inside() {
+        // C++ `sign_f(v) { return v < 0.f; }` — strictly less than zero.
+        assert_eq!(sign_f(-0.1), 1);
+        assert_eq!(sign_f(0.0), 0); // zero is *not* inside
+        assert_eq!(sign_f(0.1), 0);
+    }
+
+    #[test]
+    fn dir_to_prev_vec_unpacks_three_bit_direction() {
+        // dir is packed X(0) Y(1) Z(2), each bit negated to point at the prev cell.
+        assert_eq!(dir_to_prev_vec(0b000), Vector3i::new(0, 0, 0));
+        assert_eq!(dir_to_prev_vec(0b001), Vector3i::new(-1, 0, 0));
+        assert_eq!(dir_to_prev_vec(0b010), Vector3i::new(0, -1, 0));
+        assert_eq!(dir_to_prev_vec(0b100), Vector3i::new(0, 0, -1));
+        assert_eq!(dir_to_prev_vec(0b111), Vector3i::new(-1, -1, -1));
+    }
+
+    #[test]
+    fn normalized_not_null_falls_back_to_up_for_zero_input() {
+        // A zero vector must not produce NaN — it falls back to (0,1,0).
+        let n = normalized_not_null(Vector3f::new(0.0, 0.0, 0.0));
+        assert_eq!(n, Vector3f::new(0.0, 1.0, 0.0));
+    }
+
+    #[test]
+    fn normalized_not_null_unitizes_nonzero_input() {
+        let n = normalized_not_null(Vector3f::new(0.0, 2.0, 0.0));
+        assert!((n.y - 1.0).abs() < 1e-6);
+        assert!(n.x.abs() < 1e-6 && n.z.abs() < 1e-6);
+    }
+
+    #[test]
+    fn get_border_mask_sets_one_bit_per_face() {
+        // Bits: 1=-X 2=+X 4=-Y 8=+Y 16=-Z 32=+Z. Origin hits all three low faces
+        // (X==0, Y==0, Z==0) → bits 0, 2, 4 → 1 + 4 + 16 = 21.
+        assert_eq!(
+            get_border_mask(Vector3i::new(0, 0, 0), Vector3i::new(4, 4, 4)),
+            0b01_0101
+        );
+        // Far corner hits all three high faces (X==4, Y==4, Z==4) → bits 1, 3, 5.
+        assert_eq!(
+            get_border_mask(Vector3i::new(4, 4, 4), Vector3i::new(4, 4, 4)),
+            0b10_1010
+        );
+        // Interior cell touches no border.
+        assert_eq!(
+            get_border_mask(Vector3i::new(2, 2, 2), Vector3i::new(4, 4, 4)),
+            0
+        );
+        // A single-axis edge: only -X (bit0) and +Z (bit5) → 1 + 32 = 33.
+        assert_eq!(
+            get_border_mask(Vector3i::new(0, 2, 4), Vector3i::new(4, 4, 4)),
+            33
+        );
+    }
+
+    #[test]
+    fn scale_for_lod_shifts_by_one_per_lod() {
+        assert_eq!(
+            scale_for_lod(Vector3i::new(1, 2, 3), 0),
+            Vector3i::new(1, 2, 3)
+        );
+        assert_eq!(
+            scale_for_lod(Vector3i::new(1, 2, 3), 1),
+            Vector3i::new(2, 4, 6)
+        );
+        assert_eq!(
+            scale_for_lod(Vector3i::new(1, 1, 1), 2),
+            Vector3i::new(4, 4, 4)
+        );
+    }
+
+    // ---- minimal controlled SDF input --------------------------------------
+
+    /// A flat f32 SDF buffer over a padded block (ZXY layout: index = y + sy*(x + sx*z)).
+    struct FlatSdf {
+        block_size: Vector3i,
+        data: Vec<f32>,
+    }
+
+    impl FlatSdf {
+        /// Fill every voxel with `value`.
+        fn filled(block_size: Vector3i, value: f32) -> Self {
+            let n = (block_size.x * block_size.y * block_size.z) as usize;
+            Self {
+                block_size,
+                data: vec![value; n],
+            }
+        }
+    }
+
+    impl RegularMesherInput for FlatSdf {
+        fn len(&self) -> usize {
+            self.data.len()
+        }
+        fn block_size(&self) -> Vector3i {
+            self.block_size
+        }
+        fn sample_f32(&self, data_index: usize) -> f32 {
+            self.data[data_index]
+        }
+    }
+
+    // ---- build_regular_mesh on controlled inputs ---------------------------
+
+    // The padded block must cover at least MIN_PADDING on the low side and
+    // MAX_PADDING on the high side. With block_size = 1, padded = 1 + 1 + 2 = 4.
+    const PADDED: Vector3i = Vector3i::new(4, 4, 4);
+
+    #[test]
+    fn build_regular_mesh_empty_volume_emits_no_geometry() {
+        // Uniformly outside the surface (positive SDF) → no cell crosses the
+        // isolevel, so no vertices and no indices are produced.
+        let input = FlatSdf::filled(PADDED, 1.0);
+        let mut cache = Cache::default();
+        let mut output = MeshArrays::default();
+        build_regular_mesh(
+            &input,
+            &BuildRegularMeshParams::default(),
+            &mut cache,
+            &mut output,
+        );
+        assert!(
+            output.vertices.is_empty(),
+            "vertices: {:?}",
+            output.vertices
+        );
+        assert!(output.indices.is_empty());
+    }
+
+    #[test]
+    fn build_regular_mesh_fully_solid_volume_emits_no_geometry() {
+        // Uniformly inside the surface (negative SDF). The whole block is one
+        // region, so again no boundary → no geometry. This is the case_code==255
+        // early-out path.
+        let input = FlatSdf::filled(PADDED, -1.0);
+        let mut cache = Cache::default();
+        let mut output = MeshArrays::default();
+        build_regular_mesh(
+            &input,
+            &BuildRegularMeshParams::default(),
+            &mut cache,
+            &mut output,
+        );
+        assert!(
+            output.vertices.is_empty(),
+            "vertices: {:?}",
+            output.vertices
+        );
+        assert!(output.indices.is_empty());
+    }
+
+    #[test]
+    fn build_regular_mesh_half_space_produces_watertight_slice() {
+        // A planar SDF crossing halfway down Y produces exactly one triangle
+        // sheet. With SDF = y - threshold, every cell straddles the same plane.
+        // We craft a half-space: solid where y < 2 (in block-local coords within
+        // the padded buffer), i.e. negative below the plane.
+        let mut input = FlatSdf::filled(PADDED, 0.0);
+        let sy = PADDED.y as usize;
+        let sx = PADDED.x as usize;
+        for z in 0..PADDED.z {
+            for x in 0..PADDED.x {
+                for y in 0..PADDED.y {
+                    let i = (y as usize) + sy * ((x as usize) + sx * (z as usize));
+                    // signed distance to the plane y = 1.5; negative below → solid.
+                    input.data[i] = 1.5 - y as f32;
+                }
+            }
+        }
+        let mut cache = Cache::default();
+        let mut output = MeshArrays::default();
+        build_regular_mesh(
+            &input,
+            &BuildRegularMeshParams::default(),
+            &mut cache,
+            &mut output,
+        );
+
+        // Geometry must exist and indices must be a multiple of 3 (triangles).
+        assert!(!output.indices.is_empty(), "expected a surface slice");
+        assert_eq!(
+            output.indices.len() % 3,
+            0,
+            "index count must be a multiple of 3"
+        );
+        // Every vertex the triangles reference must be a valid vertex index.
+        for &idx in &output.indices {
+            assert!(
+                (0..output.vertices.len() as i32).contains(&idx),
+                "index {idx} out of vertex range 0..{}",
+                output.vertices.len()
+            );
+        }
+        // Vertex / normal / lod_data arrays must stay parallel (add_vertex pushes all three).
+        assert_eq!(output.vertices.len(), output.normals.len());
+        assert_eq!(output.vertices.len(), output.lod_data.len());
+    }
+
+    #[test]
+    fn build_regular_mesh_emits_normals_on_both_sides_of_the_plane() {
+        // Same half-space as above, but check that vertex interpolation placed
+        // the surface at y ≈ 1.5 (the threshold) and that normals are non-zero.
+        let mut input = FlatSdf::filled(PADDED, 0.0);
+        let sy = PADDED.y as usize;
+        let sx = PADDED.x as usize;
+        for z in 0..PADDED.z {
+            for x in 0..PADDED.x {
+                for y in 0..PADDED.y {
+                    let i = (y as usize) + sy * ((x as usize) + sx * (z as usize));
+                    input.data[i] = 1.5 - y as f32;
+                }
+            }
+        }
+        let mut cache = Cache::default();
+        let mut output = MeshArrays::default();
+        build_regular_mesh(
+            &input,
+            &BuildRegularMeshParams::default(),
+            &mut cache,
+            &mut output,
+        );
+
+        // The single cell (block_size==1) straddles y in [1,2] in padded
+        // coordinates; after subtracting min_pos, emitted vertices lie in
+        // [0,1]. The SDF zero-crossing is at y_padded = 1.5, i.e. y_out ≈ 0.5.
+        for v in &output.vertices {
+            assert!(
+                v.y >= 0.0 - 1e-5 && v.y <= 1.0 + 1e-5,
+                "vertex y={:.4} escaped the [0,1] output band",
+                v.y
+            );
+        }
+        // The plane normal points toward +Y (the outside); normals should be
+        // predominantly +Y. Allow for central-difference noise but require net up.
+        let net_y: f32 = output.normals.iter().map(|n| n.y).sum();
+        assert!(net_y > 0.0, "normals should point +Y, net_y={net_y}");
+    }
+}

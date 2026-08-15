@@ -34,7 +34,18 @@ cat > "$BUILD/util/errors.h" <<'EOF'
 EOF
 
 # Copy the REAL upstream tables so we dump current data, not a stale hand-copy.
-cp "$REPO/meshers/transvoxel/transvoxel_tables.cpp" "$BUILD/meshers/transvoxel/transvoxel_tables.cpp"
+# The C++ runtime sources are gone from the working tree (the Rust port is the
+# source of truth), so extract the pinned-upstream tables from the git object
+# `5828cbeb` (recorded in rust/voxel-gdext/api/port_status.json) instead of a
+# working-tree path. Requires the object to be present in the local clone.
+PINNED_UPSTREAM="5828cbeba19050033f550485abc5f8c3586b1bf5"
+UPSTREAM_TABLES_PATH="meshers/transvoxel/transvoxel_tables.cpp"
+if ! git cat-file -t "$PINNED_UPSTREAM" >/dev/null 2>&1; then
+	echo "ERROR: pinned upstream commit $PINNED_UPSTREAM is not present in the local clone." >&2
+	echo "       Run: git fetch origin $PINNED_UPSTREAM (or clone with full history)." >&2
+	exit 1
+fi
+git cat-file -p "$PINNED_UPSTREAM:$UPSTREAM_TABLES_PATH" > "$BUILD/meshers/transvoxel/transvoxel_tables.cpp"
 
 # -I$BUILD lets dump_tables.cpp find meshers/transvoxel/transvoxel_tables.cpp;
 # the copied file's `../../util/errors.h` then resolves to build/util/errors.h.

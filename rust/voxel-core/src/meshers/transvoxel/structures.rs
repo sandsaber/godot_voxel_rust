@@ -39,6 +39,26 @@ impl LodAttrib {
             _pad: 0,
         }
     }
+
+    /// Packs the three byte-sized Transvoxel masks into the bit layout used by
+    /// the fourth `CUSTOM0` float: cell border, vertex border, then transition.
+    pub const fn packed_bits(self) -> u32 {
+        (self.cell_border_mask as u32)
+            | ((self.vertex_border_mask as u32) << 8)
+            | ((self.transition as u32) << 16)
+    }
+
+    /// Returns the GPU-facing RGBA32F `CUSTOM0` value without inspecting this
+    /// struct's raw memory. The alpha component carries [`Self::packed_bits`]
+    /// bit-for-bit, matching the pinned C++ 16-byte attribute contract.
+    pub fn custom0_rgba(self) -> [f32; 4] {
+        [
+            self.secondary_position.x,
+            self.secondary_position.y,
+            self.secondary_position.z,
+            f32::from_bits(self.packed_bits()),
+        ]
+    }
 }
 
 /// Output of the transvoxel mesher: parallel arrays for vertices, normals,
@@ -199,6 +219,33 @@ impl Default for ReuseTransitionCell {
 mod tests {
     use super::*;
     use crate::math::Vector3i;
+
+    #[test]
+    fn lod_attrib_packs_masks_into_custom0_alpha_bits() {
+        let attrib = LodAttrib::new(
+            Vector3f::new(1.0, 2.0, 3.0),
+            0b00_1011,
+            0b11_0001,
+            0b10_0100,
+        );
+
+        let custom = attrib.custom0_rgba();
+
+        assert_eq!(&custom[..3], &[1.0, 2.0, 3.0]);
+        assert_eq!(
+            custom[3].to_bits(),
+            0b00_1011 | (0b11_0001 << 8) | (0b10_0100 << 16),
+        );
+        assert_eq!(custom[3].to_bits(), attrib.packed_bits());
+    }
+
+    #[test]
+    fn lod_attrib_keeps_the_pinned_sixteen_byte_layout() {
+        assert_eq!(
+            std::mem::size_of::<LodAttrib>(),
+            4 * std::mem::size_of::<f32>()
+        );
+    }
 
     #[test]
     fn cache_reset_and_get() {

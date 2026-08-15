@@ -18,8 +18,9 @@ pub use buffer::{DenseVoxelBuffer, VoxelBufferRead};
 pub use depth::ChannelDepth;
 pub use voxel_buffer::{Allocator, Channel, ChannelData, ChannelId, Compression, VoxelBuffer};
 pub use voxel_data::{
-    BlockLocation, BlockToSave, SharedVoxelData, SharedVoxelDataReadRegion,
-    SharedVoxelDataWriteRegion, SharedVoxelGenerator, SharedVoxelStream, VoxelData,
+    BlockLocation, BlockToSave, SharedVoxelData, SharedVoxelDataLodReadGuard,
+    SharedVoxelDataMutationError, SharedVoxelGenerator, SharedVoxelStream, VoxelData,
+    VoxelDataKeyRevision, VoxelDataLodResizeError,
 };
 pub use voxel_data_block::{Viewers, VoxelDataBlock};
 pub use voxel_data_map::VoxelDataMap;

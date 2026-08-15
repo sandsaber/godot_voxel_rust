@@ -637,7 +637,7 @@ mod terrain_parity {
     use voxel_core::math::{Box3i, Vector3i};
     use voxel_core::meshers::TransvoxelMesher;
     use voxel_core::storage::VoxelData;
-    use voxel_core::terrain::{ViewerUpdate, VoxelTerrainCore};
+    use voxel_core::terrain::{MeshDemand, ViewerUpdate, VoxelTerrainCore};
 
     #[test]
     fn single_lod_terrain_paging_converges_with_viewer() {
@@ -657,10 +657,13 @@ mod terrain_parity {
             world_position_voxels: Vector3i::zero(),
             horizontal_view_distance_voxels: 48,
             vertical_view_distance_voxels: 48,
-            requires_meshes: true,
+            demand: MeshDemand {
+                visuals: true,
+                collisions: true,
+            },
         }];
         for _ in 0..20 {
-            core.process(&viewers);
+            core.try_process(&viewers).unwrap();
         }
 
         // Should have mesh blocks loaded.
@@ -682,17 +685,23 @@ mod terrain_parity {
         let dep = MeshingDependency::new(mesher, None);
         let stream: Arc<dyn voxel_core::streams::VoxelStream> =
             Arc::new(voxel_core::streams::MemoryStream::new());
-        let mut core = VoxelTerrainCore::new_with_lod_count(data, stream, dep, 2);
+        let mut core = VoxelTerrainCore::legacy_variable_lod_for_parity(data, stream, dep, 2);
+        // This parity fixture pins the legacy three-stage multi-LOD route's
+        // observable output; force it back off the (now-default) planner path.
+        core.use_legacy_variable_path_for_test();
 
         let viewers = vec![ViewerUpdate {
             id: 0,
             world_position_voxels: Vector3i::zero(),
             horizontal_view_distance_voxels: 48,
             vertical_view_distance_voxels: 48,
-            requires_meshes: true,
+            demand: MeshDemand {
+                visuals: true,
+                collisions: true,
+            },
         }];
         for _ in 0..20 {
-            core.process(&viewers);
+            core.try_process(&viewers).unwrap();
         }
 
         let lod0 = core.mesh_blocks_at_lod(0).len();
@@ -722,16 +731,19 @@ mod terrain_parity {
             world_position_voxels: Vector3i::zero(),
             horizontal_view_distance_voxels: 48,
             vertical_view_distance_voxels: 48,
-            requires_meshes: true,
+            demand: MeshDemand {
+                visuals: true,
+                collisions: true,
+            },
         }];
         // Drive paging to full convergence: tick, wait for background tasks,
         // then re-tick to apply any drained mesh outputs, until no tasks and
         // no pending work remain. This makes the post-convergence mesh output
         // deterministic regardless of thread timing.
         for _ in 0..100 {
-            core.process(&viewers);
+            core.try_process(&viewers).unwrap();
             core.wait_for_pending_tasks();
-            core.process(&viewers);
+            core.try_process(&viewers).unwrap();
             if core.pending_task_count() == 0 {
                 break;
             }
@@ -741,10 +753,9 @@ mod terrain_parity {
         let total_verts: usize = core
             .mesh_blocks()
             .values()
-            .filter_map(|e| e.output.as_ref())
-            .map(|o| o.total_vertex_count())
+            .filter_map(|entry| entry.accepted_upload())
+            .map(|upload| upload.output().total_vertex_count())
             .sum();
-
         // Pinned golden values for a 48-voxel view distance around origin,
         // measured after full convergence (no pending tasks). 216 mesh blocks,
         // each with a single transvoxel surface, totalling 36864 vertices.

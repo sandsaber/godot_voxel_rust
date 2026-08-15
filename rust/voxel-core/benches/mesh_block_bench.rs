@@ -17,9 +17,11 @@ use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Through
 use std::sync::Arc;
 use voxel_core::engine::MeshingDependency;
 use voxel_core::math::{Box3i, Vector3i};
-use voxel_core::meshers::{MeshBlockTask, MeshBlockTaskParams, TransvoxelMesher};
+use voxel_core::meshers::{
+    MeshBlockKey, MeshBlockLocation, MeshBlockTask, MeshBlockTaskParams, TransvoxelMesher,
+};
 use voxel_core::storage::{ChannelDepth, ChannelId, SharedVoxelData, VoxelData, VoxelFormat};
-use voxel_core::tasks::{ThreadedTask, ThreadedTaskRunner};
+use voxel_core::tasks::{ScheduledTask, TaskLane, ThreadedTask, ThreadedTaskRunner};
 
 /// Build a `SharedVoxelData` whose LOD-0 map has a resident block at the origin
 /// filled with an SDF sphere. The data block size matches the mesh block size
@@ -64,8 +66,10 @@ fn make_concrete_task(data: &Arc<SharedVoxelData>) -> MeshBlockTask {
     let mesher = Arc::new(TransvoxelMesher::new());
     let meshing_dependency = MeshingDependency::new(mesher, None);
     MeshBlockTask::new(MeshBlockTaskParams {
-        position_in_blocks: Vector3i::zero(),
-        lod_index: 0,
+        key: MeshBlockKey {
+            location: MeshBlockLocation::new(Vector3i::zero(), 0),
+            revision: 0,
+        },
         data: data.clone(),
         meshing_dependency,
         collision_hint: false,
@@ -109,12 +113,13 @@ fn bench_multi_block(c: &mut Criterion) {
         &data,
         |b, data| {
             b.iter(|| {
-                let runner = ThreadedTaskRunner::new(4);
-                let tasks: Vec<Box<dyn ThreadedTask>> =
-                    (0..BLOCK_COUNT).map(|_| make_task(data)).collect();
-                runner.enqueue_many(tasks, false);
+                let mut runner = ThreadedTaskRunner::new(4);
+                let tasks = (0..BLOCK_COUNT)
+                    .map(|_| ScheduledTask::new(make_task(data), TaskLane::Parallel));
+                runner.enqueue_many(tasks);
                 runner.wait_for_all_tasks();
-                let _ = runner.drain_completed_tasks();
+                let mut completed = std::collections::VecDeque::new();
+                runner.try_drain_completed_into(&mut completed).unwrap();
                 std::hint::black_box(());
             });
         },

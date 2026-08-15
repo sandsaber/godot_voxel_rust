@@ -152,7 +152,10 @@ impl Surface {
     }
 }
 
-/// Collision geometry a mesher may produce separate from the render mesh.
+/// Collision geometry a mesher may produce independently from visual surfaces.
+/// Explicit [`Self::positions`] and [`Self::indices`] remain valid when the
+/// visual surface list is empty. Alternatively, paired non-negative
+/// `submesh_*_end` values select the regular prefix of the first render surface.
 /// Mirrors `VoxelMesher::Output::CollisionSurface`.
 #[derive(Debug)]
 pub struct CollisionSurface {
@@ -183,12 +186,14 @@ pub struct MesherOutput {
     /// Material-grouped render surfaces.
     pub surfaces: Vec<Surface>,
     /// Optional collision surface (only populated when `collision_hint` is
-    /// set and the mesher produces one).
+    /// set and the mesher produces one). This payload is independent from
+    /// [`Self::surfaces`], so collision-only output is representable.
     pub collision_surface: CollisionSurface,
 }
 
 impl MesherOutput {
-    /// `true` when no render surface carries any geometry.
+    /// `true` when no render surface carries any geometry. Collision geometry
+    /// is intentionally not considered by this visual-only query.
     pub fn is_empty(&self) -> bool {
         self.surfaces.iter().all(Surface::is_empty)
     }
@@ -327,9 +332,10 @@ pub trait VoxelMesher: Send + Sync {
         true
     }
 
-    /// `true` if the mesher emits a separate collision surface in
-    /// [`MesherOutput::collision_surface`]. If `false`, the render mesh may
-    /// be reused as a collider.
+    /// `true` if the mesher populates the collision contract in
+    /// [`MesherOutput::collision_surface`], either with explicit geometry or a
+    /// regular-render-mesh prefix. If `false`, callers may choose to reuse the
+    /// complete render mesh as a collider.
     fn is_generating_collision_surface(&self) -> bool {
         false
     }
@@ -447,6 +453,33 @@ mod tests {
         assert!(cs.indices.is_empty());
         assert_eq!(cs.submesh_vertex_end, -1);
         assert_eq!(cs.submesh_index_end, -1);
+    }
+
+    #[test]
+    fn collision_output_is_preserved_when_visual_surface_is_empty() {
+        struct CollisionOnlyMesher;
+        impl VoxelMesher for CollisionOnlyMesher {
+            fn build(&self, output: &mut MesherOutput, _input: &MesherInput<'_>) {
+                output.collision_surface.positions.extend([
+                    Vector3f::new(0.0, 0.0, 0.0),
+                    Vector3f::new(1.0, 0.0, 0.0),
+                    Vector3f::new(0.0, 1.0, 0.0),
+                ]);
+                output.collision_surface.indices.extend([0, 1, 2]);
+            }
+        }
+
+        let voxels = VoxelBuffer::with_size(Vector3i::splat(2));
+        let mut input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+        input.collision_hint = true;
+        let mut output = MesherOutput::default();
+
+        CollisionOnlyMesher.build(&mut output, &input);
+
+        assert!(output.is_empty());
+        assert!(output.surfaces.is_empty());
+        assert_eq!(output.collision_surface.positions.len(), 3);
+        assert_eq!(output.collision_surface.indices, [0, 1, 2]);
     }
 
     /// Sanity: the trait object can be boxed and dispatched dynamically,

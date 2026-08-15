@@ -7,7 +7,8 @@ use crate::math::Vector3i;
 use crate::storage::{VoxelBuffer, VoxelFormat};
 use crate::streams::{BlockDataOutput, LoadResult, VoxelLoadQuery, VoxelStreamError};
 use crate::tasks::{
-    TaskCancellationToken, TaskPriority, TaskRunOutcome, ThreadedTask, ThreadedTaskContext,
+    ScheduledTask, TaskCancellationToken, TaskPriority, TaskRunStatus, ThreadedTask,
+    ThreadedTaskContext,
 };
 use std::sync::Arc;
 
@@ -19,7 +20,7 @@ pub struct BlockGenerationRequest {
 }
 
 pub enum BlockGenerationTaskResult {
-    Scheduled(Box<dyn ThreadedTask>),
+    Scheduled(ScheduledTask),
     // Boxed: `BlockGenerationRequest` carries a full `VoxelBuffer` (~348 B),
     // which would balloon the enum to ~360 B and starve the `Scheduled` arm.
     // Both arms are now pointer-sized; the extra indirection is negligible
@@ -60,7 +61,7 @@ pub struct LoadBlockDataTask {
     max_lod_hint: bool,
     output: Option<BlockDataOutput>,
     stream_error: Option<VoxelStreamError>,
-    follow_up_tasks: Vec<Box<dyn ThreadedTask>>,
+    follow_up_tasks: Vec<ScheduledTask>,
 }
 
 impl LoadBlockDataTask {
@@ -186,13 +187,11 @@ impl LoadBlockDataTask {
 }
 
 impl ThreadedTask for LoadBlockDataTask {
-    fn run(mut self: Box<Self>, _ctx: ThreadedTaskContext) -> TaskRunOutcome {
+    fn run(&mut self, _ctx: ThreadedTaskContext) -> TaskRunStatus {
         self.run_load();
-        TaskRunOutcome::Complete(self)
-    }
-
-    fn take_follow_up_tasks(&mut self) -> Vec<Box<dyn ThreadedTask>> {
-        std::mem::take(&mut self.follow_up_tasks)
+        TaskRunStatus::Complete {
+            follow_up_tasks: std::mem::take(&mut self.follow_up_tasks),
+        }
     }
 
     fn priority(&mut self) -> TaskPriority {
@@ -235,7 +234,8 @@ mod tests {
         VoxelStreamError,
     };
     use crate::tasks::{
-        TaskCancellationToken, TaskPriority, TaskRunOutcome, ThreadedTask, ThreadedTaskContext,
+        ScheduledTask, TaskCancellationToken, TaskLane, TaskPriority, TaskRunStatus, ThreadedTask,
+        ThreadedTaskContext,
     };
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -256,12 +256,14 @@ mod tests {
     }
 
     impl ThreadedTask for GeneratedMarkerTask {
-        fn run(self: Box<Self>, _ctx: ThreadedTaskContext) -> TaskRunOutcome {
+        fn run(&mut self, _ctx: ThreadedTaskContext) -> TaskRunStatus {
             assert_eq!(self.position_in_blocks, Vector3i::new(3, 4, 5));
             assert_eq!(self.lod_index, 2);
             assert_eq!(self.block_size, 4);
             self.ran.store(true, Ordering::SeqCst);
-            TaskRunOutcome::Complete(self)
+            TaskRunStatus::Complete {
+                follow_up_tasks: Vec::new(),
+            }
         }
     }
 
@@ -281,12 +283,15 @@ mod tests {
                 ChannelDepth::Bit32
             );
             self.calls.fetch_add(1, Ordering::SeqCst);
-            BlockGenerationTaskResult::Scheduled(Box::new(GeneratedMarkerTask {
-                position_in_blocks: request.position_in_blocks,
-                lod_index: request.lod_index,
-                block_size: request.block_size,
-                ran: self.task_ran.clone(),
-            }))
+            BlockGenerationTaskResult::Scheduled(ScheduledTask::new(
+                Box::new(GeneratedMarkerTask {
+                    position_in_blocks: request.position_in_blocks,
+                    lod_index: request.lod_index,
+                    block_size: request.block_size,
+                    ran: self.task_ran.clone(),
+                }),
+                TaskLane::Parallel,
+            ))
         }
     }
 
@@ -398,17 +403,24 @@ mod tests {
         }));
         let mut task = LoadBlockDataTask::new(task_params);
 
-        task.run_load();
-        let follow_up_tasks = task.take_follow_up_tasks();
+        let TaskRunStatus::Complete { follow_up_tasks } =
+            task.run(ThreadedTaskContext::new(0, TaskPriority::max()))
+        else {
+            panic!("load task unexpectedly postponed");
+        };
 
         assert!(task.take_output().is_none());
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(follow_up_tasks.len(), 1);
 
         let follow_up_task = follow_up_tasks.into_iter().next().unwrap();
+        assert_eq!(follow_up_task.lane(), TaskLane::Parallel);
+        let (mut follow_up_task, _) = follow_up_task.into_parts();
         assert!(matches!(
-            follow_up_task.run(ThreadedTaskContext::new(0, TaskPriority::max())),
-            TaskRunOutcome::Complete(_)
+            follow_up_task
+                .as_mut()
+                .run(ThreadedTaskContext::new(0, TaskPriority::max())),
+            TaskRunStatus::Complete { .. }
         ));
         assert!(task_ran.load(Ordering::SeqCst));
     }
@@ -447,7 +459,7 @@ mod tests {
         assert_eq!(output.position_in_blocks, position);
         let voxels = output.voxels.as_ref().unwrap();
         assert_eq!(voxels.size(), Vector3i::new(4, 4, 4));
-        assert!(task.take_follow_up_tasks().is_empty());
+        assert!(task.follow_up_tasks.is_empty());
     }
 
     #[test]

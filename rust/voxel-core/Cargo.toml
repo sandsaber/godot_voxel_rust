@@ -28,6 +28,10 @@ bytemuck = "1"
 # engine FastNoiseLite for the same seed/frequency/type settings.
 fastnoise-lite = "1.1"
 
+# Persistent ordered maps keep transactional variable-LOD coverage previews
+# cheap while preserving deterministic iteration order.
+imbl = "=7.0.1"
+
 # Optional ZSTD support. Off by default so the default build stays pure-Rust;
 # enable for parity with the C++ CompressedData::COMPRESSION_ZSTD path. The
 # `zstd` crate bundles a C library, which is why it lives behind a feature.
@@ -58,4 +62,10 @@ harness = false
 # H2-MT: end-to-end MeshBlockTask throughput (single + multi-threaded paging).
 [[bench]]
 name = "mesh_block_bench"
+harness = false
+
+# Phase E item 7: Variable LOD hot-path benchmarks (steady-state tick,
+# enter-burst tick, packed-array voxel access, buffer lifecycle).
+[[bench]]
+name = "variable_lod_bench"
 harness = false

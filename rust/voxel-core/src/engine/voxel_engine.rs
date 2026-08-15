@@ -387,34 +387,49 @@ impl VoxelEngine {
     }
 
     pub fn push_async_task(&self, task: Box<dyn ThreadedTask>) {
-        self.task_runner.enqueue(task, false);
+        self.task_runner.enqueue(crate::tasks::ScheduledTask::new(
+            task,
+            crate::tasks::TaskLane::Parallel,
+        ));
     }
 
     pub fn push_async_tasks<I>(&self, tasks: I)
     where
         I: IntoIterator<Item = Box<dyn ThreadedTask>>,
     {
-        self.task_runner.enqueue_many(tasks, false);
+        self.task_runner.enqueue_many(
+            tasks.into_iter().map(|task| {
+                crate::tasks::ScheduledTask::new(task, crate::tasks::TaskLane::Parallel)
+            }),
+        );
     }
 
     pub fn push_async_io_task(&self, task: Box<dyn ThreadedTask>) {
-        self.task_runner.enqueue(task, true);
+        self.task_runner.enqueue(crate::tasks::ScheduledTask::new(
+            task,
+            crate::tasks::TaskLane::Serial,
+        ));
     }
 
     pub fn push_async_io_tasks<I>(&self, tasks: I)
     where
         I: IntoIterator<Item = Box<dyn ThreadedTask>>,
     {
-        self.task_runner.enqueue_many(tasks, true);
+        self.task_runner.enqueue_many(
+            tasks
+                .into_iter()
+                .map(|task| crate::tasks::ScheduledTask::new(task, crate::tasks::TaskLane::Serial)),
+        );
     }
 
     pub fn wait_for_all_tasks(&self) {
         self.task_runner.wait_for_all_tasks();
     }
 
-    pub fn wait_and_clear_all_tasks(&self) {
+    pub fn wait_and_clear_all_tasks(&mut self) {
         self.task_runner.wait_for_all_tasks();
-        drop(self.task_runner.drain_completed_tasks());
+        let mut completed = std::collections::VecDeque::new();
+        let _ = self.task_runner.try_drain_completed_into(&mut completed);
     }
 
     pub fn pending_threaded_task_count(&self) -> usize {
@@ -437,12 +452,21 @@ impl VoxelEngine {
             .set_highest_view_distance((max_distance as f32) * 2.0);
     }
 
-    pub fn process(&self) {
-        let completed = self
+    pub fn process(&mut self) {
+        let mut completed = std::collections::VecDeque::new();
+        if self
             .task_runner
-            .drain_completed_tasks_and_enqueue_followups(false);
-        for task in completed {
-            task.apply_result();
+            .try_drain_completed_into(&mut completed)
+            .is_err()
+        {
+            return;
+        }
+        for completed_task in completed {
+            let (task, status, follow_up_tasks) = completed_task.into_generic_parts();
+            self.task_runner.enqueue_many(follow_up_tasks);
+            if status == crate::tasks::TaskCompletionStatus::Finished {
+                task.apply_result();
+            }
         }
         self.sync_viewers_task_priority_data();
     }
@@ -459,7 +483,7 @@ fn default_thread_count() -> usize {
 mod tests {
     use super::{ViewerDistances, VoxelEngine};
     use crate::math::Vector3f;
-    use crate::tasks::{TaskRunOutcome, ThreadedTask, ThreadedTaskContext};
+    use crate::tasks::{ScheduledTask, TaskLane, TaskRunStatus, ThreadedTask, ThreadedTaskContext};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::thread;
@@ -471,9 +495,11 @@ mod tests {
     }
 
     impl ThreadedTask for FlagTask {
-        fn run(self: Box<Self>, _ctx: ThreadedTaskContext) -> TaskRunOutcome {
+        fn run(&mut self, _ctx: ThreadedTaskContext) -> TaskRunStatus {
             self.ran.store(true, Ordering::SeqCst);
-            TaskRunOutcome::Complete(self)
+            TaskRunStatus::Complete {
+                follow_up_tasks: Vec::new(),
+            }
         }
 
         fn apply_result(self: Box<Self>) {
@@ -489,7 +515,7 @@ mod tests {
     }
 
     impl ThreadedTask for SerialCounterTask {
-        fn run(self: Box<Self>, _ctx: ThreadedTaskContext) -> TaskRunOutcome {
+        fn run(&mut self, _ctx: ThreadedTaskContext) -> TaskRunStatus {
             let current = self.current.fetch_add(1, Ordering::SeqCst) + 1;
             let mut previous = self.max.load(Ordering::SeqCst);
             while previous < current {
@@ -506,7 +532,9 @@ mod tests {
             thread::sleep(Duration::from_millis(5));
             self.current.fetch_sub(1, Ordering::SeqCst);
             self.completed.fetch_add(1, Ordering::SeqCst);
-            TaskRunOutcome::Complete(self)
+            TaskRunStatus::Complete {
+                follow_up_tasks: Vec::new(),
+            }
         }
 
         fn apply_result(self: Box<Self>) {
@@ -516,16 +544,36 @@ mod tests {
 
     struct FollowUpParentTask {
         parent_applied: Arc<AtomicBool>,
-        follow_up_tasks: Vec<Box<dyn ThreadedTask>>,
+        follow_up_tasks: Vec<ScheduledTask>,
+    }
+
+    struct CancelledApplyTask {
+        ran: Arc<AtomicBool>,
+        applied: Arc<AtomicBool>,
+    }
+
+    impl ThreadedTask for CancelledApplyTask {
+        fn run(&mut self, _ctx: ThreadedTaskContext) -> TaskRunStatus {
+            self.ran.store(true, Ordering::SeqCst);
+            TaskRunStatus::Complete {
+                follow_up_tasks: Vec::new(),
+            }
+        }
+
+        fn apply_result(self: Box<Self>) {
+            self.applied.store(true, Ordering::SeqCst);
+        }
+
+        fn is_cancelled(&mut self) -> bool {
+            true
+        }
     }
 
     impl ThreadedTask for FollowUpParentTask {
-        fn run(self: Box<Self>, _ctx: ThreadedTaskContext) -> TaskRunOutcome {
-            TaskRunOutcome::Complete(self)
-        }
-
-        fn take_follow_up_tasks(&mut self) -> Vec<Box<dyn ThreadedTask>> {
-            std::mem::take(&mut self.follow_up_tasks)
+        fn run(&mut self, _ctx: ThreadedTaskContext) -> TaskRunStatus {
+            TaskRunStatus::Complete {
+                follow_up_tasks: std::mem::take(&mut self.follow_up_tasks),
+            }
         }
 
         fn apply_result(self: Box<Self>) {
@@ -693,7 +741,7 @@ mod tests {
 
     #[test]
     fn async_io_tasks_run_serially_through_engine() {
-        let engine = VoxelEngine::with_thread_count(4);
+        let mut engine = VoxelEngine::with_thread_count(4);
         let current = Arc::new(AtomicUsize::new(0));
         let max = Arc::new(AtomicUsize::new(0));
         let completed = Arc::new(AtomicUsize::new(0));
@@ -717,18 +765,38 @@ mod tests {
     }
 
     #[test]
+    fn process_does_not_apply_cancelled_task_results() {
+        let mut engine = VoxelEngine::with_thread_count(1);
+        let ran = Arc::new(AtomicBool::new(false));
+        let applied = Arc::new(AtomicBool::new(false));
+        engine.push_async_task(Box::new(CancelledApplyTask {
+            ran: ran.clone(),
+            applied: applied.clone(),
+        }));
+
+        engine.wait_for_all_tasks();
+        engine.process();
+
+        assert!(!ran.load(Ordering::SeqCst));
+        assert!(!applied.load(Ordering::SeqCst));
+    }
+
+    #[test]
     fn process_enqueues_and_applies_follow_up_tasks() {
-        let engine = VoxelEngine::with_thread_count(1);
+        let mut engine = VoxelEngine::with_thread_count(1);
         let parent_applied = Arc::new(AtomicBool::new(false));
         let child_ran = Arc::new(AtomicBool::new(false));
         let child_applied = Arc::new(AtomicBool::new(false));
 
         engine.push_async_task(Box::new(FollowUpParentTask {
             parent_applied: parent_applied.clone(),
-            follow_up_tasks: vec![Box::new(FlagTask {
-                ran: child_ran.clone(),
-                applied: child_applied.clone(),
-            })],
+            follow_up_tasks: vec![ScheduledTask::new(
+                Box::new(FlagTask {
+                    ran: child_ran.clone(),
+                    applied: child_applied.clone(),
+                }),
+                TaskLane::Parallel,
+            )],
         }));
 
         engine.wait_for_all_tasks();
@@ -746,7 +814,7 @@ mod tests {
 
     #[test]
     fn wait_and_clear_all_tasks_drops_completed_tasks_without_applying_results() {
-        let engine = VoxelEngine::with_thread_count(1);
+        let mut engine = VoxelEngine::with_thread_count(1);
         let ran = Arc::new(AtomicBool::new(false));
         let applied = Arc::new(AtomicBool::new(false));
         engine.push_async_task(Box::new(FlagTask {

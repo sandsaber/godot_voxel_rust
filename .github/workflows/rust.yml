@@ -1,6 +1,9 @@
 name: Rust
 
 on:
+  push:
+    branches: [master, "codex/**"]
+  pull_request:
   workflow_dispatch:
 
 concurrency:
@@ -41,13 +44,57 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run tests
-        run: cargo test --workspace
+        run: cargo test --locked --workspace
 
-      - name: Run clippy
-        run: cargo clippy --workspace --all-targets
+      - name: Run clippy (deny warnings)
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
+      - name: Release build
+        run: cargo build --locked --workspace --release
+
+      - name: Manifest gate (voxel-gdext port status)
+        run: cargo test --locked -p voxel-gdext --test port_status
 
       - name: Build workspace
         run: cargo build --workspace
+
+  godot-smoke:
+    runs-on: ubuntu-latest
+    needs: verify
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/git
+            ~/.cargo/registry
+            rust/target
+          key: ${{ runner.os }}-rust-smoke-${{ hashFiles('rust/rust-toolchain.toml', 'rust/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-rust-smoke-
+            ${{ runner.os }}-rust-
+
+      - name: Install pinned Rust toolchain
+        run: rustup show
+
+      - name: Install Godot 4.7 (headless)
+        run: |
+          set -euo pipefail
+          GODOT_VERSION="4.7.1"
+          ARCHIVE="Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip"
+          wget -q "https://github.com/godotengine/godot-builds/releases/download/${GODOT_VERSION}-stable/${ARCHIVE}"
+          unzip -q "${ARCHIVE}" -d godot-bin
+          chmod +x godot-bin/Godot_v${GODOT_VERSION}-stable_linux.x86_64
+          # Expose as `godot` on PATH for the smoke driver.
+          sudo mv "godot-bin/Godot_v${GODOT_VERSION}-stable_linux.x86_64" /usr/local/bin/godot
+          godot --version
+
+      - name: Run Godot smoke tests (5 scenes)
+        run: ./voxel-gdext/smoke_test/run_smoke_test.sh
 
   android-smoke:
     runs-on: ubuntu-latest
@@ -72,25 +119,15 @@ jobs:
       - name: Install pinned Rust toolchain
         run: rustup show
 
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
       - name: Install Android NDK
         run: |
-          ANDROID_SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
-          if [[ -z "$ANDROID_SDK" ]]; then
-            echo "Neither ANDROID_HOME nor ANDROID_SDK_ROOT is set by the runner" >&2
-            exit 1
-          fi
-          SDKMANAGER="${ANDROID_SDK}/cmdline-tools/latest/bin/sdkmanager"
-          if [[ ! -x "$SDKMANAGER" ]]; then
-            SDKMANAGER="${ANDROID_SDK}/cmdline-tools/bin/sdkmanager"
-          fi
-          if [[ ! -x "$SDKMANAGER" ]]; then
-            echo "sdkmanager not found under ${ANDROID_SDK}" >&2
-            find "$ANDROID_SDK" -maxdepth 4 -name sdkmanager -type f >&2 || true
-            exit 1
-          fi
-          yes | "$SDKMANAGER" --licenses >/dev/null
-          "$SDKMANAGER" --install "ndk;${ANDROID_NDK_VERSION}"
-          echo "ANDROID_NDK_HOME=${ANDROID_SDK}/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
+          yes | sdkmanager --licenses >/dev/null
+          sdkmanager --install "ndk;${ANDROID_NDK_VERSION}"
+          SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME}}"
+          echo "ANDROID_NDK_HOME=${SDK_ROOT}/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
 
       - name: Build Android aarch64 GDExtension
         run: ./scripts/android-build.sh

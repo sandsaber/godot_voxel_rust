@@ -99,9 +99,10 @@ impl VoxelMemoryPool {
             // across allocate/recycle — the C++ accounts by the caller-requested
             // `size`, but since Rust recycles an owned Vec we lose that original
             // size, so capacity is the consistent metric.
-            // Poison-resilient lock, matching the rest of the crate: a
-            // poisoned bucket must not cascade into a process abort
-            // (workspace builds with `panic = "abort"`).
+            // Recover from mutex poisoning (a panic in another thread while
+            // holding the bucket lock) rather than propagating it: a poisoned
+            // pool bucket still contains valid recyclable blocks. Matches the
+            // pattern used across the engine (voxel_data, terrain_core, ...).
             let reused = {
                 self.buckets[i]
                     .lock()

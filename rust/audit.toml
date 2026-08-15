@@ -1,0 +1,8 @@
+# cargo-audit config for the rust/ workspace (CI runs with working-directory: rust).
+[advisories]
+ignore = [
+    # Transitive via imbl 7 OrdMap/OrdSet. The unsound API is Bitmap::try_from(&[u8]);
+    # we never construct bitmaps from bytes. No maintained imbl release drops this crate.
+    "RUSTSEC-2025-0167",
+    "RUSTSEC-2026-0247",
+]

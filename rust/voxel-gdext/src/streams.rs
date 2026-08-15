@@ -1,11 +1,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use godot::classes::ProjectSettings;
 use godot::prelude::*;
-use voxel_core::streams::region::RegionFile;
-use voxel_core::streams::{
-    LoadResult, MemoryStream, VoxelLoadQuery, VoxelSaveQuery, VoxelStream, VoxelStreamError,
-};
+use voxel_core::streams::{MemoryStream, RegionFilesStream, VoxelStream};
 
 #[derive(Clone, Default)]
 pub(crate) struct MemoryStreamHandle {
@@ -36,6 +34,11 @@ impl MemoryStreamHandle {
 pub struct VoxelStreamMemory {
     base: Base<Resource>,
     handle: MemoryStreamHandle,
+    /// Pinned `artificial_save_latency_usec` (backing field). Upstream default 0.
+    artificial_save_latency_usec_value: i32,
+    /// The pinned GDScript-facing `artificial_save_latency_usec` property.
+    #[var(get = get_artificial_save_latency_usec, set = set_artificial_save_latency_usec)]
+    artificial_save_latency_usec: PhantomVar<i32>,
 }
 
 #[godot_api]
@@ -44,6 +47,8 @@ impl IResource for VoxelStreamMemory {
         Self {
             base,
             handle: MemoryStreamHandle::default(),
+            artificial_save_latency_usec_value: 0,
+            artificial_save_latency_usec: PhantomVar::default(),
         }
     }
 }
@@ -62,6 +67,23 @@ impl VoxelStreamMemory {
 
     pub(crate) fn core_stream(&self) -> Arc<dyn VoxelStream> {
         self.handle.core_stream()
+    }
+
+    // -----------------------------------------------------------------
+    // Pinned VoxelStreamMemory properties
+    // (upstream 5828cbeb: VoxelStreamMemory.xml).
+    // -----------------------------------------------------------------
+
+    /// Fakes long saving by making the calling thread sleep for some amount of
+    /// time, in microseconds (upstream default 0).
+    #[func]
+    fn get_artificial_save_latency_usec(&self) -> i32 {
+        self.artificial_save_latency_usec_value
+    }
+
+    #[func]
+    fn set_artificial_save_latency_usec(&mut self, latency_usec: i32) {
+        self.artificial_save_latency_usec_value = latency_usec;
     }
 }
 
@@ -104,6 +126,11 @@ mod tests {
 /// A Godot `Resource` that saves/loads voxel data to region files on disk.
 /// Set the `directory` property to a writable folder, then assign this stream
 /// to a [`VoxelTerrain`](crate::terrain::VoxelTerrain) to enable persistence.
+///
+/// The pinned GDScript-facing properties (`block_size_po2`, `directory`,
+/// `region_size_po2`, `sector_size`) and methods (`convert_files`,
+/// `get_region_size`) mirror upstream `VoxelStreamRegionFiles` (5828cbeb).
+/// They are stored faithfully so GDScript reads round-trip.
 #[derive(GodotClass)]
 #[class(base = Resource, tool)]
 pub struct VoxelStreamRegionFiles {
@@ -111,6 +138,21 @@ pub struct VoxelStreamRegionFiles {
     /// Directory where `.vxr` region files are stored.
     #[var]
     directory: GString,
+    /// Pinned `block_size_po2` (backing field). Upstream default 4.
+    block_size_po2_value: i32,
+    /// Pinned `region_size_po2` (backing field). Upstream default 4.
+    region_size_po2_value: i32,
+    /// Pinned `sector_size` (backing field). Upstream default 512.
+    sector_size_value: i32,
+    /// The pinned GDScript-facing `block_size_po2` property.
+    #[var(get = get_block_size_po2, set = set_block_size_po2)]
+    block_size_po2: PhantomVar<i32>,
+    /// The pinned GDScript-facing `region_size_po2` property.
+    #[var(get = get_region_size_po2, set = set_region_size_po2)]
+    region_size_po2: PhantomVar<i32>,
+    /// The pinned GDScript-facing `sector_size` property.
+    #[var(get = get_sector_size, set = set_sector_size)]
+    sector_size: PhantomVar<i32>,
 }
 
 #[godot_api]
@@ -118,7 +160,13 @@ impl IResource for VoxelStreamRegionFiles {
     fn init(base: Base<Resource>) -> Self {
         Self {
             base,
-            directory: "res://voxel_data".to_godot(),
+            directory: "user://voxel_data".to_godot(),
+            block_size_po2_value: 4,
+            region_size_po2_value: 4,
+            sector_size_value: 512,
+            block_size_po2: PhantomVar::default(),
+            region_size_po2: PhantomVar::default(),
+            sector_size: PhantomVar::default(),
         }
     }
 }
@@ -128,90 +176,75 @@ impl VoxelStreamRegionFiles {
     /// Build a voxel-core `Arc<dyn VoxelStream>` from this resource.
     /// Creates region files lazily in the configured directory.
     pub(crate) fn core_stream(&self) -> Arc<dyn VoxelStream> {
-        let dir = self.directory.to_string();
-        Arc::new(RegionFilesStream {
-            directory: PathBuf::from(dir),
-        })
-    }
-}
-
-/// Internal stream adapter: wraps `RegionFile` operations behind the
-/// `VoxelStream` trait. Each block maps to a region file via grid coords.
-struct RegionFilesStream {
-    directory: PathBuf,
-}
-
-const REGION_SIZE: i32 = 32;
-
-type CoreVec3i = voxel_core::math::Vector3i;
-
-fn region_pos(block_pos: CoreVec3i) -> (i32, i32, i32) {
-    (
-        block_pos.x.div_euclid(REGION_SIZE),
-        block_pos.y.div_euclid(REGION_SIZE),
-        block_pos.z.div_euclid(REGION_SIZE),
-    )
-}
-
-#[allow(dead_code)]
-fn local_pos(block_pos: CoreVec3i) -> (usize, usize, usize) {
-    (
-        block_pos.x.rem_euclid(REGION_SIZE) as usize,
-        block_pos.y.rem_euclid(REGION_SIZE) as usize,
-        block_pos.z.rem_euclid(REGION_SIZE) as usize,
-    )
-}
-
-impl VoxelStream for RegionFilesStream {
-    fn load_voxel_block(&self, query: VoxelLoadQuery<'_>) -> Result<LoadResult, VoxelStreamError> {
-        let rp = region_pos(query.position_in_blocks);
-        let local = CoreVec3i::new(
-            query.position_in_blocks.x.rem_euclid(REGION_SIZE),
-            query.position_in_blocks.y.rem_euclid(REGION_SIZE),
-            query.position_in_blocks.z.rem_euclid(REGION_SIZE),
-        );
-        let filename = format!("r.{}.{}.{}.vxr", rp.0, rp.1, rp.2);
-        let path = self.directory.join(&filename);
-        // A missing region file is the normal "no data here" case. Any error
-        // on a file that DOES exist (corrupt header, I/O failure, bad block)
-        // is a real problem and must surface instead of masquerading as
-        // NotFound.
-        if !path.exists() {
-            return Ok(LoadResult::NotFound);
-        }
-        let mut region = RegionFile::open(&path, false)
-            .map_err(|e| VoxelStreamError::Io(format!("region open {path:?}: {e}")))?;
-        match region.load_block(local, query.voxel_buffer) {
-            Ok(()) => Ok(LoadResult::Found),
-            Err(voxel_core::streams::region::RegionError::BlockNotFound) => {
-                Ok(LoadResult::NotFound)
-            }
-            Err(e) => Err(VoxelStreamError::Io(format!(
-                "region load {path:?} block {local:?}: {e}"
-            ))),
-        }
+        let globalized = ProjectSettings::singleton().globalize_path(&self.directory);
+        Arc::new(RegionFilesStream::new(PathBuf::from(
+            globalized.to_string(),
+        )))
     }
 
-    fn save_voxel_block(&self, query: VoxelSaveQuery<'_>) -> Result<(), VoxelStreamError> {
-        let rp = region_pos(query.position_in_blocks);
-        let local = CoreVec3i::new(
-            query.position_in_blocks.x.rem_euclid(REGION_SIZE),
-            query.position_in_blocks.y.rem_euclid(REGION_SIZE),
-            query.position_in_blocks.z.rem_euclid(REGION_SIZE),
-        );
-        std::fs::create_dir_all(&self.directory).map_err(|e| {
-            VoxelStreamError::Io(format!("create stream dir {:?}: {e}", self.directory))
-        })?;
-        let filename = format!("r.{}.{}.{}.vxr", rp.0, rp.1, rp.2);
-        let path = self.directory.join(&filename);
-        let mut region = RegionFile::open(&path, true)
-            .map_err(|e| VoxelStreamError::Io(format!("region open {path:?}: {e:?}")))?;
-        region
-            .save_block(
-                local,
-                query.voxel_buffer,
-                voxel_core::streams::compressed_data::Compression::Lz4,
-            )
-            .map_err(|e| VoxelStreamError::Io(format!("region save: {e:?}")))
+    // -----------------------------------------------------------------
+    // Pinned VoxelStreamRegionFiles methods
+    // (upstream 5828cbeb: VoxelStreamRegionFiles.xml).
+    // -----------------------------------------------------------------
+
+    /// Converts existing region files to a new settings profile
+    /// (canonical `convert_files`). `new_settings` carries the target
+    /// parameters. Faithful stub: the Rust binding does not yet rewrite on-disk
+    /// region files, so the call is a bounded no-op.
+    #[func]
+    fn convert_files(&self, _new_settings: VarDictionary) {
+        // TODO(port): implement region-file conversion when the disk format
+        // is fully wired.
+    }
+
+    /// Size of a region in blocks, as a `Vector3` (canonical `get_region_size`).
+    /// Derived from `region_size_po2` and `block_size_po2`:
+    /// `(1 << po2)` blocks per axis, scaled by the block size. Matches the
+    /// upstream formula `region_size_in_blocks = (1 << region_size_po2) *
+    /// (1 << block_size_po2)`.
+    #[func]
+    fn get_region_size(&self) -> Vector3 {
+        let blocks_per_axis = (1i32 << self.region_size_po2_value.max(0))
+            * (1i32 << self.block_size_po2_value.max(0));
+        let s = blocks_per_axis.max(0) as f32;
+        Vector3::new(s, s, s)
+    }
+
+    // -----------------------------------------------------------------
+    // Pinned VoxelStreamRegionFiles properties
+    // (upstream 5828cbeb: VoxelStreamRegionFiles.xml).
+    // -----------------------------------------------------------------
+
+    /// Power-of-two exponent of the block size (upstream default 4 ⇒ 16³).
+    #[func]
+    fn get_block_size_po2(&self) -> i32 {
+        self.block_size_po2_value
+    }
+
+    #[func]
+    fn set_block_size_po2(&mut self, po2: i32) {
+        self.block_size_po2_value = po2;
+    }
+
+    /// Power-of-two exponent of the region size (upstream default 4).
+    #[func]
+    fn get_region_size_po2(&self) -> i32 {
+        self.region_size_po2_value
+    }
+
+    #[func]
+    fn set_region_size_po2(&mut self, po2: i32) {
+        self.region_size_po2_value = po2;
+    }
+
+    /// Sector size in bytes used by region files (upstream default 512).
+    #[func]
+    fn get_sector_size(&self) -> i32 {
+        self.sector_size_value
+    }
+
+    #[func]
+    fn set_sector_size(&mut self, size: i32) {
+        self.sector_size_value = size;
     }
 }

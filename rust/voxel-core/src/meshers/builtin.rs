@@ -135,6 +135,19 @@ impl<'a> RegularMesherInput for VoxelBufferTransvoxelInput<'a> {
     }
 }
 
+fn checked_regular_collision_prefix_ends(
+    vertex_count: usize,
+    index_count: usize,
+) -> Option<(i32, i32)> {
+    if index_count == 0 {
+        return None;
+    }
+    Some((
+        i32::try_from(vertex_count).ok()?,
+        i32::try_from(index_count).ok()?,
+    ))
+}
+
 /// Smooth (SDF) terrain mesher wrapping the transvoxel regular-cell path.
 ///
 /// Produces one [`Surface`] per `build` call (single material, index 0).
@@ -195,6 +208,19 @@ impl VoxelMesher for TransvoxelMesher {
                 &mut cache.borrow_mut(),
                 &mut arrays,
             );
+            // Collision uses only the regular mesh prefix. Transition geometry
+            // is appended below for rendering, but must never enter physics.
+            // Keep the default -1 sentinels if the prefix is empty or cannot be
+            // represented by the C++-compatible i32 range contract.
+            if input.collision_hint {
+                if let Some((vertex_end, index_end)) = checked_regular_collision_prefix_ends(
+                    arrays.vertices.len(),
+                    arrays.indices.len(),
+                ) {
+                    output.collision_surface.submesh_vertex_end = vertex_end;
+                    output.collision_surface.submesh_index_end = index_end;
+                }
+            }
             // M2.2: build transition meshes on all 6 faces when LOD transitions
             // are needed (lod_hint = true). Transition verts are appended to the
             // same MeshArrays, producing a watertight surface across LOD seams.
@@ -210,10 +236,6 @@ impl VoxelMesher for TransvoxelMesher {
                 }
             }
         });
-        if input.collision_hint && !arrays.indices.is_empty() {
-            output.collision_surface.submesh_vertex_end = arrays.vertices.len() as i32;
-            output.collision_surface.submesh_index_end = arrays.indices.len() as i32;
-        }
         // Even an empty transvoxel run produces a surface (zero triangles);
         // match C++ which always emits the surface and lets the caller drop
         // empty ones.
@@ -636,7 +658,8 @@ fn build_blocky_into(
 #[cfg(test)]
 mod tests {
     use super::{
-        BlockyMesher, CubesColorMode, CubesMesher, TransvoxelMesher, TRANSVOXEL_SAMPLE_COUNT,
+        checked_regular_collision_prefix_ends, BlockyMesher, CubesColorMode, CubesMesher,
+        TransvoxelMesher, TRANSVOXEL_SAMPLE_COUNT,
     };
     use crate::constants::cube_tables::{Side, CORNER_POSITION, SIDE_CORNERS, SIDE_QUAD_TRIANGLES};
     use crate::math::{Vector2f, Vector3f, Vector3i};
@@ -791,6 +814,85 @@ mod tests {
         assert!(output.total_triangle_count() > 0);
         assert!(output.collision_surface.submesh_vertex_end > 0);
         assert!(output.collision_surface.submesh_index_end > 0);
+    }
+
+    #[test]
+    fn checked_collision_prefix_preserves_absent_sentinels_for_empty_or_overflow() {
+        assert_eq!(checked_regular_collision_prefix_ends(8, 0), None);
+        assert_eq!(
+            checked_regular_collision_prefix_ends(12, 18),
+            Some((12, 18))
+        );
+
+        let too_large = (i32::MAX as usize) + 1;
+        assert_eq!(checked_regular_collision_prefix_ends(too_large, 18), None);
+        assert_eq!(checked_regular_collision_prefix_ends(12, too_large), None);
+    }
+
+    #[test]
+    fn collision_prefix_excludes_transition_indices() {
+        let mesher = TransvoxelMesher::new();
+        let voxels = sphere_buffer(16, 12.0);
+        let mut input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+        input.collision_hint = true;
+        input.lod_hint = true;
+
+        let mut output = MesherOutput::default();
+        mesher.build(&mut output, &input);
+
+        let arrays = match &output.surfaces[0].arrays {
+            SurfaceArrays::Transvoxel(arrays) => arrays,
+            _ => unreachable!(),
+        };
+        let vertex_end = usize::try_from(output.collision_surface.submesh_vertex_end).unwrap();
+        let index_end = usize::try_from(output.collision_surface.submesh_index_end).unwrap();
+        assert!(arrays.vertices.len() > vertex_end);
+        assert!(arrays.indices.len() > index_end);
+        assert!(arrays.indices[..index_end]
+            .iter()
+            .all(|&index| usize::try_from(index).is_ok_and(|index| index < vertex_end)));
+    }
+
+    #[test]
+    fn every_transvoxel_vertex_has_one_custom0_rgba() {
+        let mesher = TransvoxelMesher::new();
+        let voxels = sphere_buffer(16, 12.0);
+        let mut input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+        input.lod_hint = true;
+
+        let mut output = MesherOutput::default();
+        mesher.build(&mut output, &input);
+
+        let arrays = match &output.surfaces[0].arrays {
+            SurfaceArrays::Transvoxel(arrays) => arrays,
+            _ => unreachable!(),
+        };
+        let custom0 = arrays
+            .lod_data
+            .iter()
+            .copied()
+            .map(|attrib| attrib.custom0_rgba())
+            .collect::<Vec<_>>();
+        assert_eq!(custom0.len(), arrays.vertices.len());
+    }
+
+    #[test]
+    fn empty_transvoxel_collision_prefix_keeps_absent_sentinels() {
+        let mesher = TransvoxelMesher::new();
+        let mut voxels = VoxelBuffer::with_size(Vector3i::splat(16));
+        let mut format = VoxelFormat::new();
+        format.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        format.configure_buffer(&mut voxels);
+        let mut input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+        input.collision_hint = true;
+        input.lod_hint = true;
+
+        let mut output = MesherOutput::default();
+        mesher.build(&mut output, &input);
+
+        assert!(output.is_empty());
+        assert_eq!(output.collision_surface.submesh_vertex_end, -1);
+        assert_eq!(output.collision_surface.submesh_index_end, -1);
     }
 
     /// Vertex positions should land in world space (origin_in_voxels offset

@@ -1,0 +1,42 @@
+name: Rust Audit
+
+# Phase E: scheduled dependency audit for known vulnerabilities.
+# Runs `cargo audit` against the workspace lockfile weekly.
+on:
+  schedule:
+    # Weekly, Saturday 03:00 UTC.
+    - cron: "0 3 * * 6"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "rust/Cargo.lock"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup show
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked || true
+
+      - name: Run cargo audit
+        # bitmaps is an imbl 7 transitive dep (OrdMap/OrdSet). The unsound API
+        # is Bitmap::try_from(&[u8]), which this workspace never calls. There
+        # is no maintained imbl release that drops the crate. See rust/audit.toml.
+        run: >
+          cargo audit --deny warnings --file Cargo.lock
+          --ignore RUSTSEC-2025-0167
+          --ignore RUSTSEC-2026-0247
