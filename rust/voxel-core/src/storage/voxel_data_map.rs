@@ -11,6 +11,7 @@ use std::collections::HashMap;
 #[derive(Debug)]
 pub struct VoxelDataMap {
     blocks: HashMap<Vector3i, VoxelDataBlock>,
+    key_revisions: HashMap<Vector3i, u64>,
     lod_index: u8,
     format: VoxelFormat,
 }
@@ -27,6 +28,7 @@ impl VoxelDataMap {
         );
         Self {
             blocks: HashMap::new(),
+            key_revisions: HashMap::new(),
             lod_index,
             format: VoxelFormat::new(),
         }
@@ -209,10 +211,43 @@ impl VoxelDataMap {
 
     pub fn clear(&mut self) {
         self.blocks.clear();
+        self.key_revisions.clear();
     }
 
     pub fn block_count(&self) -> usize {
         self.blocks.len()
+    }
+
+    pub fn try_reserve(
+        &mut self,
+        additional: usize,
+    ) -> Result<(), std::collections::TryReserveError> {
+        self.blocks.try_reserve(additional)
+    }
+
+    pub(crate) fn key_revision(&self, block_pos: Vector3i) -> u64 {
+        self.key_revisions.get(&block_pos).copied().unwrap_or(0)
+    }
+
+    pub(crate) fn try_reserve_key_revisions(
+        &mut self,
+        additional: usize,
+    ) -> Result<(), std::collections::TryReserveError> {
+        self.key_revisions.try_reserve(additional)
+    }
+
+    pub(crate) fn commit_key_revision(&mut self, block_pos: Vector3i, revision: u64) {
+        debug_assert_eq!(
+            self.key_revision(block_pos).checked_add(1),
+            Some(revision),
+            "key revisions must advance exactly once"
+        );
+        self.key_revisions.insert(block_pos, revision);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_key_revision_for_test(&mut self, block_pos: Vector3i, revision: u64) {
+        self.key_revisions.insert(block_pos, revision);
     }
 
     pub fn block_positions(&self) -> impl Iterator<Item = Vector3i> + '_ {
@@ -651,6 +686,19 @@ mod tests {
             block.voxels().channel_depth(ChannelId::Sdf.index()),
             ChannelDepth::Bit32
         );
+    }
+
+    #[test]
+    fn explicit_reservation_preserves_existing_blocks() {
+        let mut map = VoxelDataMap::new(0);
+        let position = Vector3i::new(-3, 2, 9);
+        map.set_empty_block(position, false);
+
+        map.try_reserve(32).unwrap();
+
+        assert!(map.has_block(position));
+        map.set_empty_block(Vector3i::new(7, -4, 5), false);
+        assert_eq!(map.block_count(), 2);
     }
 
     #[test]

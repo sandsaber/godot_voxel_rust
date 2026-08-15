@@ -13,7 +13,10 @@ pub mod transvoxel;
 pub mod voxel_mesher;
 
 pub use builtin::{BlockyMesher, CubesMesher, TransvoxelMesher};
-pub use mesh_block_task::{gather_voxels_cpu, BlockMeshOutput, MeshBlockTask, MeshBlockTaskParams};
+pub use mesh_block_task::{
+    gather_voxels_cpu, BlockMeshOutput, MeshBlockKey, MeshBlockLocation, MeshBlockTask,
+    MeshBlockTaskOutput, MeshBlockTaskParams, MeshBuildFeatures, MeshUploadSnapshot, PayloadState,
+};
 pub use voxel_mesher::{
     CollisionSurface, MeshArraysPool, MesherInput, MesherOutput, SharedVoxelMesher, Surface,
     SurfaceArrays, VoxelMesher,

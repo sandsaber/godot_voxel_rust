@@ -230,6 +230,23 @@ impl Default for ChannelData {
 }
 
 impl ChannelData {
+    fn try_clone(&self) -> Result<Self, std::collections::TryReserveError> {
+        macro_rules! clone_vec {
+            ($source:expr, $variant:ident) => {{
+                let mut copy = Vec::new();
+                copy.try_reserve_exact($source.len())?;
+                copy.extend_from_slice($source);
+                Self::$variant(copy)
+            }};
+        }
+        Ok(match self {
+            Self::U8(values) => clone_vec!(values, U8),
+            Self::U16(values) => clone_vec!(values, U16),
+            Self::U32(values) => clone_vec!(values, U32),
+            Self::U64(values) => clone_vec!(values, U64),
+        })
+    }
+
     /// Allocate a typed buffer of `len` voxels for `depth`, zero-initialised.
     /// Used when decompressing a uniform channel into a full array.
     #[inline]
@@ -769,6 +786,289 @@ impl VoxelBuffer {
         }
     }
 
+    /// Mirror a channel along the given axis (0=X, 1=Y, 2=Z).
+    /// Matches upstream `mirror(channel, axis)`.
+    pub fn mirror(&mut self, channel_index: usize, axis: usize) {
+        let axis = axis.min(2);
+        if self.channels[channel_index].compression == Compression::Uniform {
+            return; // uniform channels are already mirrored
+        }
+        self.decompress_channel(channel_index);
+        let size = self.size;
+        let data = &mut self.channels[channel_index].data;
+        match axis {
+            0 => {
+                // Mirror X: swap (x,y,z) <-> (sx-1-x,y,z)
+                for z in 0..size.z {
+                    for y in 0..size.y {
+                        for x in 0..size.x / 2 {
+                            let i_a = voxel_index(size, x as usize, y as usize, z as usize);
+                            let i_b = voxel_index(
+                                size,
+                                (size.x - 1 - x) as usize,
+                                y as usize,
+                                z as usize,
+                            );
+                            let a = data.get_u64(i_a);
+                            let b = data.get_u64(i_b);
+                            data.set_u64(i_a, b);
+                            data.set_u64(i_b, a);
+                        }
+                    }
+                }
+            }
+            1 => {
+                for z in 0..size.z {
+                    for y in 0..size.y / 2 {
+                        for x in 0..size.x {
+                            let i_a = voxel_index(size, x as usize, y as usize, z as usize);
+                            let i_b = voxel_index(
+                                size,
+                                x as usize,
+                                (size.y - 1 - y) as usize,
+                                z as usize,
+                            );
+                            let a = data.get_u64(i_a);
+                            let b = data.get_u64(i_b);
+                            data.set_u64(i_a, b);
+                            data.set_u64(i_b, a);
+                        }
+                    }
+                }
+            }
+            _ => {
+                for z in 0..size.z / 2 {
+                    for y in 0..size.y {
+                        for x in 0..size.x {
+                            let i_a = voxel_index(size, x as usize, y as usize, z as usize);
+                            let i_b = voxel_index(
+                                size,
+                                x as usize,
+                                y as usize,
+                                (size.z - 1 - z) as usize,
+                            );
+                            let a = data.get_u64(i_a);
+                            let b = data.get_u64(i_b);
+                            data.set_u64(i_a, b);
+                            data.set_u64(i_b, a);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Rotate a channel 90° around the given axis (0=X, 1=Y, 2=Z), clockwise.
+    /// Matches upstream `rotate_90(channel, axis, clockwise)`.
+    pub fn rotate_90(&mut self, channel_index: usize, axis: usize, clockwise: bool) {
+        let axis = axis.min(2);
+        if self.channels[channel_index].compression == Compression::Uniform {
+            return;
+        }
+        self.decompress_channel(channel_index);
+        let size = self.size;
+        let data = &mut self.channels[channel_index].data;
+        let old_values: Vec<u64> = (0..(size.x as usize * size.y as usize * size.z as usize))
+            .map(|i| data.get_u64(i))
+            .collect();
+        match axis {
+            0 => {
+                // Rotate in the YZ plane
+                for z in 0..size.z {
+                    for y in 0..size.y {
+                        let (ny, nz) = if clockwise {
+                            (size.z - 1 - z, y)
+                        } else {
+                            (z, size.y - 1 - y)
+                        };
+                        for x in 0..size.x {
+                            let old_i = voxel_index(size, x as usize, y as usize, z as usize);
+                            let new_i = voxel_index(size, x as usize, ny as usize, nz as usize);
+                            data.set_u64(new_i, old_values[old_i]);
+                        }
+                    }
+                }
+            }
+            1 => {
+                // Rotate in the XZ plane
+                for z in 0..size.z {
+                    for x in 0..size.x {
+                        let (nx, nz) = if clockwise {
+                            (size.z - 1 - z, x)
+                        } else {
+                            (z, size.x - 1 - x)
+                        };
+                        for y in 0..size.y {
+                            let old_i = voxel_index(size, x as usize, y as usize, z as usize);
+                            let new_i = voxel_index(size, nx as usize, y as usize, nz as usize);
+                            data.set_u64(new_i, old_values[old_i]);
+                        }
+                    }
+                }
+            }
+            _ => {
+                // Rotate in the XY plane
+                for y in 0..size.y {
+                    for x in 0..size.x {
+                        let (nx, ny) = if clockwise {
+                            (size.y - 1 - y, x)
+                        } else {
+                            (y, size.x - 1 - x)
+                        };
+                        for z in 0..size.z {
+                            let old_i = voxel_index(size, x as usize, y as usize, z as usize);
+                            let new_i = voxel_index(size, nx as usize, ny as usize, z as usize);
+                            data.set_u64(new_i, old_values[old_i]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Buffer-level op: add another buffer's values to this one (per-channel).
+    /// Matches upstream `op_add_buffer_f`.
+    pub fn op_add_buffer_f(&mut self, other: &VoxelBuffer, channel_index: usize) {
+        if self.size != other.size {
+            return;
+        }
+        self.decompress_channel(channel_index);
+        let data = &mut self.channels[channel_index].data;
+        let depth = self.channels[channel_index].depth;
+        let (sx, sy, sz) = (
+            self.size.x as usize,
+            self.size.y as usize,
+            self.size.z as usize,
+        );
+        for z in 0..sz {
+            for y in 0..sy {
+                for x in 0..sx {
+                    let i = voxel_index(self.size, x, y, z);
+                    let a = raw_voxel_to_real(data.get_u64(i), depth);
+                    let b = other.get_voxel_f(x as i32, y as i32, z as i32, channel_index);
+                    data.set_u64(i, real_to_raw_voxel(a + b, depth));
+                }
+            }
+        }
+    }
+
+    /// Buffer-level op: subtract another buffer's values from this one.
+    pub fn op_sub_buffer_f(&mut self, other: &VoxelBuffer, channel_index: usize) {
+        if self.size != other.size {
+            return;
+        }
+        self.decompress_channel(channel_index);
+        let data = &mut self.channels[channel_index].data;
+        let depth = self.channels[channel_index].depth;
+        let (sx, sy, sz) = (
+            self.size.x as usize,
+            self.size.y as usize,
+            self.size.z as usize,
+        );
+        for z in 0..sz {
+            for y in 0..sy {
+                for x in 0..sx {
+                    let i = voxel_index(self.size, x, y, z);
+                    let a = raw_voxel_to_real(data.get_u64(i), depth);
+                    let b = other.get_voxel_f(x as i32, y as i32, z as i32, channel_index);
+                    data.set_u64(i, real_to_raw_voxel(a - b, depth));
+                }
+            }
+        }
+    }
+
+    /// Buffer-level op: element-wise minimum.
+    pub fn op_min_buffer_f(&mut self, other: &VoxelBuffer, channel_index: usize) {
+        if self.size != other.size {
+            return;
+        }
+        self.decompress_channel(channel_index);
+        let data = &mut self.channels[channel_index].data;
+        let depth = self.channels[channel_index].depth;
+        let (sx, sy, sz) = (
+            self.size.x as usize,
+            self.size.y as usize,
+            self.size.z as usize,
+        );
+        for z in 0..sz {
+            for y in 0..sy {
+                for x in 0..sx {
+                    let i = voxel_index(self.size, x, y, z);
+                    let a = raw_voxel_to_real(data.get_u64(i), depth);
+                    let b = other.get_voxel_f(x as i32, y as i32, z as i32, channel_index);
+                    data.set_u64(i, real_to_raw_voxel(a.min(b), depth));
+                }
+            }
+        }
+    }
+
+    /// Buffer-level op: element-wise maximum.
+    pub fn op_max_buffer_f(&mut self, other: &VoxelBuffer, channel_index: usize) {
+        if self.size != other.size {
+            return;
+        }
+        self.decompress_channel(channel_index);
+        let data = &mut self.channels[channel_index].data;
+        let depth = self.channels[channel_index].depth;
+        let (sx, sy, sz) = (
+            self.size.x as usize,
+            self.size.y as usize,
+            self.size.z as usize,
+        );
+        for z in 0..sz {
+            for y in 0..sy {
+                for x in 0..sx {
+                    let i = voxel_index(self.size, x, y, z);
+                    let a = raw_voxel_to_real(data.get_u64(i), depth);
+                    let b = other.get_voxel_f(x as i32, y as i32, z as i32, channel_index);
+                    data.set_u64(i, real_to_raw_voxel(a.max(b), depth));
+                }
+            }
+        }
+    }
+
+    /// Paste another buffer into this one at the given offset.
+    /// Matches upstream `paste(src, src_min, dst_min, channel_mask)`.
+    pub fn paste(
+        &mut self,
+        src: &VoxelBuffer,
+        src_min: Vector3i,
+        dst_min: Vector3i,
+        channel_mask: u8,
+    ) {
+        let dst_size = self.size;
+        let src_size = src.size;
+        for ci in 0..MAX_CHANNELS {
+            if channel_mask & (1 << ci) == 0 {
+                continue;
+            }
+            self.decompress_channel(ci);
+            for dz in 0..src_size.z {
+                let sz = dz + src_min.z;
+                let dz_dst = dz + dst_min.z - src_min.z;
+                if dz_dst < 0 || dz_dst >= dst_size.z {
+                    continue;
+                }
+                for dy in 0..src_size.y {
+                    let sy = dy + src_min.y;
+                    let dy_dst = dy + dst_min.y - src_min.y;
+                    if dy_dst < 0 || dy_dst >= dst_size.y {
+                        continue;
+                    }
+                    for dx in 0..src_size.x {
+                        let sx = dx + src_min.x;
+                        let dx_dst = dx + dst_min.x - src_min.x;
+                        if dx_dst < 0 || dx_dst >= dst_size.x {
+                            continue;
+                        }
+                        let val = src.get_voxel(sx, sy, sz, ci);
+                        self.set_voxel(val, dx_dst, dy_dst, dz_dst, ci);
+                    }
+                }
+            }
+        }
+    }
+
     /// Raw bytes of a channel (decompressed). Matches `get_channel_as_bytes`.
     /// Decompresses if needed. Returns a LE byte view over the typed storage
     /// (see [`ChannelData::as_bytes_mut`]) — wire-format-stable.
@@ -850,6 +1150,26 @@ impl VoxelBuffer {
         }
         self.copy_to(&mut dst);
         dst
+    }
+
+    /// Fallible deep copy used by transactional persistence preparation.
+    /// Every dense channel reserves its exact typed element count before any
+    /// source bytes are copied, so allocation failure remains a recoverable
+    /// pre-publication error instead of aborting the process.
+    pub(crate) fn try_copy_to_owned(
+        &self,
+    ) -> Result<VoxelBuffer, std::collections::TryReserveError> {
+        let mut dst = VoxelBuffer::new(self.allocator);
+        dst.size = self.size;
+        dst.pool = self.pool.clone();
+        for (source, target) in self.channels.iter().zip(dst.channels.iter_mut()) {
+            target.data = source.data.try_clone()?;
+            target.defval = source.defval;
+            target.depth = source.depth;
+            target.compression = source.compression;
+            target.size_in_bytes = source.size_in_bytes;
+        }
+        Ok(dst)
     }
 
     /// Copy a rectangular area of one channel from `other`. Matches the C++

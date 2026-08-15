@@ -13,10 +13,12 @@ use voxel_core::engine::MeshingDependency;
 use voxel_core::generators::base::{VoxelGenerator, VoxelQueryData};
 use voxel_core::math::{Box3i, Vector3i};
 use voxel_core::meshers::{
-    BlockMeshOutput, MeshBlockTask, MeshBlockTaskParams, MesherOutput, Surface, SurfaceArrays,
-    VoxelMesher,
+    MeshBlockKey, MeshBlockLocation, MeshBlockTask, MeshBlockTaskOutput, MeshBlockTaskParams,
+    MesherOutput, Surface, SurfaceArrays, VoxelMesher,
 };
-use voxel_core::storage::{ChannelDepth, ChannelId, SharedVoxelData, VoxelData, VoxelFormat};
+use voxel_core::storage::{
+    ChannelDepth, ChannelId, SharedVoxelData, VoxelBuffer, VoxelData, VoxelDataBlock, VoxelFormat,
+};
 
 /// A generator that produces a sphere SDF centred at the origin. This is the
 /// same generator used by `tests/transvoxel_sphere.rs`, reimplemented here to
@@ -115,22 +117,27 @@ impl VoxelMesher for ThresholdMesher {
     }
 }
 
-fn sphere_pipeline(radius: f32, mesh_block_pos: Vector3i) -> BlockMeshOutput {
+fn sphere_pipeline(radius: f32, mesh_block_pos: Vector3i) -> MeshBlockTaskOutput {
     // 1) Set up VoxelData configured for SDF-only generation. The bounds are
     //    generous so the mesh block and its 3x3x3 neighbours all sit inside.
     let mut data = VoxelData::new();
     let mut format = VoxelFormat::new();
     format.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
     data.set_format(format);
-    data.set_bounds(Box3i::new(Vector3i::splat(-256), Vector3i::splat(512)));
+    data.set_bounds(Box3i::new(Vector3i::splat(-1024), Vector3i::splat(2048)));
     data.set_streaming_enabled(false);
     data.set_full_load_completed(true);
-    // Materialise the central block by editing a single voxel inside it.
-    data.try_set_voxel_f(
-        -1.0,
-        mesh_block_pos * 16 + Vector3i::new(1, 1, 1),
-        ChannelId::Sdf.index(),
-    );
+    // Materialise the central block with the same generator used for missing
+    // in-bound neighbours. A single edited negative voxel would create an
+    // artificial surface in blocks that are actually far outside the sphere.
+    let mut central = VoxelBuffer::with_size(Vector3i::splat(16));
+    data.format().configure_buffer(&mut central);
+    SphereGenerator { radius }.generate_block(VoxelQueryData {
+        buffer: &mut central,
+        origin_in_voxels: mesh_block_pos * 16,
+        lod: 0,
+    });
+    assert!(data.try_set_block(mesh_block_pos, VoxelDataBlock::with_voxels(central, 0),));
 
     let data_handle = Arc::new(SharedVoxelData::new(data));
 
@@ -142,8 +149,10 @@ fn sphere_pipeline(radius: f32, mesh_block_pos: Vector3i) -> BlockMeshOutput {
 
     // 3) Run a MeshBlockTask at the requested position.
     let mut task = MeshBlockTask::new(MeshBlockTaskParams {
-        position_in_blocks: mesh_block_pos,
-        lod_index: 0,
+        key: MeshBlockKey {
+            location: MeshBlockLocation::new(mesh_block_pos, 0),
+            revision: 0,
+        },
         data: data_handle,
         meshing_dependency,
         collision_hint: false,
@@ -158,14 +167,14 @@ fn sphere_pipeline(radius: f32, mesh_block_pos: Vector3i) -> BlockMeshOutput {
 fn pipeline_produces_non_empty_mesh_for_origin_centred_sphere() {
     let output = sphere_pipeline(8.0, Vector3i::zero());
 
-    assert!(!output.dropped, "dependency should still be valid");
-    assert_eq!(output.lod_index, 0);
+    assert!(!output.dropped(), "dependency should still be valid");
+    assert_eq!(output.upload().key().location.lod_index, 0);
     assert!(
-        output.surfaces.total_triangle_count() > 0,
+        output.upload().output().total_triangle_count() > 0,
         "expected non-empty mesh for an 8-voxel-radius sphere at the origin"
     );
     assert!(
-        output.surfaces.total_vertex_count() > 0,
+        output.upload().output().total_vertex_count() > 0,
         "expected vertices in the mesh"
     );
 }
@@ -176,9 +185,9 @@ fn pipeline_empty_mesh_for_block_far_outside_sphere() {
     // geometry (the SDF never crosses zero there).
     let output = sphere_pipeline(8.0, Vector3i::new(50, 0, 0));
 
-    assert!(!output.dropped);
+    assert!(!output.dropped());
     assert_eq!(
-        output.surfaces.total_triangle_count(),
+        output.upload().output().total_triangle_count(),
         0,
         "expected empty mesh for a block well outside the sphere"
     );
@@ -198,8 +207,10 @@ fn pipeline_dropped_output_when_dependency_invalidated() {
     let meshing_dependency = MeshingDependency::new(mesher, None);
 
     let mut task = MeshBlockTask::new(MeshBlockTaskParams {
-        position_in_blocks: Vector3i::zero(),
-        lod_index: 0,
+        key: MeshBlockKey {
+            location: MeshBlockLocation::new(Vector3i::zero(), 0),
+            revision: 0,
+        },
         data: data_handle,
         meshing_dependency: meshing_dependency.clone(),
         collision_hint: false,
@@ -210,8 +221,8 @@ fn pipeline_dropped_output_when_dependency_invalidated() {
     task.run_meshing();
 
     let output = task.take_output().unwrap();
-    assert!(output.dropped);
-    assert!(output.surfaces.is_empty());
+    assert!(output.dropped());
+    assert!(output.upload().output().is_empty());
 }
 
 #[test]
@@ -219,7 +230,7 @@ fn pipeline_surfaces_are_transvoxel_arrays() {
     // Sanity: the output surface variant matches what the mesher emitted.
     let output = sphere_pipeline(8.0, Vector3i::zero());
     assert!(matches!(
-        output.surfaces.surfaces[0].arrays,
+        output.upload().output().surfaces[0].arrays,
         SurfaceArrays::Transvoxel(_)
     ));
 }
@@ -231,7 +242,7 @@ fn pipeline_vertex_positions_are_in_world_space() {
     // mesh block's voxel range (a basic correctness contract for downstream
     // rendering / collision).
     let output = sphere_pipeline(8.0, Vector3i::zero());
-    let arrays = match &output.surfaces.surfaces[0].arrays {
+    let arrays = match &output.upload().output().surfaces[0].arrays {
         SurfaceArrays::Transvoxel(a) => a,
         _ => unreachable!(),
     };

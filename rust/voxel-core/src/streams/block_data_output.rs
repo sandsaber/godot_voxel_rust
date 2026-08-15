@@ -184,4 +184,21 @@ mod tests {
         assert!(saved.voxels.is_none());
         assert!(!saved.had_voxels);
     }
+
+    #[test]
+    fn legacy_struct_literal_remains_source_compatible() {
+        let output = BlockDataOutput {
+            kind: BlockDataOutputKind::Saved,
+            voxels: None,
+            position_in_blocks: Vector3i::new(4, 5, 6),
+            lod_index: 2,
+            dropped: false,
+            max_lod_hint: false,
+            initial_load: false,
+            had_voxels: true,
+            save_generation: 9,
+        };
+
+        assert_eq!(output.save_generation, 9);
+    }
 }

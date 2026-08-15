@@ -20,6 +20,10 @@ impl Viewers {
         self.0
     }
 
+    pub const fn set_exact(&mut self, value: u32) {
+        self.0 = value;
+    }
+
     pub fn add(&mut self) {
         self.0 = self.0.saturating_add(1);
     }
@@ -182,5 +186,14 @@ mod tests {
         assert_eq!(viewers.remove(), 0);
         // Unpaired remove saturates at zero rather than underflowing.
         assert_eq!(viewers.remove(), 0);
+    }
+
+    #[test]
+    fn viewers_exact_setter_preserves_the_requested_total() {
+        let mut viewers = Viewers::new();
+        viewers.set_exact(u32::MAX);
+        assert_eq!(viewers.get(), u32::MAX);
+        viewers.set_exact(7);
+        assert_eq!(viewers.get(), 7);
     }
 }

@@ -37,30 +37,60 @@ mkdir -p "$BUILD/meshers/transvoxel" "$BUILD/storage" "$BUILD/util/godot/core" \
          "$BUILD/util/math" "$BUILD/util/memory" "$BUILD/util/containers" \
          "$BUILD/constants" "$BUILD/util"
 
-# Symlink the PORTABLE real headers into BUILD so relative includes
-# (`../../util/containers/fixed_array.h` etc.) resolve to the real files.
-# Individual stub files (created below) OVERRIDE their same-named real header
-# because they are real files at the expected path, not symlinks.
-ln -sf "$REPO/util/containers"/* "$BUILD/util/containers/"
-# util/math: symlink everything, then drop our godot_math_funcs.h on top.
-for f in "$REPO"/util/math/*.h; do ln -sf "$f" "$BUILD/util/math/$(basename "$f")"; done
-# util/godot: the real tree has classes/ and core/; we stub core/ selectively.
-for f in "$REPO"/util/godot/*.h; do [ -f "$f" ] && ln -sf "$f" "$BUILD/util/godot/$(basename "$f")"; done
-ln -sfn "$REPO/util/godot/classes" "$BUILD/util/godot/classes"
+# The C++ runtime sources are gone from the working tree (Rust port is
+# the source of truth), so extract ALL needed sources from the pinned
+# upstream commit 5828cbeb (recorded in port_status.json).
+PINNED_UPSTREAM="5828cbeba19050033f550485abc5f8c3586b1bf5"
+if ! git cat-file -t "$PINNED_UPSTREAM" >/dev/null 2>&1; then
+	echo "ERROR: pinned upstream commit $PINNED_UPSTREAM is not present in the local clone." >&2
+	echo "       Run: git fetch origin $PINNED_UPSTREAM (or clone with full history)." >&2
+	exit 1
+fi
+extract_upstream() {  # extract_upstream <repo-path> <dest>
+	git cat-file -p "$PINNED_UPSTREAM:$1" > "$2"
+}
+extract_tree() {  # extract_tree <git-path-prefix> <dest-dir>
+	local prefix="$1" dest="$2"
+	mkdir -p "$dest"
+	git cat-file -p "$PINNED_UPSTREAM:$prefix" | while read mode type sha name; do
+		if [ "$type" = "blob" ]; then
+			git cat-file -p "$sha" > "$dest/$name"
+		elif [ "$type" = "tree" ]; then
+			extract_tree "$prefix/$name" "$dest/$name"
+		fi
+	done
+}
+
+# Extract the PORTABLE real headers from the pinned git object.
+# util/containers: real headers from git object.
+extract_tree "util/containers" "$BUILD/util/containers"
+# util/math: real headers from git object.
+extract_tree "util/math" "$BUILD/util/math"
+# util/godot: real headers + classes tree from git object (we stub core/ below).
+for f in $(git cat-file -p "$PINNED_UPSTREAM:util/godot/" | awk '$2=="blob"{print $4}'); do
+	git cat-file -p "$PINNED_UPSTREAM:util/godot/$f" > "$BUILD/util/godot/$f"
+done
+extract_tree "util/godot/classes" "$BUILD/util/godot/classes"
 
 # -----------------------------------------------------------------------
 # Copy REAL upstream sources. transvoxel.cpp is TRIMMED to the inner regular
 # template only (lines 1-602): the transition mesh + VoxelBuffer dispatcher
 # (lines 604+) pull in heavy Godot APIs we don't exercise, so they're cut to
-# avoid stubbing the whole engine. A closing namespace brace is re-appended.
+# avoid stubbing the engine. A closing namespace brace is re-appended.
+# The C++ runtime sources are gone from the working tree (the Rust port is
+# the source of truth), so extract the pinned-upstream transvoxel sources
+# from the git object 5828cbeb (recorded in port_status.json). The
+# PINNED_UPSTREAM and extract_upstream helpers were defined above.
 # -----------------------------------------------------------------------
-cp "$REPO/meshers/transvoxel/transvoxel.h"                 "$BUILD/meshers/transvoxel/"
-cp "$REPO/meshers/transvoxel/transvoxel_tables.cpp"        "$BUILD/meshers/transvoxel/"
-cp "$REPO/meshers/transvoxel/transvoxel_materials_null.h"  "$BUILD/meshers/transvoxel/"
+extract_upstream "meshers/transvoxel/transvoxel.h"                "$BUILD/meshers/transvoxel/transvoxel.h"
+extract_upstream "meshers/transvoxel/transvoxel_tables.cpp"       "$BUILD/meshers/transvoxel/transvoxel_tables.cpp"
+extract_upstream "meshers/transvoxel/transvoxel_materials_null.h" "$BUILD/meshers/transvoxel/transvoxel_materials_null.h"
 # Trim transvoxel.cpp: keep includes + inner template (1-602), drop transition/
 # dispatcher (604-1553), keep the namespace close (re-added manually).
 TRANSVOXEL_CPP="$BUILD/meshers/transvoxel/transvoxel.cpp"
-head -n 602 "$REPO/meshers/transvoxel/transvoxel.cpp" > "$TRANSVOXEL_CPP"
+extract_upstream "meshers/transvoxel/transvoxel.cpp" "$TRANSVOXEL_CPP.full"
+head -n 602 "$TRANSVOXEL_CPP.full" > "$TRANSVOXEL_CPP"
+rm -f "$TRANSVOXEL_CPP.full"
 # Drop the unused mixel4/single_s4 material includes (lines 8-9) — they pull in
 # Godot APIs and we only use NullProcessor.
 sed '/transvoxel_materials_mixel4.h/d; /transvoxel_materials_single_s4.h/d' "$TRANSVOXEL_CPP" > "$TRANSVOXEL_CPP.tmp"

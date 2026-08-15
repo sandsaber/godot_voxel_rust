@@ -16,7 +16,9 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
-use voxel_core::tasks::{TaskRunOutcome, ThreadedTask, ThreadedTaskContext, ThreadedTaskRunner};
+use voxel_core::tasks::{
+    ScheduledTask, TaskLane, TaskRunStatus, ThreadedTask, ThreadedTaskContext, ThreadedTaskRunner,
+};
 
 /// Trivial task that increments a shared counter from inside `run`. The
 /// counter is only ever touched while the runner owns the task, so a race here
@@ -26,9 +28,11 @@ struct CounterTask {
 }
 
 impl ThreadedTask for CounterTask {
-    fn run(self: Box<Self>, _ctx: ThreadedTaskContext) -> TaskRunOutcome {
+    fn run(&mut self, _ctx: ThreadedTaskContext) -> TaskRunStatus {
         self.counter.fetch_add(1, Ordering::SeqCst);
-        TaskRunOutcome::Complete(self)
+        TaskRunStatus::Complete {
+            follow_up_tasks: Vec::new(),
+        }
     }
 }
 
@@ -50,14 +54,17 @@ fn task_runner_concurrent_enqueue_and_completion_stays_race_free() {
             let start = start.clone();
             scope.spawn(move || {
                 start.wait();
-                let tasks: Vec<Box<dyn ThreadedTask>> = (0..TASKS_PER_PRODUCER)
+                let tasks = (0..TASKS_PER_PRODUCER)
                     .map(|_| {
-                        Box::new(CounterTask {
-                            counter: counter.clone(),
-                        }) as Box<dyn ThreadedTask>
+                        ScheduledTask::new(
+                            Box::new(CounterTask {
+                                counter: counter.clone(),
+                            }),
+                            TaskLane::Parallel,
+                        )
                     })
-                    .collect();
-                runner.enqueue_many(tasks, false);
+                    .collect::<Vec<_>>();
+                runner.enqueue_many(tasks);
             });
         }
 
@@ -65,7 +72,8 @@ fn task_runner_concurrent_enqueue_and_completion_stays_race_free() {
     });
 
     runner.wait_for_all_tasks();
-    let completed = runner.drain_completed_tasks();
+    let mut completed = std::collections::VecDeque::new();
+    runner.try_drain_completed_into(&mut completed).unwrap();
     runner.shutdown();
 
     assert_eq!(completed.len(), expected);
@@ -83,13 +91,15 @@ struct PostponeOnceTask {
 }
 
 impl ThreadedTask for PostponeOnceTask {
-    fn run(self: Box<Self>, _ctx: ThreadedTaskContext) -> TaskRunOutcome {
+    fn run(&mut self, _ctx: ThreadedTaskContext) -> TaskRunStatus {
         // First run: flip the flag and postpone. Second run: complete.
         if !self.ran.swap(true, Ordering::SeqCst) {
-            TaskRunOutcome::Postponed(self)
+            TaskRunStatus::Postponed
         } else {
             self.counter.fetch_add(1, Ordering::SeqCst);
-            TaskRunOutcome::Complete(self)
+            TaskRunStatus::Complete {
+                follow_up_tasks: Vec::new(),
+            }
         }
     }
 }
@@ -100,17 +110,21 @@ fn task_runner_postponed_requeue_stays_race_free() {
     let counter = Arc::new(AtomicUsize::new(0));
     const TASKS: usize = 32;
 
-    let tasks: Vec<Box<dyn ThreadedTask>> = (0..TASKS)
+    let tasks = (0..TASKS)
         .map(|_| {
-            Box::new(PostponeOnceTask {
-                counter: counter.clone(),
-                ran: std::sync::atomic::AtomicBool::new(false),
-            }) as Box<dyn ThreadedTask>
+            ScheduledTask::new(
+                Box::new(PostponeOnceTask {
+                    counter: counter.clone(),
+                    ran: std::sync::atomic::AtomicBool::new(false),
+                }),
+                TaskLane::Parallel,
+            )
         })
-        .collect();
-    runner.enqueue_many(tasks, false);
+        .collect::<Vec<_>>();
+    runner.enqueue_many(tasks);
     runner.wait_for_all_tasks();
-    let completed = runner.drain_completed_tasks();
+    let mut completed = std::collections::VecDeque::new();
+    runner.try_drain_completed_into(&mut completed).unwrap();
     runner.shutdown();
 
     assert_eq!(completed.len(), TASKS);

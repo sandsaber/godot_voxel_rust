@@ -1,6 +1,6 @@
 //! Thread-safe dependency countdown for batches of asynchronous streaming tasks.
 
-use crate::tasks::threaded_task::ThreadedTask;
+use crate::tasks::threaded_task::ScheduledTask;
 use std::sync::{Mutex, MutexGuard};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,7 +35,7 @@ impl std::error::Error for AsyncDependencyError {}
 pub struct AsyncDependencyCompletion {
     pub remaining_count: i32,
     pub was_last: bool,
-    pub next_tasks: Vec<Box<dyn ThreadedTask>>,
+    pub next_tasks: Vec<ScheduledTask>,
 }
 
 /// Tracks completion of a fixed-size async task batch.
@@ -48,7 +48,7 @@ struct AsyncDependencyState {
     aborted: bool,
     tasks_have_started: bool,
     count_was_set: bool,
-    next_tasks: Vec<Box<dyn ThreadedTask>>,
+    next_tasks: Vec<ScheduledTask>,
 }
 
 impl Default for AsyncDependencyTracker {
@@ -97,7 +97,7 @@ impl AsyncDependencyTracker {
 
     pub fn set_next_tasks(
         &self,
-        next_tasks: Vec<Box<dyn ThreadedTask>>,
+        next_tasks: Vec<ScheduledTask>,
     ) -> Result<(), AsyncDependencyError> {
         let mut state = self.lock_state();
         if state.tasks_have_started || state.aborted {
@@ -170,18 +170,20 @@ impl AsyncDependencyTracker {
 #[cfg(test)]
 mod tests {
     use super::{AsyncDependencyError, AsyncDependencyTracker};
-    use crate::tasks::{TaskRunOutcome, ThreadedTask, ThreadedTaskContext};
+    use crate::tasks::{ScheduledTask, TaskLane, TaskRunStatus, ThreadedTask, ThreadedTaskContext};
 
     struct DependencyTestTask;
 
     impl ThreadedTask for DependencyTestTask {
-        fn run(self: Box<Self>, _ctx: ThreadedTaskContext) -> TaskRunOutcome {
-            TaskRunOutcome::Complete(self)
+        fn run(&mut self, _ctx: ThreadedTaskContext) -> TaskRunStatus {
+            TaskRunStatus::Complete {
+                follow_up_tasks: Vec::new(),
+            }
         }
     }
 
-    fn boxed_task() -> Box<dyn ThreadedTask> {
-        Box::new(DependencyTestTask)
+    fn scheduled_task() -> ScheduledTask {
+        ScheduledTask::new(Box::new(DependencyTestTask), TaskLane::Parallel)
     }
 
     #[test]
@@ -222,7 +224,7 @@ mod tests {
     fn post_complete_returns_next_tasks_only_when_count_reaches_zero() {
         let tracker = AsyncDependencyTracker::with_count(2);
         tracker
-            .set_next_tasks(vec![boxed_task(), boxed_task()])
+            .set_next_tasks(vec![scheduled_task(), scheduled_task()])
             .unwrap();
 
         let first = tracker.post_complete().unwrap();
@@ -258,7 +260,7 @@ mod tests {
     #[test]
     fn abort_drops_next_tasks() {
         let tracker = AsyncDependencyTracker::with_count(1);
-        tracker.set_next_tasks(vec![boxed_task()]).unwrap();
+        tracker.set_next_tasks(vec![scheduled_task()]).unwrap();
 
         tracker.abort();
 

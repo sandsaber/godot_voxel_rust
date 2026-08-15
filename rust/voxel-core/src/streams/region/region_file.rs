@@ -6,10 +6,10 @@
 //! each stored block is a length-prefixed `block_serializer` payload (optionally
 //! LZ4/ZSTD-compressed) padded up to a sector boundary.
 //!
-//! Not thread-safe (the C++ version isn't either). The stream/forest wrapper
-//! (`VoxelStreamRegionFiles`, meta.vxrm JSON, LRU cache) and v2→v3 legacy
-//! migration are deferred — see the module-level docs in
-//! [`crate::streams::region`].
+//! Not thread-safe (the C++ version isn't either). The
+//! [`RegionFilesStream`](super::RegionFilesStream) wrapper synchronizes one
+//! handle per region. Forest metadata, LRU eviction, and v2→v3 legacy
+//! migration remain deferred — see [`crate::streams::region`].
 
 use std::path::Path;
 
@@ -24,6 +24,8 @@ use crate::streams::{block_serializer, compressed_data, DecodeLimits};
 /// Why a region operation failed. Mirrors the C++ `Error` returns.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RegionError {
+    /// The requested region file does not exist.
+    NotFound(String),
     /// Filesystem/IO failure (open, read, write, seek).
     Io(String),
     /// File exists but is not a valid region file (bad magic, truncated).
@@ -44,6 +46,7 @@ pub enum RegionError {
 impl std::fmt::Display for RegionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            RegionError::NotFound(m) => write!(f, "region file not found: {m}"),
             RegionError::Io(m) => write!(f, "region io error: {m}"),
             RegionError::BadHeader(m) => write!(f, "region bad header: {m}"),
             RegionError::UnsupportedVersion(v) => {
@@ -715,23 +718,35 @@ impl RegionFile<StdVoxelFile> {
     /// Open an existing region file for read+write, or create it if
     /// `create_if_not_found` and it's missing.
     pub fn open(path: &Path, create_if_not_found: bool) -> Result<Self, RegionError> {
-        let mut rf = Self::with_format(RegionFormat::default());
-        if path.exists() {
-            rf.file = Some(StdVoxelFile::open_rw(path).map_err(io)?);
-            rf.load_header()?;
-        } else if create_if_not_found {
-            rf.file = Some(StdVoxelFile::create(path).map_err(io)?);
-            rf.blocks_begin_offset =
-                rf.header
+        Self::open_with_format(path, create_if_not_found, RegionFormat::default())
+    }
+
+    /// Open an existing region, or create a new one using `format`.
+    ///
+    /// Existing files always load their persisted format. The supplied format
+    /// is used only when a missing file is created.
+    pub fn open_with_format(
+        path: &Path,
+        create_if_not_found: bool,
+        format: RegionFormat,
+    ) -> Result<Self, RegionError> {
+        let mut rf = Self::with_format(format);
+        match StdVoxelFile::open_rw(path) {
+            Ok(file) => {
+                rf.file = Some(file);
+                rf.load_header()?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && create_if_not_found => {
+                rf.file = Some(StdVoxelFile::create(path).map_err(io)?);
+                rf.blocks_begin_offset = rf
+                    .header
                     .format
                     .header_size_v3_checked()
-                    .map_err(|e| RegionError::BadHeader(e.to_string()))? as u64;
-            rf.save_header()?;
-        } else {
-            return Err(RegionError::Io(format!(
-                "file not found: {}",
-                path.display()
-            )));
+                    .map_err(|e| RegionError::BadHeader(e.to_string()))?
+                    as u64;
+                rf.save_header()?;
+            }
+            Err(error) => return Err(io(error)),
         }
         Ok(rf)
     }
@@ -750,9 +765,13 @@ impl<F: VoxelFile> Drop for RegionFile<F> {
 // helpers
 // ---------------------------------------------------------------------------
 
-/// Shorthand for wrapping `io::Error` into [`RegionError::Io`].
+/// Preserve filesystem absence separately from other I/O failures.
 fn io(e: std::io::Error) -> RegionError {
-    RegionError::Io(e.to_string())
+    if e.kind() == std::io::ErrorKind::NotFound {
+        RegionError::NotFound(e.to_string())
+    } else {
+        RegionError::Io(e.to_string())
+    }
 }
 
 #[cfg(test)]

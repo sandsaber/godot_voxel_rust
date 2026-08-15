@@ -30,8 +30,10 @@ pub mod block_data_output;
 pub mod block_serializer;
 pub mod compressed_data;
 pub mod decode_limits;
+pub(crate) mod flush_voxel_stream_task;
 pub mod instance_data;
 pub mod load_block_data_task;
+mod persistence_task;
 pub mod region;
 pub mod save_block_data_task;
 pub mod stream_cache;
@@ -44,6 +46,10 @@ pub use load_block_data_task::{
     BlockGenerationRequest, BlockGenerationTaskFactory, BlockGenerationTaskResult,
     LoadBlockDataParams, LoadBlockDataTask,
 };
+pub use persistence_task::{
+    FlushTaskTerminal, PersistenceAcknowledgement, PersistenceIoPhase, SaveTaskTerminal,
+};
+pub use region::RegionFilesStream;
 pub use save_block_data_task::SaveBlockDataTask;
 pub use stream_cache::BlockCache;
 pub use stream_memory::MemoryStream;
