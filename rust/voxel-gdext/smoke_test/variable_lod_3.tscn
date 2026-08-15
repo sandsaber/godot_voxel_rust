@@ -1,0 +1,7 @@
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="GDExtension" path="res://voxel_gdext.gdextension" id="1"]
+[ext_resource type="Script" path="res://variable_lod_3.gd" id="2"]
+
+[node name="Root" type="Node3D"]
+script = ExtResource("2")

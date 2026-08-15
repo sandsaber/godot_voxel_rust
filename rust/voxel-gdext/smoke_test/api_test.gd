@@ -59,6 +59,11 @@ func _init() -> void:
 		var sdf = float(terrain.get_voxel_sdf(0, 0, 0))
 		_ok(set_ok == false and sdf == 0.0,
 			"set/get_voxel_sdf correctly report not-ready before _ready (set=%s sdf=%f)" % [set_ok, sdf])
+		_ok(
+			terrain.has_method("flush_pending_saves")
+			and bool(terrain.flush_pending_saves()) == false,
+			"flush_pending_saves() is registered and safely reports not-ready"
+		)
 
 		# 5. Bounds querying. NOTE: a node created outside the tree never runs
 		#    _ready(), so the terrain core may report empty bounds until it is

@@ -7,23 +7,34 @@ in [`voxel-core`](../voxel-core); this crate wraps it into Godot classes.
 
 ## Status
 
-The Rust binding foundation is complete: 79 Godot classes are registered and
-the `VoxelTerrain` paging/generation/meshing pipeline runs end-to-end on Godot
-4.7+. Individual classes have different parity levels. In particular, blocky
-library binding, standalone `VoxelLodTerrain` rendering, full terrain tools and
-instancer rendering remain partial; see the repository
-[status matrix](../../doc/source/status.md) and [roadmap](../../ROADMAP.md).
+The **fixed-LOD and Variable LOD runtimes are functional**: the extension loads
+in Godot 4.7+ and the paging/generation/meshing, editing, remeshing, RegionFiles
+persistence, transition masks, topology events, and collision_surface paths run
+end-to-end. All 73 canonical upstream classes have their pinned API surface
+(methods, properties, constants, signals) implemented (stub or delegated);
+canonical API compatibility is still partial because behavioral completeness per
+class is ongoing.
+
+At upstream commit `5828cbeba19050033f550485abc5f8c3586b1bf5`, the documented
+API contains 73 public classes. The machine-readable
+[`api/port_status.json`](api/port_status.json) manifest, enforced by
+[`tests/port_status.rs`](tests/port_status.rs), tracks each class's status.
+The extension also registers Rust-port/editor helpers which do not count as
+upstream API coverage. Intentional deferrals include SQLite streams, multipass
+generation and rigid-body physics integration.
 
 ### Class names
 
-Classes are exposed under **canonical names** matching the upstream godot_voxel
-C++ module (`VoxelBuffer`, `VoxelMesherBlocky`, `VoxelTerrain`, …), via the
-`#[class(rename = ...)]` attribute — the Rust structs keep a `GD` suffix
-(`VoxelBufferGD`) internally, but ClassDB and GDScript see `VoxelBuffer`.
+Documented classes that are exposed use **canonical names** matching the
+upstream godot_voxel C++ module (`VoxelBuffer`, `VoxelMesherBlocky`,
+`VoxelTerrain`, …), via the `#[class(rename = ...)]` attribute — the Rust
+structs may keep a `GD` suffix (`VoxelBufferGD`) internally while ClassDB and
+GDScript see `VoxelBuffer`.
 
-Exceptions (to avoid clashing with Godot builtins, matching upstream's `ZN_`
-prefix): `ZN_FastNoiseLite`, `ZN_SpotNoise`, `ZN_Curve` (Godot already ships
-`Curve`, `FastNoiseLite`).
+Canonical upstream exceptions use the `ZN_` prefix to avoid Godot builtin
+clashes: `ZN_FastNoiseLite` and `ZN_SpotNoise`. `ZN_Curve` is a Rust-port helper
+listed separately in the status manifest and does not count toward the pinned
+upstream class set.
 
 ## Build
 
@@ -57,21 +68,20 @@ terrain.add_child(viewer)   # viewer must be a child of the terrain
 
 ### Verified
 
-Tested headless against Godot 4.7.1.stable on Linux x86_64 and macOS arm64,
-most recently on 2026-08-10. The `smoke_test/` Godot project ships three
-runnable checks plus a driver script.
+Tested headless against Godot 4.7.1.stable on Linux x86_64 (2026-07-30).
+The `smoke_test/` Godot project ships four runnable checks plus a driver script.
 
 **Reproducing on a clean checkout** — the compiled library is a git-ignored build
 artifact, so build it first. The driver does everything:
 
 ```sh
 cd rust
-./voxel-gdext/smoke_test/run_smoke_test.sh          # debug build + all 3 checks
+./voxel-gdext/smoke_test/run_smoke_test.sh          # debug build + all 4 checks
 ./voxel-gdext/smoke_test/run_smoke_test.sh --release
 ```
 
-It (1) builds `voxel-gdext`, (2) copies the host `.so`/`.dylib`/`.dll` next to
-the `.gdextension`, (3) creates Godot's generated extension list, then runs:
+It (1) `cargo build`s `voxel-gdext`, (2) copies the `.so`/`.dylib` next to the
+`.gdextension`, then runs:
 
 - **`api_test.gd`** (`godot --headless --script api_test.gd`) — class
   registration, `VoxelTerrain` instantiate, `set_generator`, property round-trip,
@@ -79,19 +89,13 @@ the `.gdextension`, (3) creates Godot's generated extension list, then runs:
   `_ready()` runs it reports the not-ready state (set=false, sdf=0.0) rather than
   a false positive.
 - **`runtime_scene.tscn`** — builds a `VoxelTerrain` + `VoxelGeneratorWaves` +
-  `VoxelViewer` in the tree and pumps real frames: paging generates **210 mesh
-  blocks** by frame 10, and the live edition path is verified (`set_voxel_sdf`
-  returns true, `get_voxel_sdf` reads back -1.0).
-- **`smoke_test.tscn`** — loads a scene containing canonical `VoxelTerrain` and
-  `VoxelViewer` nodes and verifies the basic runtime surface.
-
-```
-Initialize godot-rust (API v4.7.stable.official, runtime v4.7.1.stable.official, safeguards strict)
-voxel-gdext: Scene stage initialized (voxel-core v0.1.0)
-[runtime] PASS set_voxel_sdf/get_voxel_sdf (set=true sdf=-1.000000)
-[runtime] frame 10 — mesh_block_count=210
-[runtime] DONE after 40 frames — mesh_block_count=210, paging ran without crash
-```
+  `VoxelViewer` in the tree, waits for a nonzero mesh upload and verifies the
+  live SDF edition path.
+- **`smoke_test.tscn`** — loads a scene containing a canonical `VoxelTerrain`
+  node and verifies that the extension-backed scene starts successfully.
+- **`runtime_correctness.tscn`** — verifies mesh replacement after edits,
+  viewer-driven unload, invalid-input safety and RegionFiles persistence using
+  public Godot-visible behavior.
 
 ## Android
 
