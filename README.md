@@ -1,42 +1,37 @@
 Voxel Tools for Godot
 =========================
 
-A Rust-first voxel terrain engine for Godot Engine 4, ported from
-[Zylann/godot_voxel](https://github.com/Zylann/godot_voxel).
+A voxel terrain engine for Godot Engine 4 whose engine-agnostic core has been
+ported from C++ to Rust. The canonical Godot-facing API is still being ported.
 
-The runtime is a **pure Rust GDExtension** — no C++ module code remains. The
-engine core (`voxel-core`) is engine-agnostic and fully unit-testable. The thin
-Godot binding (`voxel-gdext`) registers 79 classes under their canonical
-upstream names. Feature completeness varies by subsystem; see
-[Status](doc/source/status.md) and [Roadmap](ROADMAP.md).
+This fork is a **pure Rust GDExtension** — no C++ module code remains. The
+engine core (`voxel-core`) is engine-agnostic and fully unit-testable. The
+Godot binding (`voxel-gdext`) provides a functional fixed-LOD runtime, a production Variable-LOD
+`VoxelLodTerrain`, and a partial canonical API. It loads in Godot 4.7+.
+See [Status](doc/source/status.md) and [Roadmap](ROADMAP.md).
 
-> **Verified locally on 2026-08-10:** 1494 default-feature tests and 1496
-> all-feature tests pass (0 failed), strict Clippy and rustfmt are clean, the
-> Godot 4.7.1 smoke suite passes, and `voxel-core` cross-compiles to Android
-> `aarch64`.
+> The checked-in verification commands cover workspace tests, Clippy,
+> formatting, parity data and Godot smoke tests. Canonical API progress is
+> tracked separately in
+> [`rust/voxel-gdext/api/port_status.json`](rust/voxel-gdext/api/port_status.json).
 
 ![Blocky screenshot](doc/source/images/blocky_screenshot.webp)
 ![Smooth screenshot](doc/source/images/smooth_screenshot.webp)
 
-Working end-to-end in Godot
+Features
 ---------------------------
 
-- Viewer-driven terrain paging, generation and mesh upload through `VoxelTerrain`
-- Smooth SDF terrain with Transvoxel, transition cells and SINGLE_S4 texturing
-- Cubes meshing, memory/region streams and trimesh collision generation
-- Flat, waves, noise, heightmap, image and graph generators
-- Direct SDF voxel editing and DDA raycasting
-- Pure-Rust core cross-compilation to Android, iOS and macOS
-
-Implemented in core, but not yet complete in the Godot product surface:
-
-- Blocky meshing has baked models and ambient occlusion, but terrain cannot yet
-  receive a baked block library.
-- `VoxelTerrain` supports multiple LOD maps; the separate `VoxelLodTerrain`
-  class is still an octree facade without its own paging/rendering.
-- Instancing currently provides scatter math and counts, not MultiMesh output.
-- Graph `ExpressionNode`/`Image2D` runtime wiring and the full visual editor are
-  still pending.
+- Realtime 3D terrain editable in-game (overhangs, tunnels, creation/destruction)
+- Polygon-based: voxels are transformed into chunked meshes via the Transvoxel algorithm
+- Fixed-LOD Godot terrain paging, editing, remeshing and collision generation
+- Variable-LOD `VoxelLodTerrain` paging, clipboxes, coverage and transition
+  topology
+- Voxel data streaming (memory, region files, generators)
+- Minecraft-style blocky terrain with baked ambient occlusion
+- Smooth terrain with level of detail (Transvoxel + SINGLE_S4 texturing)
+- Procedural graph generator (24+ node types, expression nodes, image lookups)
+- Core voxel instancing algorithms (the canonical Godot runtime is partial)
+- **Pure Rust core** — cross-compiles without Godot or C dependencies
 
 Building
 ---------------
@@ -58,10 +53,9 @@ Testing
 
 ```bash
 cd rust
-cargo test --workspace                      # 1494 tests (0 failed)
-cargo test --workspace --all-features       # 1496 tests (0 failed)
-cargo clippy --workspace --all-targets -- -D warnings
-cargo fmt --all -- --check
+cargo test --workspace
+cargo clippy --workspace --all-targets      # warning-clean
+cargo fmt --check                           # clean
 ```
 
 Project structure
@@ -70,10 +64,10 @@ Project structure
 ```
 rust/
 ├── voxel-core/          # Engine-agnostic Rust core (all logic)
-│   ├── src/             # 800+ unit tests
-│   └── tests/           # 674 parity tests + integration + transvoxel parity
-├── voxel-gdext/         # Godot GDExtension binding (79 classes)
-│   ├── src/             # #[func] methods delegating to voxel-core
+│   ├── src/             # Core modules and unit tests
+│   └── tests/           # C++ golden parity + integration/stress suites
+├── voxel-gdext/         # Godot GDExtension binding (canonical API partial)
+│   ├── src/             # Godot classes and voxel-core adapters
 │   └── smoke_test/      # Godot 4.7 project + VoxelGeneratorGraph addon
 ├── cpp-baseline/        # C++ parity harness (reference data generation)
 ├── tsan/                # ThreadSanitizer tests
@@ -83,21 +77,20 @@ rust/
 Status
 ---------------
 
-The runtime migration from C++ to Rust is complete: Rust is the source of truth
-and the old C++ module has been removed. Full upstream feature parity is not
-complete yet:
+The original C++ runtime module has been removed and `voxel-core` is the Rust
+source of truth. The fixed-LOD and Variable-LOD GDExtension runtimes are
+verified in Godot 4.7.1; the complete canonical upstream API is still partial:
 
-- **1494 tests pass** (800 unit + 674 parity + 5 integration + 5 transvoxel
-  parity + 1 stress + 5 TSan + 3 gdext unit + 1 doc-test), clippy/fmt clean.
-- **79 Godot classes** are registered under canonical upstream names
-  (`VoxelBuffer`, `VoxelMesherBlocky`, `VoxelTerrain`, …); some are deliberately
-  partial facades or placeholders documented in the status matrix.
-- Full paging + generation + meshing pipeline runs end-to-end (verified headless:
-  210 mesh blocks generated).
+- Workspace tests, C++ golden parity suites and focused GDExtension tests cover
+  the implemented paths; Clippy and formatting are enforced.
+- Canonical API progress is tracked per class in
+  [`rust/voxel-gdext/api/port_status.json`](rust/voxel-gdext/api/port_status.json).
+- Full paging + generation + meshing runs end-to-end in the headless Godot
+  smoke suite, including a 3-LOD Variable-LOD scene.
 
-Remaining big features (blocky model library on terrain, `VoxelLodTerrain`
-paging/rendering, multiplayer areas, full terrain tools, instancing
-rendering, graph editor) are tracked in **[ROADMAP.md](ROADMAP.md)**.
+Remaining big features (blocky model library on terrain, multiplayer areas,
+full terrain tools, instancing rendering, graph editor) are tracked in
+**[ROADMAP.md](ROADMAP.md)**.
 
 Class names follow upstream godot_voxel (`#[class(rename=…)]`); see
 [`AGENTS.md`](AGENTS.md) for the naming scheme.
@@ -107,6 +100,8 @@ Documentation
 
 - [AGENTS.md](AGENTS.md) — repo guide for AI agents and contributors (architecture,
   crate layout, build/test/smoke commands, conventions).
+- [MkDocs site](doc/source/index.md) — setup, architecture, class reference.
+- [Status](doc/source/status.md) / [Roadmap](ROADMAP.md)
 - [Integration guide](rust/docs/INTEGRATION.md) — how to build the extension and
   load it in a Godot project (Linux/Windows/macOS/Android/iOS).
 - [Rust gdext binding](rust/voxel-gdext/README.md) — build, load, and verify in Godot.

@@ -5,11 +5,11 @@
 > The voxel engine has been fully ported from C++ to Rust. The C++ module has
 > been removed. The project is now a pure Rust GDExtension for Godot 4.7+.
 >
-> **Final numbers (2026-07-30):**
-> - **1489 tests, 0 failed** (795 unit + 674 parity + 5 integration + 5 transvoxel parity + 1 stress + 5 TSan + 3 gdext unit + 1 doc-test)
-> - **82 Godot classes** functional (all have `#[func]` methods)
+> **Final numbers (audited 2026-08-03):**
+> - **2155 tests, 0 failed** (1379 voxel-core inline + 692 voxel-core integration + 82 voxel-gdext + 5 TSan, plus 13 doc-tests). `cargo test --workspace` green; `cargo clippy --workspace --all-targets` and `cargo fmt --check` warning-clean.
+> - **82 Godot-exposed classes registered** (834 `#[func]` methods). Canonical API completeness is tracked per-class in [`rust/voxel-gdext/api/port_status.json`](rust/voxel-gdext/api/port_status.json) against the pinned upstream commit: 3 `complete`, 55 `partial` (registered + partially exposed), 15 `deferred` (intentionally out of scope — see AGENTS.md). **Do not use the registered-class count as a completion metric.**
 > - 9 C++ features ported as new voxel-core APIs
-> - clippy/fmt clean (0 warnings, verified by independent audit 2026-07-30), release build verified
+> - clippy/fmt clean (0 warnings), release build verified
 > - Godot 4.7 GDExtension loads
 > - Android aarch64 cross-compile builds; root-level C++ artifacts removed
 >

@@ -203,13 +203,14 @@ The repo includes a runnable Godot project that verifies the binding:
 
 ```sh
 cd rust
-./voxel-gdext/smoke_test/run_smoke_test.sh    # builds .so + runs all 3 checks
+./voxel-gdext/smoke_test/run_smoke_test.sh    # builds library + runs all 5 checks
 ```
 
 It builds the library, copies it next to the `.gdextension`, and runs
 `api_test.gd` (class registration + `#[func]` surface), `runtime_scene.tscn`
-(paging generates 210 mesh blocks), and `smoke_test.tscn`. Requires `godot`
-(4.7+) on `PATH`.
+(paging, generation and editing), `smoke_test.tscn`, and
+`runtime_correctness.tscn` (remesh, unload, invalid-input safety and
+persistence). Requires `godot` (4.7+) on `PATH`.
 
 ### Manual check
 
