@@ -1,0 +1,49 @@
+name: Rust TSan
+
+# Phase E: scheduled ThreadSanitizer validation of voxel-core concurrency
+# invariants (paging, locks, data races). Runs the tsan crate's tests under
+# nightly with -Zsanitizer=thread.
+on:
+  schedule:
+    # Weekly, Sunday 04:00 UTC (offset from fuzz).
+    - cron: "0 4 * * 0"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tsan:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/git
+            ~/.cargo/registry
+            rust/target
+          key: ${{ runner.os }}-tsan-${{ hashFiles('rust/rust-toolchain.toml', 'rust/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-tsan-
+
+      - name: Install nightly Rust with TSan
+        run: |
+          rustup toolchain install nightly --profile minimal --component rust-src
+          rustup default nightly
+          rustup show
+
+      - name: Run TSan tests
+        env:
+          TSAN_OPTIONS: "halt_on_error=1 exitcode=66"
+          RUSTFLAGS: "-Zsanitizer=thread"
+        run: |
+          cargo +nightly test -Zbuild-std -p tsan --target x86_64-unknown-linux-gnu -- --test-threads=1
