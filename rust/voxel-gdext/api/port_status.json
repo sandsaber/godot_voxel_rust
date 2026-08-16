@@ -508,7 +508,7 @@
       "status": "partial",
       "binding_state": "registered",
       "registered_name": "VoxelInstanceLibrarySceneItem",
-      "evidence": "Registered resource with a real scene slot; consumed by VoxelInstancer scene items (set_item_scene/get_item_scene path). Upstream's generator/component wiring is not ported.",
+      "evidence": "Registered resource with a real PackedScene slot, paralleling VoxelInstancer.set_item_scene; the resource is not yet attachable to the node's internal library.",
       "source_paths": [
         "upstream:doc/classes/VoxelInstanceLibrarySceneItem.xml",
         "rust/voxel-gdext/src/resources3.rs"

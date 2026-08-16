@@ -92,9 +92,9 @@ Persistence of that metadata is R7, not a hole in the tool.
       to scene mode; every scattered instance then spawns a real `Node3D`
       (the scene root at the instance transform), streamed per LOD0 mesh
       block and freed on block exit — alongside the MultiMesh path, not
-      replacing it. Deferred with the C++ richness gap: per-instance
-      persistence, `VoxelInstanceComponent` bookkeeping, mesh-LOD tiers,
-      async generation tasks.
+      replacing it. Leftover (deferred with the C++ richness gap):
+      per-instance persistence, `VoxelInstanceComponent` bookkeeping,
+      mesh-LOD tiers, async generation tasks.
 
 ## R6 — Graph editor parity ✅
 

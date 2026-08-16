@@ -1028,6 +1028,7 @@ impl VoxelBufferGD {
 mod validation_tests {
     use super::*;
     use std::f32::consts::FRAC_1_SQRT_2;
+    use voxel_core::instancing::InstanceLibraryItem;
     use voxel_core::storage::voxel_buffer::{MAX_CHANNELS, MAX_SIZE};
 
     #[test]
@@ -1090,6 +1091,33 @@ mod validation_tests {
         };
         assert!(close(t.basis.col_a(), Vector3::new(0.0, 0.0, -1.0)));
         assert!(close(t.basis.col_c(), Vector3::new(1.0, 0.0, 0.0)));
+    }
+
+    #[test]
+    fn item_is_scene_routes_only_scene_typed_items() {
+        let mut library = InstanceLibrary::new();
+        library.add_item(InstanceLibraryItem::default());
+        library.add_item(InstanceLibraryItem {
+            mesh_type: InstanceMeshType::Scene,
+            ..Default::default()
+        });
+        assert!(!item_is_scene(&library, 0));
+        assert!(item_is_scene(&library, 1));
+        assert!(!item_is_scene(&library, 2), "out of range is never a scene");
+    }
+
+    #[test]
+    fn bucket_instances_by_item_splits_and_drops_out_of_range() {
+        let make = |item_index: u32| BlockInstanceData {
+            position: Vector3f::new(item_index as f32, 0.0, 0.0),
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            scale: 1.0,
+            item_index,
+        };
+        let buckets = bucket_instances_by_item(&[make(0), make(1), make(0), make(9)], 2);
+        assert_eq!(buckets.len(), 2);
+        assert_eq!(buckets[0].len(), 2);
+        assert_eq!(buckets[1].len(), 1);
     }
 }
 
@@ -1210,7 +1238,8 @@ impl VoxelInstancerGD {
     }
 
     /// Assign the mesh used when this item is uploaded as a MultiMesh.
-    /// Assigning a mesh switches the item back to the MultiMesh type.
+    /// Assigning a mesh switches the item back to the MultiMesh type and
+    /// clears any previously assigned scene.
     #[func]
     fn set_item_mesh(&mut self, index: i32, mesh: Gd<godot::classes::Mesh>) {
         let Ok(index) = usize::try_from(index) else {
@@ -1222,6 +1251,7 @@ impl VoxelInstancerGD {
             return;
         }
         self.item_meshes[index] = Some(mesh);
+        self.item_scenes[index] = None;
         if let Some(item) = self.library.items.get_mut(index) {
             item.mesh_type = InstanceMeshType::MultiMesh;
         }
@@ -1230,7 +1260,9 @@ impl VoxelInstancerGD {
     /// Assign the scene instantiated per instance of this item. Items with a
     /// scene are scene-typed: every scattered instance spawns a real `Node3D`
     /// (the scene's root, placed at the instance transform) instead of being
-    /// packed into a MultiMesh.
+    /// packed into a MultiMesh. Assigning a scene clears any previously
+    /// assigned mesh. Rejected (with one error) when the scene cannot be
+    /// instantiated or its root is not a `Node3D`.
     #[func]
     fn set_item_scene(&mut self, index: i32, scene: Gd<PackedScene>) {
         let Ok(index) = usize::try_from(index) else {
@@ -1241,23 +1273,27 @@ impl VoxelInstancerGD {
             godot_error!("VoxelInstancer.set_item_scene: index is out of range");
             return;
         }
+        if !scene_root_is_node3d(&scene) {
+            godot_error!(
+                "VoxelInstancer.set_item_scene: scene root must be a Node3D; assignment rejected"
+            );
+            return;
+        }
         self.item_scenes[index] = Some(scene);
+        self.item_meshes[index] = None;
         if let Some(item) = self.library.items.get_mut(index) {
             item.mesh_type = InstanceMeshType::Scene;
         }
     }
 
-    /// The scene assigned to an item, or `null` when the item is
-    /// MultiMesh-typed or has no scene.
+    /// The scene assigned to an item, or `null` when the item has no scene
+    /// (MultiMesh-typed items never have one — assigning a mesh clears it).
     #[func]
-    fn get_item_scene(&self, index: i32) -> Variant {
+    fn get_item_scene(&self, index: i32) -> Option<Gd<PackedScene>> {
         let Ok(index) = usize::try_from(index) else {
-            return Variant::nil();
+            return None;
         };
-        match self.item_scenes.get(index).and_then(|scene| scene.as_ref()) {
-            Some(scene) => scene.to_variant(),
-            None => Variant::nil(),
-        }
+        self.item_scenes.get(index).cloned().flatten()
     }
 
     /// Get the number of items in the library.
@@ -1279,6 +1315,9 @@ impl VoxelInstancerGD {
     /// Generate instances from a VoxelBufferGD's surface.
     /// Extracts surface points where solid meets air, runs the scatter
     /// generator for each library item, returns total instance count.
+    /// The result replaces this node's children: MultiMesh items upload one
+    /// `MultiMeshInstance3D` each, scene items spawn one `Node3D` per
+    /// instance.
     #[func]
     fn scatter_from_buffer(&mut self, buffer: Gd<RefCounted>) -> i32 {
         if self.library.is_empty() {
@@ -1431,7 +1470,11 @@ impl VoxelInstancerGD {
                 let Some(scene) = self.item_scenes.get(item_index).and_then(|s| s.clone()) else {
                     continue;
                 };
-                for node in instantiate_scene_nodes(&scene, "scatter", instances) {
+                for node in instantiate_scene_nodes(
+                    &scene,
+                    &format!("scatter_scene_{item_index}"),
+                    instances,
+                ) {
                     self.base_mut().add_child(&node);
                     self.uploaded_scene_nodes.push(node);
                 }
@@ -1521,13 +1564,7 @@ impl VoxelInstancerGD {
             &positions,
             &normals,
         );
-        let mut by_item: Vec<Vec<voxel_core::instancing::BlockInstanceData>> =
-            vec![Vec::new(); self.library.len()];
-        for instance in &instances {
-            if let Some(slot) = by_item.get_mut(instance.item_index as usize) {
-                slot.push(*instance);
-            }
-        }
+        let by_item = bucket_instances_by_item(&instances, self.library.len());
         let nodes = self.upload_block_instances(position, lod_index, &by_item);
         self.streamed_nodes
             .insert((position.x, position.y, position.z, lod_index), nodes);
@@ -1550,10 +1587,7 @@ impl VoxelInstancerGD {
     }
 
     fn item_is_scene(&self, item_index: usize) -> bool {
-        self.library
-            .items
-            .get(item_index)
-            .is_some_and(|item| matches!(item.mesh_type, InstanceMeshType::Scene))
+        item_is_scene(&self.library, item_index)
     }
 
     fn upload_block_instances(
@@ -1615,6 +1649,49 @@ impl VoxelInstancerGD {
     }
 }
 
+/// Whether the library item at `item_index` is scene-typed. Out-of-range
+/// indices are never scene items.
+fn item_is_scene(library: &InstanceLibrary, item_index: usize) -> bool {
+    library
+        .items
+        .get(item_index)
+        .is_some_and(|item| matches!(item.mesh_type, InstanceMeshType::Scene))
+}
+
+/// Split scattered instances into one bucket per library item, dropping
+/// instances whose item index is out of range.
+fn bucket_instances_by_item(
+    instances: &[BlockInstanceData],
+    library_len: usize,
+) -> Vec<Vec<BlockInstanceData>> {
+    let mut by_item = vec![Vec::new(); library_len];
+    for instance in instances {
+        if let Some(slot) = by_item.get_mut(instance.item_index as usize) {
+            slot.push(*instance);
+        }
+    }
+    by_item
+}
+
+/// Whether `scene` can back a scene-typed item: it instantiates and its root
+/// is a `Node3D`. The probe instance is never parented, so it is freed
+/// explicitly.
+fn scene_root_is_node3d(scene: &Gd<PackedScene>) -> bool {
+    let Some(probe) = scene.instantiate() else {
+        return false;
+    };
+    match probe.try_cast::<Node3D>() {
+        Ok(mut root) => {
+            root.free();
+            true
+        }
+        Err(mut orphan) => {
+            orphan.free();
+            false
+        }
+    }
+}
+
 /// Build the Godot transform of one scattered instance: quaternion rotation,
 /// uniform scale, world-space position.
 fn instance_transform(instance: &BlockInstanceData) -> Transform3D {
@@ -1645,11 +1722,17 @@ fn instantiate_scene_nodes(
             godot_error!("VoxelInstancer: scene failed to instantiate; instance {i} skipped");
             continue;
         };
-        let Ok(mut node) = instantiated.try_cast::<Node3D>() else {
-            godot_error!(
-                "VoxelInstancer: scene root of item must be a Node3D; instance {i} skipped"
-            );
-            continue;
+        // The skipped subtree was never parented, so it must be freed
+        // explicitly — dropping a manually-managed `Gd` alone would leak it.
+        let mut node = match instantiated.try_cast::<Node3D>() {
+            Ok(node) => node,
+            Err(mut orphan) => {
+                godot_error!(
+                    "VoxelInstancer: scene root of item must be a Node3D; instance {i} skipped"
+                );
+                orphan.free();
+                continue;
+            }
         };
         node.set_transform(instance_transform(instance));
         node.set_name(&format!("{prefix}_{i}"));

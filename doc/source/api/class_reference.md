@@ -767,7 +767,9 @@ Scatters instances (trees, rocks, grass) on a parent `VoxelTerrain` using an ins
 - `set_seed(seed: i64)`
 - `scatter_from_buffer(buffer: Gd<RefCounted>) -> i32` — extracts surface points from a `VoxelBuffer` and returns the total instance count
 - `scatter_test(count: i32) -> i32`
-- `set_item_mesh(index: i32, mesh: Mesh)`
+- `set_item_mesh(index: i32, mesh: Mesh)` — switches the item to MultiMesh mode and clears its scene
+- `set_item_scene(index: i32, scene: PackedScene)` — scene mode: instantiate the scene's `Node3D` root per instance (rejected when the root is not a `Node3D`); clears the mesh
+- `get_item_scene(index: i32) -> PackedScene?` — the assigned scene, or null
 - `sync_stream() -> i32` — load/unload instance blocks to match parent terrain mesh blocks
 - `get_streamed_block_count() -> i32`
 - `get_streamed_instance_count() -> i32`

@@ -221,9 +221,9 @@ mod tests {
 
     #[test]
     fn scene_typed_items_scatter_like_multimesh_items() {
-        // Scene items carry the same BlockInstanceData payload (position,
-        // rotation, scale, item_index); the gdext instancer consumes it to
-        // spawn real nodes instead of a MultiMesh.
+        // mesh_type is intentionally ignored by the scatter itself: scene
+        // items carry the same BlockInstanceData payload, and scene-vs-
+        // MultiMesh routing happens in the gdext instancer.
         let mut library = InstanceLibrary::new();
         library.add_item(InstanceLibraryItem {
             mesh_type: crate::instancing::InstanceMeshType::Scene,
