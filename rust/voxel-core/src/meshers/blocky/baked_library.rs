@@ -319,7 +319,53 @@ pub struct BakedLibrary {
     pub indexed_materials_count: u32,
 }
 
+/// One full unit-cube face: four corners and two triangles, winding from
+/// [`SIDE_QUAD_TRIANGLES`](crate::constants::cube_tables::SIDE_QUAD_TRIANGLES).
+pub fn full_cube_side_surface(side: usize) -> SideSurface {
+    use crate::constants::cube_tables::{CORNER_POSITION, SIDE_CORNERS, SIDE_QUAD_TRIANGLES};
+    use crate::math::Vector2f;
+
+    let corners = SIDE_CORNERS[side];
+    SideSurface {
+        positions: corners.iter().map(|&c| CORNER_POSITION[c]).collect(),
+        uvs: vec![
+            Vector2f::new(0.0, 0.0),
+            Vector2f::new(1.0, 0.0),
+            Vector2f::new(1.0, 1.0),
+            Vector2f::new(0.0, 1.0),
+        ],
+        indices: SIDE_QUAD_TRIANGLES[side].to_vec(),
+        tangents: Vec::new(),
+    }
+}
+
+/// Opaque full cube used as a default blocky model (index ≥ 1; 0 stays air).
+pub fn solid_cube_model(color: Color) -> BakedModel {
+    let mut cube = BakedModel {
+        color,
+        empty: false,
+        culls_neighbors: true,
+        contributes_to_ao: true,
+        ..BakedModel::default()
+    };
+    cube.model.surface_count = 1;
+    cube.model.surfaces[0].collision_enabled = true;
+    for side in 0..Side::COUNT {
+        cube.model.sides_surfaces[side][0] = full_cube_side_surface(side);
+    }
+    cube
+}
+
 impl BakedLibrary {
+    /// Air at index 0 plus one solid cube at index 1. Call
+    /// [`crate::meshers::blocky::bake_library`] before meshing.
+    pub fn with_air_and_solid_cube(color: Color) -> Self {
+        Self {
+            models: vec![BakedModel::default(), solid_cube_model(color)],
+            ..Self::default()
+        }
+    }
+
     /// Whether model `i` exists.
     pub fn has_model(&self, i: u32) -> bool {
         (i as usize) < self.models.len()
@@ -369,6 +415,20 @@ mod tests {
         assert_eq!(m.fluid_index, NULL_FLUID_INDEX);
         assert!(m.culls_neighbors);
         assert!(m.contributes_to_ao);
+    }
+
+    #[test]
+    fn air_and_solid_cube_library_is_meshable_after_bake() {
+        let cube = solid_cube_model(Color::from_rgb(1.0, 0.0, 0.0));
+        assert!(!cube.empty);
+        assert_eq!(cube.model.surface_count, 1);
+        assert!(!cube.model.sides_surfaces[0][0].is_empty());
+
+        let mut lib = BakedLibrary::with_air_and_solid_cube(Color::from_rgb(0.4, 0.4, 0.4));
+        assert!(lib.models[0].empty);
+        assert!(!lib.models[1].empty);
+        crate::meshers::blocky::bake_library(&mut lib);
+        assert!(lib.side_pattern_count > 0);
     }
 
     #[test]

@@ -260,8 +260,12 @@ impl IResource for VoxelGeneratorFlat {
 impl VoxelGeneratorFlat {
     /// Construct the engine-agnostic generator from the current parameters.
     pub fn create_core_generator(&self) -> SharedVoxelGenerator {
+        let channel = channel_id_from_index(self.channel_value as usize).unwrap_or(ChannelId::Sdf);
+        let voxel_type = u64::try_from(self.voxel_type_value.max(0)).unwrap_or(1);
         let flat = Flat {
             height: self.height_value,
+            channel,
+            voxel_type,
             ..Flat::default()
         };
         Arc::new(flat)

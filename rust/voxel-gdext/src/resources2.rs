@@ -1185,35 +1185,13 @@ impl INode3D for VoxelLodTerrainGD {
     }
 
     fn process(&mut self, _delta: f64) {
-        // Collect viewer updates BEFORE borrowing the core (avoids borrow conflict).
-        let mut viewers = Vec::new();
-        let mut id = 1u32;
-        for child in self.base().get_children().iter_shared() {
-            if let Ok(viewer) = child.try_cast::<crate::terrain::VoxelViewer>() {
-                let viewer = viewer.bind();
-                let pos = viewer.get_world_position();
-                let Ok(world_position_voxels) = crate::terrain::world_to_voxel_position(pos) else {
-                    godot_error!(
-                        "VoxelLodTerrain.process: viewer position must be finite and within i32 range"
-                    );
-                    continue;
-                };
-                viewers.push(voxel_core::terrain::ViewerUpdate {
-                    id,
-                    world_position_voxels,
-                    horizontal_view_distance_voxels: paging_view_distance(
-                        viewer.view_distance_voxels(),
-                        self.view_distance_value,
-                    ),
-                    vertical_view_distance_voxels: paging_view_distance(
-                        viewer.view_distance_voxels(),
-                        self.view_distance_value,
-                    ),
-                    demand: crate::terrain::fixed_viewer_demand(self.generate_collision),
-                });
-                id += 1;
-            }
-        }
+        let view_cap = self.view_distance_value;
+        let viewers = crate::terrain::collect_child_viewers(
+            self.base().get_children().iter_shared(),
+            "VoxelLodTerrain",
+            |viewer_distance| paging_view_distance(viewer_distance, view_cap),
+            self.generate_collision,
+        );
 
         let pending_ops = {
             let Some(core) = self.core.as_mut() else {

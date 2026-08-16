@@ -11,5 +11,5 @@
 pub mod ops;
 pub mod raycast;
 
-pub use ops::{do_box, do_sphere, EditMode, SdfBlendMode, VoxelToolBuffer};
+pub use ops::{blend_sdf, do_box, do_sphere, EditMode, SdfBlendMode, VoxelToolBuffer};
 pub use raycast::{voxel_raycast, VoxelRaycastHit, VoxelRaycastState};

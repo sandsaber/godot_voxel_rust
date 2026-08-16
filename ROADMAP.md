@@ -5,17 +5,19 @@ independently trackable — reference it in commits/PRs as `R1`, `R2`, …
 Statuses: ⬜ not started · 🟡 in progress · ✅ done. Detailed rationale and
 the full parity matrix live in [doc/source/status.md](doc/source/status.md).
 
-## R1 — Blocky terrain end-to-end ⬜
+## R1 — Blocky terrain end-to-end 🟡
 
-Attach a baked model library to `VoxelMesherBlocky` so blocky terrain renders
-on `VoxelTerrain`.
+Baked cube library + `VoxelMesherBlocky` now reach `VoxelTerrain`. Remaining
+work is Godot model-resource peers (meshes/materials), not the paging path.
 
-- [ ] Expose `VoxelBlockyLibrary` baking through the binding (models →
+- [x] Expose `VoxelBlockyLibrary` baking through the binding (models →
       `BakedLibrary` + `bake_library`)
-- [ ] Let `VoxelMesherBlocky` carry a library resource into the terrain
+- [x] Let `VoxelMesherBlocky` carry a library resource into the terrain
       pipeline
-- [ ] Smoke test: type-channel generator + blocky mesher renders visible
+- [x] Smoke test: type-channel generator + blocky mesher renders visible
       blocks
+- [ ] Real `VoxelBlockyModel` mesh/material peers instead of solid-cube
+      placeholders
 
 ## R2 — VoxelLodTerrain paging & rendering 🟡
 
@@ -36,12 +38,14 @@ renderer/API parity, not a missing runtime.
 - [ ] Port `VoxelAreaFinder` (area sync primitives)
 - [ ] Define the replication boundary for voxel edits/block data
 
-## R4 — Terrain editing tools ⬜
+## R4 — Terrain editing tools 🟡
 
-Upstream `VoxelTool` surface on real terrain.
+`VoxelTerrain.get_voxel_tool()` returns a live `VoxelToolTerrain` that can
+sphere/box/set voxels through `try_edit_voxel`.
 
-- [ ] `VoxelToolTerrain` backed by `VoxelTerrainCore` edits (sphere/box)
+- [x] `VoxelToolTerrain` backed by `VoxelTerrainCore` edits (sphere/box)
 - [ ] Smooth and paste modes
+- [ ] Hemisphere / metadata / random-tick
 
 ## R5 — Instancing rendering ⬜
 
@@ -63,14 +67,15 @@ Upstream `VoxelTool` surface on real terrain.
 
 ## R8 — CI rework 🟡
 
-Rust jobs exist (`rust.yml` on push/PR, scheduled TSan / fuzz / audit). The
-old scons workflows are still in the tree but disabled in the GitHub UI.
+Rust jobs exist (`rust.yml` on push/PR, scheduled TSan / fuzz / audit).
+Leftover C++ scons workflows have been removed from the tree.
 
-- [x] Automatic Rust CI on push/PR (fmt + test + clippy + smoke + Android)
+- [x] Automatic Rust CI on PRs (`verify`: fmt + test + clippy). Godot
+      smoke and Android are `workflow_dispatch` until the extension load
+      path is stable.
 - [x] Scheduled TSan, bounded fuzz, and `cargo audit`
-- [ ] Delete or archive the leftover C++ scons workflows
-- [ ] Make `Rust` a required status check (the workflow file was left
-      `disabled_manually` after the C++ removal; re-enable it in the Actions UI)
+- [x] Delete leftover C++ scons workflows
+- [x] Make `verify` a required status check on `master`
 
 ## Deferred by design (no ETA)
 

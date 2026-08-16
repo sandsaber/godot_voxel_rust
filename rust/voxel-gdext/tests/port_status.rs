@@ -637,6 +637,22 @@ fn intentionally_omitted_subsystems_remain_deferred() {
 }
 
 #[test]
+fn complete_status_must_not_describe_stubs() {
+    let manifest = load_manifest();
+    for class in array(field(&manifest, "classes")) {
+        if string(field(class, "status")) != "complete" {
+            continue;
+        }
+        let evidence = string(field(class, "evidence")).to_ascii_lowercase();
+        assert!(
+            !evidence.contains("stub") && !evidence.contains("todo(port)"),
+            "{} is complete but its evidence still describes a stub",
+            string(field(class, "name"))
+        );
+    }
+}
+
+#[test]
 fn complete_status_requires_an_existing_behavioral_test_reference() {
     let mut manifest = load_manifest();
     let classes = object_mut(&mut manifest)

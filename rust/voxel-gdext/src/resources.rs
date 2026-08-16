@@ -593,12 +593,30 @@ impl VoxelMesherBlockyGD {
             return -1;
         };
         let bound = buf.bind();
-        let lib = std::sync::Arc::new(voxel_core::meshers::blocky::BakedLibrary::default());
-        let mesher = voxel_core::meshers::BlockyMesher::new(lib).with_type_channel(type_channel);
+        let mesher = self.core_mesher();
+        let _ = type_channel;
         let input = voxel_core::meshers::MesherInput::new(bound.core_buffer(), Vector3i::zero(), 0);
         let mut output = voxel_core::meshers::MesherOutput::default();
-        voxel_core::meshers::VoxelMesher::build(&mesher, &mut output, &input);
+        voxel_core::meshers::VoxelMesher::build(mesher.as_ref(), &mut output, &input);
         output.total_vertex_count() as i64
+    }
+}
+
+impl VoxelMesherBlockyGD {
+    /// Build the engine-agnostic mesher, carrying the attached baked library.
+    pub fn core_mesher(&self) -> std::sync::Arc<dyn voxel_core::meshers::VoxelMesher> {
+        let library = self
+            .library_resource
+            .as_ref()
+            .and_then(|resource| resource.clone().try_cast::<VoxelBlockyLibraryGD>().ok())
+            .map(|library| library.bind().core_library())
+            .unwrap_or_default();
+        let type_channel = self.type_channel.max(0) as usize;
+        std::sync::Arc::new(
+            voxel_core::meshers::BlockyMesher::new(std::sync::Arc::new(library))
+                .with_type_channel(type_channel)
+                .with_occlusion(self.is_baking_occlusion(), self.occlusion_darkness),
+        )
     }
 }
 
@@ -934,17 +952,23 @@ pub struct VoxelBlockyLibraryGD {
     base: Base<Resource>,
     /// Number of models (plain field; exposed via get_model_count #[func]).
     model_count: i32,
-    /// The real baked model table.
+    /// The real baked model table. Index 0 is always air.
     library: voxel_core::meshers::blocky::BakedLibrary,
+    baked: bool,
 }
 
 #[godot_api]
 impl IResource for VoxelBlockyLibraryGD {
     fn init(base: Base<Resource>) -> Self {
+        let library = voxel_core::meshers::blocky::BakedLibrary {
+            models: vec![voxel_core::meshers::blocky::BakedModel::default()],
+            ..voxel_core::meshers::blocky::BakedLibrary::default()
+        };
         Self {
             base,
-            model_count: 0,
-            library: voxel_core::meshers::blocky::BakedLibrary::default(),
+            model_count: 1,
+            library,
+            baked: false,
         }
     }
 }
@@ -954,16 +978,27 @@ impl VoxelBlockyLibraryGD {
     /// Append a solid-color model and return its index.
     #[func]
     fn add_solid_model(&mut self, r: f32, g: f32, b: f32) -> i32 {
-        let model = voxel_core::meshers::blocky::BakedModel {
-            color: voxel_core::math::Color::from_rgb(r, g, b),
-            empty: false,
-            culls_neighbors: true,
-            ..voxel_core::meshers::blocky::BakedModel::default()
-        };
+        if !r.is_finite() || !g.is_finite() || !b.is_finite() {
+            godot_error!("VoxelBlockyLibrary.add_solid_model: color must be finite");
+            return -1;
+        }
         let idx = self.library.models.len() as i32;
-        self.library.models.push(model);
+        self.library
+            .models
+            .push(voxel_core::meshers::blocky::solid_cube_model(
+                voxel_core::math::Color::from_rgb(r, g, b),
+            ));
         self.model_count = self.library.models.len() as i32;
+        self.baked = false;
         idx
+    }
+
+    /// Bake side-culling / AO tables. Must be called after models change
+    /// before the library is used by `VoxelMesherBlocky`.
+    #[func]
+    fn bake(&mut self) {
+        voxel_core::meshers::blocky::bake_library(&mut self.library);
+        self.baked = true;
     }
 
     /// Number of models in the library.
@@ -986,15 +1021,14 @@ impl VoxelBlockyLibraryGD {
     /// `VoxelBlockyLibrary::add_model`.
     #[func]
     fn add_model(&mut self, _model: Gd<Resource>) -> i32 {
-        let baked = voxel_core::meshers::blocky::BakedModel {
-            color: voxel_core::math::Color::from_rgb(0.5, 0.5, 0.5),
-            empty: false,
-            culls_neighbors: true,
-            ..voxel_core::meshers::blocky::BakedModel::default()
-        };
         let idx = self.library.models.len() as i32;
-        self.library.models.push(baked);
+        self.library
+            .models
+            .push(voxel_core::meshers::blocky::solid_cube_model(
+                voxel_core::math::Color::from_rgb(0.5, 0.5, 0.5),
+            ));
         self.model_count = self.library.models.len() as i32;
+        self.baked = false;
         idx
     }
 
@@ -1040,17 +1074,30 @@ impl VoxelBlockyLibraryGD {
     #[func]
     fn set_models(&mut self, models: VarArray) {
         self.library.models.clear();
+        self.library
+            .models
+            .push(voxel_core::meshers::blocky::BakedModel::default());
         for _item in models.iter_shared() {
             self.library
                 .models
-                .push(voxel_core::meshers::blocky::BakedModel {
-                    color: voxel_core::math::Color::from_rgb(0.5, 0.5, 0.5),
-                    empty: false,
-                    culls_neighbors: true,
-                    ..voxel_core::meshers::blocky::BakedModel::default()
-                });
+                .push(voxel_core::meshers::blocky::solid_cube_model(
+                    voxel_core::math::Color::from_rgb(0.5, 0.5, 0.5),
+                ));
         }
         self.model_count = self.library.models.len() as i32;
+        self.baked = false;
+    }
+}
+
+impl VoxelBlockyLibraryGD {
+    /// Clone the baked table. Bakes on demand so a forgotten `bake()` still
+    /// produces meshable models.
+    pub fn core_library(&self) -> voxel_core::meshers::blocky::BakedLibrary {
+        let mut library = self.library.clone();
+        if !self.baked {
+            voxel_core::meshers::blocky::bake_library(&mut library);
+        }
+        library
     }
 }
 

@@ -40,7 +40,7 @@ at the repository root — reference items as `R1`…`R8` in commits/PRs.
 | Mesher selection (`mesher` property) | ✅ | Transvoxel, cubes; blocky wires through but needs a model library to produce geometry. |
 | Generators usable by terrain | ✅ | Flat / Waves / Noise / Heightmap / Image / Graph. |
 | Streams usable by terrain | ✅ | `VoxelStreamMemory`, `VoxelStreamRegionFiles` (region size hardcoded to 32, no settings surface yet). |
-| Editing terrain | 🟡 | `set_voxel_sdf` / `get_voxel_sdf` on `VoxelTerrain`; `VoxelToolTerrain` is a stub (path holder only). |
+| Editing terrain | 🟡 | `set_voxel_sdf` / `get_voxel_sdf` on `VoxelTerrain`; `get_voxel_tool()` returns a live `VoxelToolTerrain` (sphere/box/set). Hemisphere/metadata/random-tick still stubbed. |
 | Raycast | ✅ | DDA voxel traversal over the SDF channel. |
 | `VoxelLodTerrain` | 🟡 | Production Variable-LOD runtime (`new_variable_lod` + `try_process`), 3-LOD smoke scene. Pinned API still partial: transition-mask consumption, collision surfaces, GPU/normalmaps and most debug draws are stored stubs. |
 | Instancer rendering | 🟡 | Scatter computes counts; no MultiMesh output yet. |

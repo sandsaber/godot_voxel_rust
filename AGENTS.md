@@ -120,7 +120,7 @@ checkout build it first via the driver:
 
 ```sh
 cd rust
-./voxel-gdext/smoke_test/run_smoke_test.sh          # builds library + runs all 5 checks
+./voxel-gdext/smoke_test/run_smoke_test.sh          # builds library + runs all 6 checks
 ```
 
 It runs `api_test.gd` (class registration + `#[func]` surface),
