@@ -84,11 +84,17 @@ storage transaction per overlapping data block.
 
 Persistence of that metadata is R7, not a hole in the tool.
 
-## R5 — Instancing rendering 🟡
+## R5 — Instancing rendering ✅
 
 - [x] MultiMesh upload from `scatter_from_buffer` / `scatter_test`
 - [x] `InstanceBlock` map + stream with terrain mesh-block paging
-- [ ] Scene-item instancer (spawn real nodes per instance, not only MultiMesh)
+- [x] Scene-item instancer: `VoxelInstancer.set_item_scene` switches an item
+      to scene mode; every scattered instance then spawns a real `Node3D`
+      (the scene root at the instance transform), streamed per LOD0 mesh
+      block and freed on block exit — alongside the MultiMesh path, not
+      replacing it. Deferred with the C++ richness gap: per-instance
+      persistence, `VoxelInstanceComponent` bookkeeping, mesh-LOD tiers,
+      async generation tasks.
 
 ## R6 — Graph editor parity ✅
 

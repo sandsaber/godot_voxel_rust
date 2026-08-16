@@ -25,7 +25,7 @@ That file is the product queue; this page is the parity matrix.
 | Terrain paging (`VoxelTerrainCore`) | ✅ | Fixed-LOD and Variable-LOD clipbox planner, save-on-unload, viewer pairing, debug snapshot. |
 | Multiplayer replication (R3) | 🟡 | Boundary designed ([multiplayer.md](multiplayer.md)); interest index ported (`terrain::area_finder`, spatial hash + deterministic queries + `box_subtraction`). No transport. |
 | Edition (sphere/box/hemisphere/smooth/paste, DDA raycast, random-tick) | ✅ core | Tags-aware random-tick when a baked library is present. `MetadataValue` persists through save/load (narrow R7). |
-| Instancing | 🟡 | Scatter math + MultiMesh + per-mesh-block streaming. Scene-item instancer (real nodes) is still open. |
+| Instancing | ✅ core | Scatter math + MultiMesh + per-mesh-block streaming + scene items (`BlockInstanceData` drives MultiMesh *or* `PackedScene` roots). C++-only extras (per-instance persistence, component bookkeeping, async tasks) remain out. |
 | Modifiers | 🟡 | Sphere modifier real; mesh modifier is a box stand-in; not integrated into streaming. |
 | GPU compute / detail rendering / shaders | ⬜ | Deferred by design (keeps the core pure-Rust for Android/WASM). |
 | SQLite streams | ⬜ | Deferred by design. |
@@ -42,7 +42,7 @@ That file is the product queue; this page is the parity matrix.
 | Editing terrain | ✅ tool | Live `VoxelToolTerrain` on both nodes: sphere/box/hemisphere/smooth/paste, batched per data block, tags-aware random-tick. Metadata persists through save/load (R7 narrow); C++ Dictionary/Object payloads stay unreadable until R7 wide. |
 | Raycast | ✅ | DDA voxel traversal over the SDF channel. |
 | `VoxelLodTerrain` | ✅ runtime | Production clipbox planner, 3-LOD smoke scene, collision settings, lifecycle signals, wireframe debug-draw. GPU/normalmap inspector fields remain stored stubs. |
-| Instancer rendering | 🟡 | Scatter uploads MultiMeshes. As a terrain child it streams one instance block per paged LOD0 mesh block. Scene-item instantiation is still open. |
+| Instancer rendering | ✅ | Scatter uploads MultiMeshes; as a terrain child it streams one instance block per paged LOD0 mesh block. Scene items (`set_item_scene`) spawn real `Node3D`s per instance, streamed and freed with paging. |
 | Editor plugins | 🟡 | `.vox` parsing real. Voxel Graph bottom panel is a working GraphEdit addon. Instancer plugin is still a stub host. |
 | `VoxelBoxMover` / `VoxelAStarGrid3D` | 🟡 | Registered, but semantics differ from upstream (no physics-aware movement / no pathfinding engine yet). |
 | `VoxelStreamSQLite`, `VoxelVoxLoader` | 🟡 | Placeholders (path/extension validation only). SQLite is deferred by design. |
@@ -55,7 +55,6 @@ Tracked in ROADMAP; this is the honest size, not a new queue.
 |---|---|---|
 | **R7 wide** — Godot Variant codec + v2/v3 migration | Separate project | Would pull Variant into core or need a thick gdext encoder. |
 | **R3 transport** — interest protocol, peers, RPCs | Several stages | Boundary + `VoxelAreaFinder` done; needs an explicit go-ahead and a gdext/game-side owner. |
-| **R5 leftover** — scene-item instancer | Medium | MultiMesh path already streams. |
 | Graph editor polish, extra Image2D extras, `VoxelMeshSDF` bake | Small–medium each | Not blocking generate→mesh→page→save. |
 
 Intentionally **not** next: GPU, SQLite, multipass, Rapier, full Variant, multiplayer protocol.

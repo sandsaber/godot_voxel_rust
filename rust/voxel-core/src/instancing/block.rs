@@ -218,4 +218,54 @@ mod tests {
         assert_eq!(instances.len(), 1);
         assert_eq!(instances[0].item_index, 0);
     }
+
+    #[test]
+    fn scene_typed_items_scatter_like_multimesh_items() {
+        // Scene items carry the same BlockInstanceData payload (position,
+        // rotation, scale, item_index); the gdext instancer consumes it to
+        // spawn real nodes instead of a MultiMesh.
+        let mut library = InstanceLibrary::new();
+        library.add_item(InstanceLibraryItem {
+            mesh_type: crate::instancing::InstanceMeshType::Scene,
+            density: 1.0,
+            min_scale: 1.0,
+            max_scale: 1.0,
+            ..Default::default()
+        });
+        library.add_item(InstanceLibraryItem {
+            density: 1.0,
+            min_scale: 1.0,
+            max_scale: 1.0,
+            ..Default::default()
+        });
+        let positions = [Vector3f::new(0.0, 1.0, 0.0), Vector3f::new(2.0, 1.0, 0.0)];
+        let normals = [Vector3f::new(0.0, 1.0, 0.0); 2];
+        let instances = scatter_block_instances(
+            &library,
+            &ScatterConfig::default(),
+            1.0,
+            &positions,
+            &normals,
+        );
+        // Each item scatters over every surface point.
+        assert_eq!(instances.len(), 4);
+        assert_eq!(
+            instances
+                .iter()
+                .filter(|instance| instance.item_index == 0)
+                .count(),
+            2
+        );
+        assert_eq!(
+            instances
+                .iter()
+                .filter(|instance| instance.item_index == 1)
+                .count(),
+            2
+        );
+        for instance in &instances {
+            assert!(instance.rotation[3] != 0.0, "rotation must be a valid quat");
+            assert!(instance.scale.is_finite());
+        }
+    }
 }

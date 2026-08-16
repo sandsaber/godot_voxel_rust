@@ -7,10 +7,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use godot::classes::multi_mesh::TransformFormat;
-use godot::classes::{BoxMesh, MultiMesh, MultiMeshInstance3D};
+use godot::classes::{BoxMesh, MultiMesh, MultiMeshInstance3D, Node3D, PackedScene};
 use godot::prelude::*;
 use voxel_core::instancing::scatter::{InstanceGenerator, RandomScatterGenerator};
-use voxel_core::instancing::{InstanceLibrary, ScatterConfig};
+use voxel_core::instancing::{BlockInstanceData, InstanceLibrary, InstanceMeshType, ScatterConfig};
 use voxel_core::math::{Vector3f, Vector3i};
 use voxel_core::storage::{ChannelId, MetadataValue, VoxelBuffer, VoxelFormat};
 
@@ -1027,6 +1027,7 @@ impl VoxelBufferGD {
 #[cfg(test)]
 mod validation_tests {
     use super::*;
+    use std::f32::consts::FRAC_1_SQRT_2;
     use voxel_core::storage::voxel_buffer::{MAX_CHANNELS, MAX_SIZE};
 
     #[test]
@@ -1060,6 +1061,36 @@ mod validation_tests {
     fn script_item_count_rejects_oversized_allocations() {
         assert!(validate_script_item_count((MAX_SCRIPT_ITEMS + 1) as i32).is_err());
     }
+
+    #[test]
+    fn instance_transform_applies_rotation_scale_and_position() {
+        // Identity rotation, scale 2, at (1, 2, 3).
+        let identity = BlockInstanceData {
+            position: Vector3f::new(1.0, 2.0, 3.0),
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            scale: 2.0,
+            item_index: 0,
+        };
+        let t = instance_transform(&identity);
+        assert_eq!(t.origin, Vector3::new(1.0, 2.0, 3.0));
+        assert_eq!(t.basis.col_a(), Vector3::new(2.0, 0.0, 0.0));
+        assert_eq!(t.basis.col_b(), Vector3::new(0.0, 2.0, 0.0));
+        assert_eq!(t.basis.col_c(), Vector3::new(0.0, 0.0, 2.0));
+
+        // 90-degree yaw around +Y: quaternion (0, sqrt(2)/2, 0, sqrt(2)/2).
+        let yawed = BlockInstanceData {
+            position: Vector3f::zero(),
+            rotation: [0.0, FRAC_1_SQRT_2, 0.0, FRAC_1_SQRT_2],
+            scale: 1.0,
+            item_index: 0,
+        };
+        let t = instance_transform(&yawed);
+        let close = |a: Vector3, b: Vector3| {
+            (a.x - b.x).abs() < 1e-6 && (a.y - b.y).abs() < 1e-6 && (a.z - b.z).abs() < 1e-6
+        };
+        assert!(close(t.basis.col_a(), Vector3::new(0.0, 0.0, -1.0)));
+        assert!(close(t.basis.col_c(), Vector3::new(1.0, 0.0, 0.0)));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1079,15 +1110,38 @@ pub struct VoxelInstancerGD {
     config: ScatterConfig,
     /// Optional per-item mesh used when uploading MultiMeshes.
     item_meshes: Vec<Option<Gd<godot::classes::Mesh>>>,
+    /// Optional per-item scene; items with one are scene-typed and spawn
+    /// real `Node3D`s instead of a MultiMesh (R5 scene instancing).
+    item_scenes: Vec<Option<Gd<PackedScene>>>,
     /// Live MultiMeshInstance3D children created by the last one-shot scatter.
     uploaded_instances: Vec<Gd<MultiMeshInstance3D>>,
+    /// Live scene-instance `Node3D` children created by the last one-shot
+    /// scatter.
+    uploaded_scene_nodes: Vec<Gd<Node3D>>,
     /// Resident per-block instance data, streamed with terrain paging.
     instance_blocks: voxel_core::instancing::InstanceBlockMap,
-    /// MultiMesh nodes keyed by streamed block `(x, y, z, lod)`.
-    streamed_nodes: HashMap<(i32, i32, i32, u8), Vec<Gd<MultiMeshInstance3D>>>,
+    /// Nodes keyed by streamed block `(x, y, z, lod)`.
+    streamed_nodes: HashMap<(i32, i32, i32, u8), Vec<StreamedInstanceNode>>,
     /// Density multiplier.
     #[var]
     density_multiplier: f32,
+}
+
+/// A node spawned for one streamed instance block: one `MultiMeshInstance3D`
+/// per MultiMesh-typed item, or one `Node3D` per instance for scene-typed
+/// items.
+enum StreamedInstanceNode {
+    MultiMesh(Gd<MultiMeshInstance3D>),
+    Scene(Gd<Node3D>),
+}
+
+impl StreamedInstanceNode {
+    fn queue_free(self) {
+        match self {
+            StreamedInstanceNode::MultiMesh(mut node) => node.queue_free(),
+            StreamedInstanceNode::Scene(mut node) => node.queue_free(),
+        }
+    }
 }
 
 #[godot_api]
@@ -1098,7 +1152,9 @@ impl INode3D for VoxelInstancerGD {
             library: InstanceLibrary::new(),
             config: ScatterConfig::default(),
             item_meshes: Vec::new(),
+            item_scenes: Vec::new(),
             uploaded_instances: Vec::new(),
+            uploaded_scene_nodes: Vec::new(),
             instance_blocks: voxel_core::instancing::InstanceBlockMap::new(),
             streamed_nodes: HashMap::new(),
             density_multiplier: 1.0,
@@ -1149,10 +1205,12 @@ impl VoxelInstancerGD {
         };
         self.library.add_item(item);
         self.item_meshes.push(None);
+        self.item_scenes.push(None);
         index
     }
 
     /// Assign the mesh used when this item is uploaded as a MultiMesh.
+    /// Assigning a mesh switches the item back to the MultiMesh type.
     #[func]
     fn set_item_mesh(&mut self, index: i32, mesh: Gd<godot::classes::Mesh>) {
         let Ok(index) = usize::try_from(index) else {
@@ -1164,6 +1222,42 @@ impl VoxelInstancerGD {
             return;
         }
         self.item_meshes[index] = Some(mesh);
+        if let Some(item) = self.library.items.get_mut(index) {
+            item.mesh_type = InstanceMeshType::MultiMesh;
+        }
+    }
+
+    /// Assign the scene instantiated per instance of this item. Items with a
+    /// scene are scene-typed: every scattered instance spawns a real `Node3D`
+    /// (the scene's root, placed at the instance transform) instead of being
+    /// packed into a MultiMesh.
+    #[func]
+    fn set_item_scene(&mut self, index: i32, scene: Gd<PackedScene>) {
+        let Ok(index) = usize::try_from(index) else {
+            godot_error!("VoxelInstancer.set_item_scene: index must be non-negative");
+            return;
+        };
+        if index >= self.item_scenes.len() {
+            godot_error!("VoxelInstancer.set_item_scene: index is out of range");
+            return;
+        }
+        self.item_scenes[index] = Some(scene);
+        if let Some(item) = self.library.items.get_mut(index) {
+            item.mesh_type = InstanceMeshType::Scene;
+        }
+    }
+
+    /// The scene assigned to an item, or `null` when the item is
+    /// MultiMesh-typed or has no scene.
+    #[func]
+    fn get_item_scene(&self, index: i32) -> Variant {
+        let Ok(index) = usize::try_from(index) else {
+            return Variant::nil();
+        };
+        match self.item_scenes.get(index).and_then(|scene| scene.as_ref()) {
+            Some(scene) => scene.to_variant(),
+            None => Variant::nil(),
+        }
     }
 
     /// Get the number of items in the library.
@@ -1237,7 +1331,7 @@ impl VoxelInstancerGD {
                 total = next_total;
                 by_item.push(result);
             }
-            self.upload_scatter_multimeshes(&by_item);
+            self.upload_scatter_instances(&by_item);
             return i32::try_from(total).unwrap_or(i32::MAX);
         }
         0
@@ -1269,7 +1363,7 @@ impl VoxelInstancerGD {
             snap_to_normal: true,
         };
         let result = gen.generate(&positions, &normals, 0, &self.config);
-        self.upload_scatter_multimeshes(std::slice::from_ref(&result));
+        self.upload_scatter_instances(std::slice::from_ref(&result));
         i32::try_from(result.len()).unwrap_or(i32::MAX)
     }
 
@@ -1321,16 +1415,26 @@ impl VoxelInstancerGD {
 }
 
 impl VoxelInstancerGD {
-    fn upload_scatter_multimeshes(
-        &mut self,
-        by_item: &[Vec<voxel_core::instancing::scatter::BlockInstanceData>],
-    ) {
+    fn upload_scatter_instances(&mut self, by_item: &[Vec<BlockInstanceData>]) {
         for mut old in self.uploaded_instances.drain(..) {
+            old.queue_free();
+        }
+        for mut old in self.uploaded_scene_nodes.drain(..) {
             old.queue_free();
         }
         let default_mesh = BoxMesh::new_gd().upcast::<godot::classes::Mesh>();
         for (item_index, instances) in by_item.iter().enumerate() {
             if instances.is_empty() {
+                continue;
+            }
+            if self.item_is_scene(item_index) {
+                let Some(scene) = self.item_scenes.get(item_index).and_then(|s| s.clone()) else {
+                    continue;
+                };
+                for node in instantiate_scene_nodes(&scene, "scatter", instances) {
+                    self.base_mut().add_child(&node);
+                    self.uploaded_scene_nodes.push(node);
+                }
                 continue;
             }
             let mesh = self
@@ -1349,18 +1453,7 @@ impl VoxelInstancerGD {
                 let Ok(index) = i32::try_from(i) else {
                     break;
                 };
-                let [qx, qy, qz, qw] = instance.rotation;
-                let quat = Quaternion::new(qx, qy, qz, qw);
-                let basis = Basis::from_quaternion(quat).scaled(Vector3::splat(instance.scale));
-                let transform = Transform3D::new(
-                    basis,
-                    Vector3::new(
-                        instance.position.x,
-                        instance.position.y,
-                        instance.position.z,
-                    ),
-                );
-                multimesh.set_instance_transform(index, transform);
+                multimesh.set_instance_transform(index, instance_transform(instance));
             }
             let mut node = MultiMeshInstance3D::new_alloc();
             node.set_multimesh(&multimesh);
@@ -1435,7 +1528,7 @@ impl VoxelInstancerGD {
                 slot.push(*instance);
             }
         }
-        let nodes = self.upload_block_multimeshes(position, lod_index, &by_item);
+        let nodes = self.upload_block_instances(position, lod_index, &by_item);
         self.streamed_nodes
             .insert((position.x, position.y, position.z, lod_index), nodes);
         self.instance_blocks
@@ -1450,22 +1543,45 @@ impl VoxelInstancerGD {
             .streamed_nodes
             .remove(&(position.x, position.y, position.z, lod_index))
         {
-            for mut node in nodes {
+            for node in nodes {
                 node.queue_free();
             }
         }
     }
 
-    fn upload_block_multimeshes(
+    fn item_is_scene(&self, item_index: usize) -> bool {
+        self.library
+            .items
+            .get(item_index)
+            .is_some_and(|item| matches!(item.mesh_type, InstanceMeshType::Scene))
+    }
+
+    fn upload_block_instances(
         &mut self,
         position: Vector3i,
         lod_index: u8,
-        by_item: &[Vec<voxel_core::instancing::BlockInstanceData>],
-    ) -> Vec<Gd<MultiMeshInstance3D>> {
+        by_item: &[Vec<BlockInstanceData>],
+    ) -> Vec<StreamedInstanceNode> {
         let default_mesh = BoxMesh::new_gd().upcast::<godot::classes::Mesh>();
         let mut nodes = Vec::new();
         for (item_index, instances) in by_item.iter().enumerate() {
             if instances.is_empty() {
+                continue;
+            }
+            if self.item_is_scene(item_index) {
+                let Some(scene) = self.item_scenes.get(item_index).and_then(|s| s.clone()) else {
+                    // A scene-typed item without a scene has nothing to
+                    // instantiate; skip it like upstream skips empty items.
+                    continue;
+                };
+                let prefix = format!(
+                    "scene_lod{lod_index}_{}_{}_{}_{item_index}",
+                    position.x, position.y, position.z
+                );
+                for mut node in instantiate_scene_nodes(&scene, &prefix, instances) {
+                    self.base_mut().add_child(&node);
+                    nodes.push(StreamedInstanceNode::Scene(node));
+                }
                 continue;
             }
             let mesh = self
@@ -1484,18 +1600,7 @@ impl VoxelInstancerGD {
                 let Ok(index) = i32::try_from(i) else {
                     break;
                 };
-                let [qx, qy, qz, qw] = instance.rotation;
-                let quat = Quaternion::new(qx, qy, qz, qw);
-                let basis = Basis::from_quaternion(quat).scaled(Vector3::splat(instance.scale));
-                let transform = Transform3D::new(
-                    basis,
-                    Vector3::new(
-                        instance.position.x,
-                        instance.position.y,
-                        instance.position.z,
-                    ),
-                );
-                multimesh.set_instance_transform(index, transform);
+                multimesh.set_instance_transform(index, instance_transform(instance));
             }
             let mut node = MultiMeshInstance3D::new_alloc();
             node.set_multimesh(&multimesh);
@@ -1504,10 +1609,53 @@ impl VoxelInstancerGD {
                 position.x, position.y, position.z
             ));
             self.base_mut().add_child(&node);
-            nodes.push(node);
+            nodes.push(StreamedInstanceNode::MultiMesh(node));
         }
         nodes
     }
+}
+
+/// Build the Godot transform of one scattered instance: quaternion rotation,
+/// uniform scale, world-space position.
+fn instance_transform(instance: &BlockInstanceData) -> Transform3D {
+    let [qx, qy, qz, qw] = instance.rotation;
+    let quat = Quaternion::new(qx, qy, qz, qw);
+    let basis = Basis::from_quaternion(quat).scaled(Vector3::splat(instance.scale));
+    Transform3D::new(
+        basis,
+        Vector3::new(
+            instance.position.x,
+            instance.position.y,
+            instance.position.z,
+        ),
+    )
+}
+
+/// Instantiate `scene` once per instance data entry, naming each root
+/// `{prefix}_{i}`. Scenes whose root is not a `Node3D` are reported and
+/// skipped, matching upstream's requirement that instance roots are 3D.
+fn instantiate_scene_nodes(
+    scene: &Gd<PackedScene>,
+    prefix: &str,
+    instances: &[BlockInstanceData],
+) -> Vec<Gd<Node3D>> {
+    let mut nodes = Vec::new();
+    for (i, instance) in instances.iter().enumerate() {
+        let Some(instantiated) = scene.instantiate() else {
+            godot_error!("VoxelInstancer: scene failed to instantiate; instance {i} skipped");
+            continue;
+        };
+        let Ok(mut node) = instantiated.try_cast::<Node3D>() else {
+            godot_error!(
+                "VoxelInstancer: scene root of item must be a Node3D; instance {i} skipped"
+            );
+            continue;
+        };
+        node.set_transform(instance_transform(instance));
+        node.set_name(&format!("{prefix}_{i}"));
+        nodes.push(node);
+    }
+    nodes
 }
 
 fn unpack_mesh_locations(packed: PackedInt32Array) -> Vec<(i32, i32, i32, u8)> {

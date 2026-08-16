@@ -508,7 +508,7 @@
       "status": "partial",
       "binding_state": "registered",
       "registered_name": "VoxelInstanceLibrarySceneItem",
-      "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
+      "evidence": "Registered resource with a real scene slot; consumed by VoxelInstancer scene items (set_item_scene/get_item_scene path). Upstream's generator/component wiring is not ported.",
       "source_paths": [
         "upstream:doc/classes/VoxelInstanceLibrarySceneItem.xml",
         "rust/voxel-gdext/src/resources3.rs"
@@ -520,7 +520,7 @@
       "status": "partial",
       "binding_state": "registered",
       "registered_name": "VoxelInstancer",
-      "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
+      "evidence": "Registered node with library items, seeded scatter, MultiMesh upload, per-mesh-block streaming, and scene-item instancing (set_item_scene spawns real Node3D roots per instance). Upstream-only extras (async tasks, persistence, fading, body tracking) keep it partial.",
       "source_paths": [
         "upstream:doc/classes/VoxelInstancer.xml",
         "rust/voxel-gdext/src/voxel_buffer.rs"
