@@ -1995,12 +1995,29 @@ impl VoxelBlockyModelMeshGD {
 }
 
 impl VoxelBlockyModelMeshGD {
-    /// Produce the engine-agnostic solid [`BakedModel`] for this mesh.
-    #[allow(dead_code)]
+    /// Produce the engine-agnostic [`BakedModel`]. Assigned Godot mesh
+    /// triangles become the interior surface; otherwise a solid cube.
     pub fn to_baked_model(&self) -> voxel_core::meshers::blocky::BakedModel {
-        let mut m = voxel_core::meshers::blocky::solid_cube_model(
-            voxel_core::math::Color::from_rgb(self.r, self.g, self.b),
-        );
+        let color = voxel_core::math::Color::from_rgb(self.r, self.g, self.b);
+        let mut m = if let Some(surface) = self
+            .mesh_resource
+            .as_ref()
+            .and_then(extract_blocky_model_surface)
+        {
+            let mut model = voxel_core::meshers::blocky::BakedModel {
+                color,
+                empty: false,
+                culls_neighbors: !self.transparent,
+                is_transparent: self.transparent,
+                ..voxel_core::meshers::blocky::BakedModel::default()
+            };
+            model.model.surface_count = 1;
+            model.model.surfaces[0] = surface;
+            model.model.empty_sides_mask = 0b0011_1111;
+            model
+        } else {
+            voxel_core::meshers::blocky::solid_cube_model(color)
+        };
         m.is_transparent = self.transparent;
         m.culls_neighbors = !self.transparent;
         m.cutout_sides_enabled = self.side_cutout_enabled_value;
@@ -2009,6 +2026,71 @@ impl VoxelBlockyModelMeshGD {
         }
         m
     }
+}
+
+const MAX_BAKED_MESH_VERTICES: usize = 65_536;
+
+fn extract_blocky_model_surface(
+    mesh: &Gd<godot::classes::Mesh>,
+) -> Option<voxel_core::meshers::blocky::ModelSurface> {
+    use godot::classes::mesh::ArrayType;
+    if mesh.get_surface_count() <= 0 {
+        return None;
+    }
+    let arrays = mesh.surface_get_arrays(0);
+    let array_index = |kind: ArrayType| usize::try_from(kind.ord()).unwrap_or(0);
+    let vertices = arrays
+        .get(array_index(ArrayType::VERTEX))?
+        .try_to::<PackedVector3Array>()
+        .ok()?;
+    if vertices.is_empty() || vertices.len() > MAX_BAKED_MESH_VERTICES {
+        return None;
+    }
+    let normals = arrays
+        .get(array_index(ArrayType::NORMAL))
+        .and_then(|value| value.try_to::<PackedVector3Array>().ok())
+        .unwrap_or_default();
+    let uvs = arrays
+        .get(array_index(ArrayType::TEX_UV))
+        .and_then(|value| value.try_to::<PackedVector2Array>().ok())
+        .unwrap_or_default();
+    let indices = arrays
+        .get(array_index(ArrayType::INDEX))
+        .and_then(|value| value.try_to::<PackedInt32Array>().ok())
+        .unwrap_or_default();
+    let mut surface = voxel_core::meshers::blocky::ModelSurface {
+        collision_enabled: true,
+        ..voxel_core::meshers::blocky::ModelSurface::default()
+    };
+    for vertex in vertices.as_slice() {
+        surface.positions.push(voxel_core::math::Vector3f::new(
+            vertex.x, vertex.y, vertex.z,
+        ));
+    }
+    if normals.len() == vertices.len() {
+        for normal in normals.as_slice() {
+            surface.normals.push(voxel_core::math::Vector3f::new(
+                normal.x, normal.y, normal.z,
+            ));
+        }
+    } else {
+        surface.normals = vec![voxel_core::math::Vector3f::new(0.0, 1.0, 0.0); vertices.len()];
+    }
+    if uvs.len() == vertices.len() {
+        for uv in uvs.as_slice() {
+            surface
+                .uvs
+                .push(voxel_core::math::Vector2f::new(uv.x, uv.y));
+        }
+    } else {
+        surface.uvs = vec![voxel_core::math::Vector2f::new(0.0, 0.0); vertices.len()];
+    }
+    if indices.is_empty() {
+        surface.indices = (0..i32::try_from(vertices.len()).unwrap_or(0)).collect();
+    } else {
+        surface.indices.extend_from_slice(indices.as_slice());
+    }
+    Some(surface)
 }
 
 /// A fluid blocky model (water/lava). `to_baked_model` produces a model
