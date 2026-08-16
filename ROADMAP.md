@@ -17,14 +17,19 @@ on `VoxelTerrain`.
 - [ ] Smoke test: type-channel generator + blocky mesher renders visible
       blocks
 
-## R2 — VoxelLodTerrain paging & rendering ⬜
+## R2 — VoxelLodTerrain paging & rendering 🟡
 
-Replace the current facade with a real multi-LOD node (upstream behavior):
-octree-driven paging, streaming, rendering with LOD transitions.
+Production clipbox planner is live (`VoxelTerrainCore::new_variable_lod` +
+`try_process`). The Godot node pages, meshes, splits/joins and uploads
+`ArrayMesh`es; a 3-LOD smoke scene covers viewer movement. Remaining work is
+renderer/API parity, not a missing runtime.
 
-- [ ] Wire `LodOctree` decisions to stream load/save in the node
-- [ ] Render LOD blocks + transition meshes (core meshers already support it)
-- [ ] Viewer-driven subdivision/joining in `_process`
+- [x] Wire planner decisions to stream load/save in the node
+- [x] Render LOD blocks through the shared mesh-lifecycle path
+- [x] Viewer-driven split/join in `_process`
+- [ ] Consume `RenderTopologyChanged` / per-block transition masks in Godot
+- [ ] Collision surfaces on the Variable-LOD node
+- [ ] Upstream octree debug-draw / visual parity
 
 ## R3 — Multiplayer / areas ⬜
 
@@ -56,13 +61,16 @@ Upstream `VoxelTool` surface on real terrain.
 - [ ] `VoxelStreamRegionFiles` settings surface (region/sector size, channel
       depths, rotation, file conversion)
 
-## R8 — CI rework ⬜
+## R8 — CI rework 🟡
 
-The old scons-based workflows are dead after the C++ removal; `rust.yml` is
-manual-only.
+Rust jobs exist (`rust.yml` on push/PR, scheduled TSan / fuzz / audit). The
+old scons workflows are still in the tree but disabled in the GitHub UI.
 
-- [ ] Automatic Rust CI on push/PR (build + test + clippy + fmt)
-- [ ] Remove or replace the legacy C++ workflows
+- [x] Automatic Rust CI on push/PR (fmt + test + clippy + smoke + Android)
+- [x] Scheduled TSan, bounded fuzz, and `cargo audit`
+- [ ] Delete or archive the leftover C++ scons workflows
+- [ ] Make `Rust` a required status check (the workflow file was left
+      `disabled_manually` after the C++ removal; re-enable it in the Actions UI)
 
 ## Deferred by design (no ETA)
 

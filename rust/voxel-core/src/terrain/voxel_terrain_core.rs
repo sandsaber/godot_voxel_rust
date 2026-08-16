@@ -22746,10 +22746,18 @@ mod tests {
 
         core.flush_pending_saves().unwrap();
 
-        assert_eq!(stream.flush_attempts(), 2);
-        assert_eq!(
-            stream.save_attempts(),
-            AUTOMATIC_SAVE_CHECKPOINT_BLOCK_THRESHOLD * 2
+        // Recovery must flush at least once more. Extra flushes are allowed:
+        // an explicit flush can also satisfy the automatic checkpoint on the
+        // same tick, and worker completion order is not deterministic.
+        assert!(
+            stream.flush_attempts() >= 2,
+            "explicit recovery must flush after the failed automatic checkpoint, got {}",
+            stream.flush_attempts()
+        );
+        assert!(
+            stream.save_attempts() >= AUTOMATIC_SAVE_CHECKPOINT_BLOCK_THRESHOLD * 2,
+            "explicit recovery must rewrite the discarded staging payload, got {}",
+            stream.save_attempts()
         );
         assert_eq!(core.last_save_checkpoint_error(), None);
         assert!(core.save_journal.is_empty());

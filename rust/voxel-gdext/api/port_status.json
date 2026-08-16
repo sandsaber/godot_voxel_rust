@@ -257,7 +257,7 @@
         "rust/voxel-gdext/src/voxel_buffer.rs"
       ],
       "behavioral_tests": [
-        "rust/voxel-gdext/smoke_test/api_test.gd#_init"
+        "rust/voxel-gdext/smoke_test/api_test.gd#_ready"
       ]
     },
     {

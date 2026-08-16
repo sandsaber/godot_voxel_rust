@@ -724,7 +724,7 @@ fn complete_status_requires_an_existing_behavioral_test_reference() {
         object_mut(&mut classes[candidate]).insert(
             "behavioral_tests".to_string(),
             Value::Array(vec![Value::String(
-                "rust/voxel-gdext/smoke_test/api_test.gd#_init".to_string(),
+                "rust/voxel-gdext/smoke_test/api_test.gd#_ready".to_string(),
             )]),
         );
     }
