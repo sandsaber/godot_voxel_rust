@@ -200,7 +200,7 @@ pub fn serialize(buffer: &VoxelBuffer, dst: &mut Vec<u8>) -> Result<usize, Error
         // voxel, see the module docs. Like C++, nothing is written — not even
         // a size of 0 — when the buffer carries no metadata, which keeps the
         // output byte-compatible with pre-metadata saves.
-        let block_metadata = buffer.block_metadata().clone();
+        let block_metadata = buffer.block_metadata();
         let mut entries: Vec<(Vector3i, MetadataValue)> = Vec::new();
         buffer.for_each_voxel_metadata(|position, value| entries.push((position, value.clone())));
         if !entries.is_empty() || !block_metadata.is_nil() {
@@ -226,7 +226,7 @@ pub fn serialize(buffer: &VoxelBuffer, dst: &mut Vec<u8>) -> Result<usize, Error
             let mut section = Vec::new();
             {
                 let mut mw = MemoryWriter::little(&mut section);
-                store_metadata_value(&mut mw, &block_metadata)?;
+                store_metadata_value(&mut mw, block_metadata)?;
                 for (position, value) in &entries {
                     mw.store_16(position.x as u16);
                     mw.store_16(position.y as u16);
@@ -342,7 +342,11 @@ pub fn deserialize_with_limits(
         });
     }
 
-    let mut r = MemoryReader::little(src);
+    // The reader is bounded to the payload: channel reads derived from the
+    // (untrusted) size header must never consume the trailing magic. Without
+    // this bound, an over-declaring stream could swallow the magic bytes and
+    // still deserialize "successfully".
+    let mut r = MemoryReader::little(&src[..tail_start]);
     let version = r.try_get_8().ok_or(Error::UnexpectedEof)?;
     if version != BLOCK_FORMAT_VERSION {
         // v2/v3 migration needs the Godot Variant metadata codec — deferred.
@@ -398,8 +402,7 @@ pub fn deserialize_with_limits(
     // Envelope corruption is a hard error, but content problems must never
     // fail the load: C++ ignores `deserialize_metadata` failures, so voxel
     // data survives and the loss is surfaced via `Error::MetadataSkipped`.
-    let remaining_before_magic =
-        (src.len() - BLOCK_TRAILING_MAGIC_SIZE).saturating_sub(r.position());
+    let remaining_before_magic = tail_start - r.position();
     if remaining_before_magic > 0 {
         if remaining_before_magic < 4 {
             return Err(Error::UnexpectedEof);
@@ -817,6 +820,32 @@ mod tests {
         assert_eq!(deserialize(&bytes, &mut dst), Err(Error::MetadataSkipped));
         assert_eq!(dst.size(), src.size());
         assert_eq!(dst.get_voxel(3, 1, 2, 0), src.get_voxel(3, 1, 2, 0));
+    }
+
+    #[test]
+    fn deserialize_rejects_channels_overrunning_the_magic() {
+        // Declared 2³ volume, but the last channel is raw (fmt 0x00) and the
+        // payload after it holds only 4 bytes: the channel read wants 8 and
+        // must NOT be allowed to swallow the trailing magic as voxel data.
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.push(BLOCK_FORMAT_VERSION);
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        for _ in 0..7 {
+            bytes.push(0x01); // Uniform, 8-bit
+            bytes.push(0);
+        }
+        bytes.push(0x00); // None compression, 8-bit -> wants 8 raw bytes
+        bytes.extend_from_slice(&[0xaa; 4]);
+        bytes.extend_from_slice(&BLOCK_TRAILING_MAGIC.to_le_bytes());
+        assert_eq!(bytes.len(), 30);
+
+        let mut dst = VoxelBuffer::new(Allocator::Default);
+        match deserialize(&bytes, &mut dst) {
+            Err(Error::UnexpectedEof) => {}
+            other => panic!("expected UnexpectedEof, got {other:?}"),
+        }
     }
 
     #[test]

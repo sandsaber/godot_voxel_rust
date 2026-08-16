@@ -151,4 +151,36 @@ fn main() {
         .expect("truncated-metadata seed must load voxels");
     write_seed("block_serializer", "metadata-truncated.bin", &truncated);
     write_seed("region_file", "metadata-truncated.bin", &truncated);
+
+    // More entries than the 4x4x4 base block's 64 voxels: pins the decoder's
+    // volume cap (duplicates-only territory, rejected by budget).
+    let mut flooded = vec![0u8]; // TYPE_EMPTY block entry
+    flooded.extend(std::iter::repeat_n(0u8, 65 * 7)); // 65 nil entries
+    let flooded_seed = hostile(&flooded);
+    let mut flooded_check = VoxelBuffer::with_size(Vector3i::zero());
+    block_serializer::decompress_and_deserialize(&flooded_seed, &mut flooded_check)
+        .expect("entry-flood seed must load voxels");
+    write_seed(
+        "block_serializer",
+        "metadata-entry-flood.bin",
+        &flooded_seed,
+    );
+    write_seed("region_file", "metadata-entry-flood.bin", &flooded_seed);
+
+    // Text entry whose declared length (0x00ffffff) trips the string budget
+    // before any bytes are consumed.
+    let mut budget = vec![0u8]; // TYPE_EMPTY block entry
+    budget.extend_from_slice(&[0, 0, 0, 0, 0, 0]); // position (0,0,0)
+    budget.push(41); // METADATA_TYPE_TEXT
+    budget.extend_from_slice(&0x00ff_ffffu32.to_le_bytes());
+    let budget_seed = hostile(&budget);
+    let mut budget_check = VoxelBuffer::with_size(Vector3i::zero());
+    block_serializer::decompress_and_deserialize(&budget_seed, &mut budget_check)
+        .expect("string-budget seed must load voxels");
+    write_seed(
+        "block_serializer",
+        "metadata-string-budget.bin",
+        &budget_seed,
+    );
+    write_seed("region_file", "metadata-string-budget.bin", &budget_seed);
 }

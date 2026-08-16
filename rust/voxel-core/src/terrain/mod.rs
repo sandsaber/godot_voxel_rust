@@ -7,6 +7,8 @@
 //! the `voxel-gdext` crate.
 
 pub mod area_finder;
+
+pub use area_finder::{box_subtraction, AreaError, AreaId, VoxelAreaFinder, MAX_CELLS_PER_AREA};
 pub mod clipbox_coordinator;
 #[allow(dead_code)] // Dormant Task 6 ledger; VoxelTerrainCore adoption is the next bounded slice.
 pub(super) mod coverage_hold_ledger;
