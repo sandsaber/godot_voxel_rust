@@ -70,7 +70,9 @@ sphere/box/set voxels through `try_edit_voxel`.
 Rust jobs exist (`rust.yml` on push/PR, scheduled TSan / fuzz / audit).
 Leftover C++ scons workflows have been removed from the tree.
 
-- [x] Automatic Rust CI on push/PR (fmt + test + clippy + smoke + Android)
+- [x] Automatic Rust CI on PRs (`verify`: fmt + test + clippy). Godot
+      smoke and Android are `workflow_dispatch` until the extension load
+      path is stable.
 - [x] Scheduled TSan, bounded fuzz, and `cargo audit`
 - [x] Delete leftover C++ scons workflows
 - [x] Make `verify` a required status check on `master`
