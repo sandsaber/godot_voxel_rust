@@ -18,11 +18,15 @@
 //!
 //! Format reference (Godot 4 `core/io/marshalls.cpp`, `encode_variant`):
 //! every value starts with a `u32` little-endian header whose low 16 bits
-//! are the `Variant::Type` and whose high bits are flags
-//! (`ENCODE_FLAG_OBJECT_AS_ID = 1`). `FLOAT` is a 64-bit double, integers
-//! are 64-bit, `STRING` is `u32` byte length + UTF-8 padded to 4 bytes,
-//! containers are `u32` element counts followed by their elements, and
-//! packed byte/string arrays pad their payload to 4-byte multiples.
+//! are the `Variant::Type` and whose high bits are flags (`1 << 16`).
+//! Scalars are width-tagged: INT is 4 bytes, 8 with the flag (outside
+//! i32); FLOAT is a 4-byte f32, 8-byte f64 with the flag (values not
+//! exactly f32-representable). Vector/quaternion/AABB components are f32
+//! in single-precision builds (f64 + flag in double builds). `STRING` is
+//! `u32` byte length + UTF-8 padded to 4 bytes; PackedStringArray
+//! elements additionally include the NUL in their length. Containers are
+//! `u32` element counts followed by their elements; packed byte/string
+//! arrays pad their payload to 4-byte multiples.
 
 use crate::io::serialization::{MemoryReader, MemoryWriter};
 
@@ -39,21 +43,31 @@ mod types {
     pub const RECT2I: u32 = 8;
     pub const VECTOR3: u32 = 9;
     pub const VECTOR3I: u32 = 10;
+    #[allow(dead_code)]
     pub const TRANSFORM2D: u32 = 11;
     pub const VECTOR4: u32 = 12;
     pub const VECTOR4I: u32 = 13;
     pub const PLANE: u32 = 14;
     pub const QUATERNION: u32 = 15;
     pub const AABB: u32 = 16;
+    #[allow(dead_code)]
     pub const BASIS: u32 = 17;
+    #[allow(dead_code)]
     pub const TRANSFORM3D: u32 = 18;
+    #[allow(dead_code)]
     pub const PROJECTION: u32 = 19;
     pub const COLOR: u32 = 20;
+    #[allow(dead_code)]
     pub const STRING_NAME: u32 = 21;
+    #[allow(dead_code)]
     pub const NODE_PATH: u32 = 22;
+    #[allow(dead_code)]
     pub const RID: u32 = 23;
+    #[allow(dead_code)]
     pub const OBJECT: u32 = 24;
+    #[allow(dead_code)]
     pub const CALLABLE: u32 = 25;
+    #[allow(dead_code)]
     pub const SIGNAL: u32 = 26;
     pub const DICTIONARY: u32 = 27;
     pub const ARRAY: u32 = 28;
@@ -68,8 +82,10 @@ mod types {
     pub const PACKED_COLOR_ARRAY: u32 = 37;
 }
 
-/// Flag in the wire header's high bits: object encoded as an id.
-const ENCODE_FLAG_OBJECT_AS_ID: u32 = 1;
+/// Flag in the wire header's high bits. Godot uses one bit (1 << 16) for
+/// two purposes: `ENCODE_FLAG_64` (64-bit INT/FLOAT and f64-composite
+/// reals in double-precision builds) and `ENCODE_FLAG_OBJECT_AS_ID`.
+const ENCODE_FLAG_64: u32 = 1 << 16;
 
 /// A decoded/encodable Godot Variant for metadata purposes. Floats are the
 /// wire-width types (f64 for `FLOAT` and vector components, f32 for colors).
@@ -140,12 +156,22 @@ pub fn encode_variant(value: &VariantWireValue, dst: &mut Vec<u8>) {
             w.store_32(u32::from(*b));
         }
         V::Int(i) => {
-            w.store_32(types::INT);
-            w.store_64(*i as u64);
+            if let Ok(small) = i32::try_from(*i) {
+                w.store_32(types::INT);
+                w.store_32(small as u32);
+            } else {
+                w.store_32(types::INT | ENCODE_FLAG_64);
+                w.store_64(*i as u64);
+            }
         }
         V::Float(f) => {
-            w.store_32(types::FLOAT);
-            w.store_64(f.to_bits());
+            if let Ok(narrow) = f64::try_into_f32_exact(*f) {
+                w.store_32(types::FLOAT);
+                w.store_32(narrow.to_bits());
+            } else {
+                w.store_32(types::FLOAT | ENCODE_FLAG_64);
+                w.store_64(f.to_bits());
+            }
         }
         V::Text(s) => {
             w.store_32(types::STRING);
@@ -246,28 +272,44 @@ pub fn encode_variant(value: &VariantWireValue, dst: &mut Vec<u8>) {
             w.store_32(types::PACKED_FLOAT64_ARRAY);
             store_count(&mut w, items.len());
             for f in items {
-                w.store_64(f.to_bits());
+                // See store_f64s: single-precision wire.
+                w.store_32((*f as f32).to_bits());
             }
         }
         V::StringArray(items) => {
             w.store_32(types::PACKED_STRING_ARRAY);
             store_count(&mut w, items.len());
             for s in items {
-                store_string(&mut w, s);
+                // Godot frames packed-string elements with the NUL included
+                // in the declared length.
+                w.store_32(s.len() as u32 + 1);
+                w.store_buffer(s.as_bytes());
+                w.store_8(0);
+                let len = s.len() + 1;
+                let pad = len % 4;
+                if pad != 0 {
+                    for _ in 0..(4 - pad) {
+                        w.store_8(0);
+                    }
+                }
             }
         }
         V::Vector2Array(items) => {
             w.store_32(types::PACKED_VECTOR2_ARRAY);
             store_count(&mut w, items.len());
             for v in items {
-                store_f64s(&mut w, v);
+                for c in v {
+                    w.store_32((*c as f32).to_bits());
+                }
             }
         }
         V::Vector3Array(items) => {
             w.store_32(types::PACKED_VECTOR3_ARRAY);
             store_count(&mut w, items.len());
             for v in items {
-                store_f64s(&mut w, v);
+                for c in v {
+                    w.store_32((*c as f32).to_bits());
+                }
             }
         }
         V::ColorArray(items) => {
@@ -283,8 +325,26 @@ pub fn encode_variant(value: &VariantWireValue, dst: &mut Vec<u8>) {
 }
 
 fn store_f64s(w: &mut MemoryWriter<'_, Vec<u8>>, values: &[f64]) {
+    // Standard single-precision builds write real_t as f32; our internal
+    // representation is f64, so components narrow here (matching the
+    // engine distributions this binding targets).
     for v in values {
-        w.store_64(v.to_bits());
+        w.store_32((*v as f32).to_bits());
+    }
+}
+
+trait F64ExactF32 {
+    fn try_into_f32_exact(self) -> Result<f32, ()>;
+}
+
+impl F64ExactF32 for f64 {
+    fn try_into_f32_exact(self) -> Result<f32, ()> {
+        let narrow = self as f32;
+        if narrow as f64 == self || (self.is_nan() && narrow.is_nan()) {
+            Ok(narrow)
+        } else {
+            Err(())
+        }
     }
 }
 
@@ -338,10 +398,11 @@ fn decode_at_depth(
         return Err(VariantWireError::TooDeep);
     }
     let header = r.try_get_32().ok_or(VariantWireError::UnexpectedEof)?;
-    let flags = header >> 16;
+    let wide = header & ENCODE_FLAG_64 != 0;
     let type_id = header & 0xffff;
-    if flags != 0 {
-        // Objects-as-id and any future flags: foreign, not corrupt.
+    if !wide && header >> 16 != 0 {
+        // Any flag we do not understand (e.g. OBJECT_AS_ID on non-scalars):
+        // foreign, not corrupt.
         return Err(VariantWireError::UnsupportedType(type_id));
     }
     match type_id {
@@ -353,23 +414,42 @@ fn decode_at_depth(
             }
             Ok(VariantWireValue::Bool(raw != 0))
         }
-        types::INT => Ok(VariantWireValue::Int(
-            r.try_get_64().ok_or(VariantWireError::UnexpectedEof)? as i64,
-        )),
-        types::FLOAT => Ok(VariantWireValue::Float(f64::from_bits(
-            r.try_get_64().ok_or(VariantWireError::UnexpectedEof)?,
-        ))),
+        types::INT => {
+            if wide {
+                Ok(VariantWireValue::Int(
+                    r.try_get_64().ok_or(VariantWireError::UnexpectedEof)? as i64,
+                ))
+            } else {
+                Ok(VariantWireValue::Int(
+                    r.try_get_32().ok_or(VariantWireError::UnexpectedEof)? as i32 as i64,
+                ))
+            }
+        }
+        types::FLOAT => {
+            if wide {
+                Ok(VariantWireValue::Float(f64::from_bits(
+                    r.try_get_64().ok_or(VariantWireError::UnexpectedEof)?,
+                )))
+            } else {
+                Ok(VariantWireValue::Float(f32::from_bits(
+                    r.try_get_32().ok_or(VariantWireError::UnexpectedEof)?,
+                ) as f64))
+            }
+        }
         types::STRING | types::STRING_NAME => {
             let s = read_string(r)?;
             Ok(VariantWireValue::Text(s))
         }
-        types::VECTOR2 => Ok(VariantWireValue::Vector2([read_f64(r)?, read_f64(r)?])),
+        types::VECTOR2 => Ok(VariantWireValue::Vector2([
+            read_real(r, wide)?,
+            read_real(r, wide)?,
+        ])),
         types::VECTOR2I => Ok(VariantWireValue::Vector2i([read_i32(r)?, read_i32(r)?])),
         types::RECT2 => Ok(VariantWireValue::Rect2([
-            read_f64(r)?,
-            read_f64(r)?,
-            read_f64(r)?,
-            read_f64(r)?,
+            read_real(r, wide)?,
+            read_real(r, wide)?,
+            read_real(r, wide)?,
+            read_real(r, wide)?,
         ])),
         types::RECT2I => Ok(VariantWireValue::Rect2i([
             read_i32(r)?,
@@ -378,9 +458,9 @@ fn decode_at_depth(
             read_i32(r)?,
         ])),
         types::VECTOR3 => Ok(VariantWireValue::Vector3([
-            read_f64(r)?,
-            read_f64(r)?,
-            read_f64(r)?,
+            read_real(r, wide)?,
+            read_real(r, wide)?,
+            read_real(r, wide)?,
         ])),
         types::VECTOR3I => Ok(VariantWireValue::Vector3i([
             read_i32(r)?,
@@ -388,10 +468,10 @@ fn decode_at_depth(
             read_i32(r)?,
         ])),
         types::VECTOR4 => Ok(VariantWireValue::Vector4([
-            read_f64(r)?,
-            read_f64(r)?,
-            read_f64(r)?,
-            read_f64(r)?,
+            read_real(r, wide)?,
+            read_real(r, wide)?,
+            read_real(r, wide)?,
+            read_real(r, wide)?,
         ])),
         types::VECTOR4I => Ok(VariantWireValue::Vector4i([
             read_i32(r)?,
@@ -400,24 +480,24 @@ fn decode_at_depth(
             read_i32(r)?,
         ])),
         types::PLANE => Ok(VariantWireValue::Plane([
-            read_f64(r)?,
-            read_f64(r)?,
-            read_f64(r)?,
-            read_f64(r)?,
+            read_real(r, wide)?,
+            read_real(r, wide)?,
+            read_real(r, wide)?,
+            read_real(r, wide)?,
         ])),
         types::QUATERNION => Ok(VariantWireValue::Quaternion([
-            read_f64(r)?,
-            read_f64(r)?,
-            read_f64(r)?,
-            read_f64(r)?,
+            read_real(r, wide)?,
+            read_real(r, wide)?,
+            read_real(r, wide)?,
+            read_real(r, wide)?,
         ])),
         types::AABB => Ok(VariantWireValue::Aabb([
-            read_f64(r)?,
-            read_f64(r)?,
-            read_f64(r)?,
-            read_f64(r)?,
-            read_f64(r)?,
-            read_f64(r)?,
+            read_real(r, wide)?,
+            read_real(r, wide)?,
+            read_real(r, wide)?,
+            read_real(r, wide)?,
+            read_real(r, wide)?,
+            read_real(r, wide)?,
         ])),
         types::COLOR => Ok(VariantWireValue::Color([
             read_f32(r)?,
@@ -475,7 +555,7 @@ fn decode_at_depth(
             let count = read_count(r)?;
             let mut items = Vec::with_capacity(count.min(4096));
             for _ in 0..count {
-                items.push(read_f64(r)?);
+                items.push(read_real(r, wide)?);
             }
             Ok(VariantWireValue::Float64Array(items))
         }
@@ -483,7 +563,12 @@ fn decode_at_depth(
             let count = read_count(r)?;
             let mut items = Vec::new();
             for _ in 0..count {
-                items.push(read_string(r)?);
+                // Elements are NUL-terminated (the NUL counts in the length).
+                let mut s = read_string_bytes(r)?;
+                if s.last() == Some(&0) {
+                    s.pop();
+                }
+                items.push(String::from_utf8(s).map_err(|_| VariantWireError::Invalid)?);
             }
             Ok(VariantWireValue::StringArray(items))
         }
@@ -491,7 +576,7 @@ fn decode_at_depth(
             let count = read_count(r)?;
             let mut items = Vec::new();
             for _ in 0..count {
-                items.push([read_f64(r)?, read_f64(r)?]);
+                items.push([read_real(r, wide)?, read_real(r, wide)?]);
             }
             Ok(VariantWireValue::Vector2Array(items))
         }
@@ -499,7 +584,11 @@ fn decode_at_depth(
             let count = read_count(r)?;
             let mut items = Vec::new();
             for _ in 0..count {
-                items.push([read_f64(r)?, read_f64(r)?, read_f64(r)?]);
+                items.push([
+                    read_real(r, wide)?,
+                    read_real(r, wide)?,
+                    read_real(r, wide)?,
+                ]);
             }
             Ok(VariantWireValue::Vector3Array(items))
         }
@@ -515,10 +604,16 @@ fn decode_at_depth(
     }
 }
 
-fn read_f64(r: &mut MemoryReader<'_>) -> Result<f64, VariantWireError> {
-    Ok(f64::from_bits(
-        r.try_get_64().ok_or(VariantWireError::UnexpectedEof)?,
-    ))
+/// Read one real_t component: f32 in single-precision builds, f64 with the
+/// header flag in double-precision builds.
+fn read_real(r: &mut MemoryReader<'_>, wide: bool) -> Result<f64, VariantWireError> {
+    if wide {
+        Ok(f64::from_bits(
+            r.try_get_64().ok_or(VariantWireError::UnexpectedEof)?,
+        ))
+    } else {
+        Ok(f32::from_bits(r.try_get_32().ok_or(VariantWireError::UnexpectedEof)?) as f64)
+    }
 }
 
 fn read_f32(r: &mut MemoryReader<'_>) -> Result<f32, VariantWireError> {
@@ -543,17 +638,25 @@ fn read_count(r: &mut MemoryReader<'_>) -> Result<usize, VariantWireError> {
 }
 
 fn read_string(r: &mut MemoryReader<'_>) -> Result<String, VariantWireError> {
+    let bytes = read_string_bytes(r)?;
+    String::from_utf8(bytes).map_err(|_| VariantWireError::Invalid)
+}
+
+fn read_string_bytes(r: &mut MemoryReader<'_>) -> Result<Vec<u8>, VariantWireError> {
     let len = r.try_get_32().ok_or(VariantWireError::UnexpectedEof)? as usize;
     let remaining = r.remaining();
     if len > remaining {
         return Err(VariantWireError::LengthOverflow);
     }
-    let bytes = r.try_take(len).ok_or(VariantWireError::UnexpectedEof)?;
+    let bytes = r
+        .try_take(len)
+        .ok_or(VariantWireError::UnexpectedEof)?
+        .to_vec();
     let pad = len % 4;
     if pad != 0 {
         r.try_take(4 - pad).ok_or(VariantWireError::UnexpectedEof)?;
     }
-    String::from_utf8(bytes.to_vec()).map_err(|_| VariantWireError::Invalid)
+    Ok(bytes)
 }
 
 fn read_padded_bytes(r: &mut MemoryReader<'_>) -> Result<Vec<u8>, VariantWireError> {
@@ -641,11 +744,12 @@ mod tests {
 
     #[test]
     fn godot_encoded_bytes_decode() {
-        // Hand-built Godot wire bytes: int 7 (header 2, i64 7) followed by a
-        // string "ok" (header 4, len 2, "ok", 2 pad bytes).
+        // Hand-built Godot wire bytes the way marshalls.cpp writes them:
+        // int 7 (header 2, i32 7), then a string "ok" (header 4, len 2,
+        // "ok", 2 pad bytes).
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&2u32.to_le_bytes());
-        bytes.extend_from_slice(&7i64.to_le_bytes());
+        bytes.extend_from_slice(&7i32.to_le_bytes());
         bytes.extend_from_slice(&4u32.to_le_bytes());
         bytes.extend_from_slice(&2u32.to_le_bytes());
         bytes.extend_from_slice(b"ok");
@@ -691,7 +795,7 @@ mod tests {
     #[test]
     fn object_flag_is_foreign_not_corrupt() {
         let mut bytes = Vec::new();
-        bytes.extend_from_slice(&(types::OBJECT | (ENCODE_FLAG_OBJECT_AS_ID << 16)).to_le_bytes());
+        bytes.extend_from_slice(&(types::OBJECT | ENCODE_FLAG_64).to_le_bytes());
         bytes.extend_from_slice(&42u64.to_le_bytes());
         let mut r = MemoryReader::little(&bytes);
         assert_eq!(

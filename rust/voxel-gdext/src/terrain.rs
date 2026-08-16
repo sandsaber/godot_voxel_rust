@@ -3676,8 +3676,10 @@ impl INode for VoxelTerrainReplicatorGD {
 #[godot_api]
 impl VoxelTerrainReplicatorGD {
     /// Server role: produce snapshots for the authoritative parent terrain.
+    #[allow(dead_code)] // script-facing documentation constants
     pub const ROLE_SERVER: u32 = 0;
     /// Client role: apply received snapshots to the local parent terrain.
+    #[allow(dead_code)] // script-facing documentation constants
     pub const ROLE_CLIENT: u32 = 1;
 
     /// Server: set (or move) a peer's interest box. `center` is in world
@@ -3735,13 +3737,28 @@ impl VoxelTerrainReplicatorGD {
         let Some(core) = bound.core() else {
             return out;
         };
-        for (_, snapshot) in self.server.poll_outbound(core) {
+        for (target, snapshot) in self.server.poll_outbound(core) {
+            // One poll per peer: frames destined for other peers must not
+            // leak through this call (they would also be marked sent and
+            // starve the real recipient).
+            if target != peer {
+                continue;
+            }
             let mut frame = Vec::new();
             snapshot.encode(&mut frame);
             let packed = PackedByteArray::from(frame.as_slice());
             out.push(&packed);
         }
         out
+    }
+
+    /// Client: drop the revision table. MUST be called on rejoin or server
+    /// restart — server revisions are per-process (see multiplayer.md), so
+    /// stale table entries would silently drop every snapshot of the new
+    /// session.
+    #[func]
+    fn reset_client(&mut self) {
+        self.client.reset();
     }
 
     /// Client: apply one received frame to the local parent terrain.

@@ -2994,6 +2994,28 @@ impl VoxelTerrainDataView {
         self.data
             .with_lod_map(lod_index, |map| map.block_positions().collect())
     }
+
+    /// Visit every resident EDITED block with data-block position and its
+    /// revision, without cloning block payloads (server replication scan).
+    pub fn for_each_edited_block(
+        &self,
+        lod_index: usize,
+        mut visit: impl FnMut(Vector3i, u64, &crate::storage::VoxelBuffer),
+    ) {
+        let block_size = self.data.block_size() as i32;
+        self.data.with_lod_map(lod_index, |map| {
+            for position in map.block_positions() {
+                let Some(block) = map.get_block(position) else {
+                    continue;
+                };
+                if !block.is_edited() || !block.has_voxels() {
+                    continue;
+                }
+                let revision = map.key_revision_public(position);
+                visit(position * block_size, revision, block.voxels());
+            }
+        });
+    }
 }
 
 /// Engine-agnostic paging terrain core (single- or multi-LOD).
@@ -3616,6 +3638,34 @@ impl VoxelTerrainCore {
             .is_ok();
         if replaced {
             self.stats.blocks_loaded = self.stats.blocks_loaded.saturating_add(1);
+            // Storage alone never refreshes geometry: queue the covering
+            // mesh blocks so the next try_process remeshes them (same
+            // mechanism edit publication uses via blocks_pending_update).
+            // mesh_block_size == data_block_size in the minimum supported
+            // clipbox configuration (lod_clipbox docs); divide positions in
+            // voxels by the block size to get mesh-block coordinates.
+            let divisor = block_size.max(1);
+            let min = position_in_blocks * block_size;
+            let max = min + Vector3i::splat(block_size);
+            let x0 = min.x.div_euclid(divisor);
+            let y0 = min.y.div_euclid(divisor);
+            let z0 = min.z.div_euclid(divisor);
+            let x1 = (max.x - 1).div_euclid(divisor);
+            let y1 = (max.y - 1).div_euclid(divisor);
+            let z1 = (max.z - 1).div_euclid(divisor);
+            for mz in z0..=z1 {
+                for my in y0..=y1 {
+                    for mx in x0..=x1 {
+                        let position = Vector3i::new(mx, my, mz);
+                        if let Some(entry) = self.mesh_maps[0].get_mut(&position) {
+                            if !entry.is_in_update_list {
+                                entry.is_in_update_list = true;
+                                self.blocks_pending_update[0].push(position);
+                            }
+                        }
+                    }
+                }
+            }
         }
         replaced
     }

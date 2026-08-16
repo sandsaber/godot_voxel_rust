@@ -199,6 +199,20 @@ fn variant_wire_from_godot(
     value: &Variant,
 ) -> Option<voxel_core::streams::variant_wire::VariantWireValue> {
     use voxel_core::streams::variant_wire::VariantWireValue as V;
+    // Scalars must map too: the canonical C++ metadata dictionary is
+    // string keys with int/float/string/null values.
+    if value.is_nil() {
+        return Some(V::Nil);
+    }
+    if let Ok(v) = value.try_to::<i64>() {
+        return Some(V::Int(v));
+    }
+    if let Ok(v) = value.try_to::<f64>() {
+        return Some(V::Float(v));
+    }
+    if let Ok(v) = value.try_to::<GString>() {
+        return Some(V::Text(v.to_string()));
+    }
     if let Ok(b) = value.try_to::<bool>() {
         return Some(V::Bool(b));
     }

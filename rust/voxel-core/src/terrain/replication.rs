@@ -83,6 +83,12 @@ impl BlockSnapshot {
         let y = r.try_get_32()? as i32;
         let z = r.try_get_32()? as i32;
         let lod_index = r.try_get_8()?;
+        // The boundary is LOD0-only by design (multiplayer.md); a hostile
+        // or version-skewed frame must die here, not two layers down in a
+        // storage assert.
+        if lod_index != 0 {
+            return None;
+        }
         let block_revision = r.try_get_64()?;
         let len = r.try_get_32()? as usize;
         let payload = r.try_take(len)?.to_vec();
@@ -106,10 +112,13 @@ impl BlockSnapshot {
 
 /// Server-side replication state: peer interest boxes + per-block
 /// last-sent revisions.
+/// Per-peer "last sent" revisions: block key -> server revision.
+type SentMap = HashMap<(i32, i32, i32, u8), u64>;
+
 pub struct ReplicationServer {
     interests: VoxelAreaFinder,
     /// Last server revision already sent per peer per block.
-    sent: HashMap<AreaId, HashMap<(i32, i32, i32, u8), u64>>,
+    sent: HashMap<AreaId, SentMap>,
 }
 
 impl ReplicationServer {
@@ -136,10 +145,7 @@ impl ReplicationServer {
         if previous.is_some() {
             self.interests.update(peer, area)?;
         } else {
-            if let Err(error) = self.interests.insert(peer, area) {
-                // Only reachable on a hostile box; propagate like update.
-                return Err(error);
-            }
+            self.interests.insert(peer, area)?;
         }
         let entered = match previous {
             Some(old) => crate::terrain::area_finder::box_subtraction(area, old),
@@ -149,6 +155,16 @@ impl ReplicationServer {
             Some(old) => crate::terrain::area_finder::box_subtraction(old, area),
             None => Vec::new(),
         };
+        // Re-entered blocks must resend even at an unchanged revision: the
+        // client evicted them while outside its interest, and its generator
+        // cannot reproduce edited state.
+        if let Some(sent) = self.sent.get_mut(&peer) {
+            sent.retain(|&(x, y, z, _lod), _| {
+                !entered
+                    .iter()
+                    .any(|b| b.contains_point(Vector3i::new(x, y, z)))
+            });
+        }
         Ok((entered, exited))
     }
 
@@ -163,20 +179,23 @@ impl ReplicationServer {
     /// deterministic (sorted by position, then peer id). Pure generator
     /// blocks (`!is_edited()`) are never sent.
     pub fn poll_outbound(&mut self, terrain: &VoxelTerrainCore) -> Vec<(AreaId, BlockSnapshot)> {
-        let mut edited: Vec<(Vector3i, u64)> = Vec::new();
-        let view = terrain.data();
-        for position in view.block_positions(0) {
-            let Some(block) = view.block_snapshot(position, 0) else {
-                continue;
-            };
-            if !block.is_edited() || !block.has_voxels() {
-                continue;
-            }
-            let Some(revision) = view.block_revision(position, 0) else {
-                continue;
-            };
-            edited.push((position, revision));
+        // One pass, no per-block clones: serialize each changed edited
+        // block once and share the payload across overlapping peers.
+        struct Pending {
+            revision: u64,
+            payload: Option<Vec<u8>>,
         }
+        let view = terrain.data();
+        let mut edited: Vec<(Vector3i, Pending)> = Vec::new();
+        view.for_each_edited_block(0, |position, revision, _voxels| {
+            edited.push((
+                position,
+                Pending {
+                    revision,
+                    payload: None,
+                },
+            ));
+        });
         edited.sort_unstable_by_key(|(p, _)| (p.x, p.y, p.z));
         let peers = self.peer_areas_sorted();
         let mut out = Vec::new();
@@ -185,35 +204,42 @@ impl ReplicationServer {
                 continue;
             };
             let sent = self.sent.entry(peer).or_default();
-            for &(position, revision) in &edited {
-                if !area.contains_point(position) {
+            for (position, pending) in &mut edited {
+                if !area.contains_point(*position) {
                     continue;
                 }
                 let key = (position.x, position.y, position.z, 0);
-                if sent.get(&key).is_some_and(|&last| last >= revision) {
+                if sent.get(&key).is_some_and(|&last| last >= pending.revision) {
                     continue;
                 }
-                let Some(block) = view.block_snapshot(position, 0) else {
-                    continue;
-                };
-                let mut payload = Vec::new();
-                if block_serializer::serialize_and_compress(
-                    block.voxels(),
-                    &mut payload,
-                    Compression::Lz4,
-                )
-                .is_err()
-                {
-                    continue;
+                if pending.payload.is_none() {
+                    let Some(block) = view.block_snapshot(*position, 0) else {
+                        continue;
+                    };
+                    let voxels = block.into_voxels();
+                    let Some(voxels) = voxels.as_ref() else {
+                        continue;
+                    };
+                    let mut payload = Vec::new();
+                    if block_serializer::serialize_and_compress(
+                        voxels,
+                        &mut payload,
+                        Compression::Lz4,
+                    )
+                    .is_err()
+                    {
+                        continue;
+                    }
+                    pending.payload = Some(payload);
                 }
-                sent.insert(key, revision);
+                sent.insert(key, pending.revision);
                 out.push((
                     peer,
                     BlockSnapshot {
-                        position_in_blocks: position,
+                        position_in_blocks: *position,
                         lod_index: 0,
-                        block_revision: revision,
-                        payload,
+                        block_revision: pending.revision,
+                        payload: pending.payload.clone().expect("just serialized"),
                     },
                 ));
             }
@@ -302,6 +328,11 @@ impl ReplicationClient {
         true
     }
 
+    /// Drop the revision table (rejoin / server restart; see multiplayer.md).
+    pub fn reset(&mut self) {
+        self.last_applied.clear();
+    }
+
     /// Last server revision applied for a block (debug/introspection).
     pub fn last_applied_revision(&self, position: Vector3i, lod_index: u8) -> Option<u64> {
         self.last_applied
@@ -314,7 +345,7 @@ impl ReplicationClient {
 mod tests {
     use super::*;
     use crate::edition::ops::EditMode;
-    use crate::storage::{ChannelId, MetadataValue, VoxelFormat};
+    use crate::storage::{ChannelId, MetadataValue};
     use crate::terrain::voxel_terrain_core::ViewerUpdate;
 
     fn viewer_at(id: u32) -> ViewerUpdate {
@@ -383,7 +414,7 @@ mod tests {
 
     #[test]
     fn edited_blocks_reach_interested_peer_with_metadata() {
-        let mut server = make_terrain(true);
+        let server = make_terrain(true);
         let mut client = make_terrain(false);
         let mut protocol = ReplicationServer::new(8);
         protocol
