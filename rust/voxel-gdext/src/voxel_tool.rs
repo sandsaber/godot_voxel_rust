@@ -126,6 +126,87 @@ impl VoxelToolBufferGD {
         );
     }
 
+    /// Hemisphere edit. `flat_dx/dy/dz` is the outward normal of the flat face.
+    #[func]
+    #[allow(clippy::too_many_arguments)]
+    fn do_hemisphere(
+        &mut self,
+        cx: f64,
+        cy: f64,
+        cz: f64,
+        radius: f64,
+        flat_dx: f64,
+        flat_dy: f64,
+        flat_dz: f64,
+        smoothness: f64,
+        mode: i32,
+        value: i64,
+    ) {
+        let Ok([cx, cy, cz, radius]) = validate_edit_sphere(cx, cy, cz, radius) else {
+            godot_error!("VoxelToolBuffer.do_hemisphere: center and radius must be finite");
+            return;
+        };
+        let Ok(flat_dx) = crate::voxel_buffer::validate_finite_f64(flat_dx) else {
+            godot_error!("VoxelToolBuffer.do_hemisphere: flat direction must be finite");
+            return;
+        };
+        let Ok(flat_dy) = crate::voxel_buffer::validate_finite_f64(flat_dy) else {
+            godot_error!("VoxelToolBuffer.do_hemisphere: flat direction must be finite");
+            return;
+        };
+        let Ok(flat_dz) = crate::voxel_buffer::validate_finite_f64(flat_dz) else {
+            godot_error!("VoxelToolBuffer.do_hemisphere: flat direction must be finite");
+            return;
+        };
+        let Ok(smoothness) = crate::voxel_buffer::validate_finite_f64(smoothness) else {
+            godot_error!("VoxelToolBuffer.do_hemisphere: smoothness must be finite");
+            return;
+        };
+        if smoothness < 0.0 {
+            godot_error!("VoxelToolBuffer.do_hemisphere: smoothness must be non-negative");
+            return;
+        }
+        let Ok(value) = crate::voxel_buffer::validate_voxel_value(value) else {
+            godot_error!("VoxelToolBuffer.do_hemisphere: invalid voxel value");
+            return;
+        };
+        let edit_mode = match mode {
+            0 => EditMode::Add,
+            1 => EditMode::Remove,
+            _ => EditMode::Set,
+        };
+        voxel_core::edition::do_hemisphere(
+            &mut self.buffer,
+            self.channel,
+            edit_mode,
+            value,
+            Vector3f::new(cx, cy, cz),
+            radius,
+            Vector3f::new(flat_dx, flat_dy, flat_dz),
+            smoothness,
+        );
+    }
+
+    /// Smooth the SDF channel inside a sphere of influence.
+    #[func]
+    fn do_smooth(&mut self, cx: f64, cy: f64, cz: f64, radius: f64, blur_radius: i32) {
+        let Ok([cx, cy, cz, radius]) = validate_edit_sphere(cx, cy, cz, radius) else {
+            godot_error!("VoxelToolBuffer.do_smooth: center and radius must be finite");
+            return;
+        };
+        if blur_radius < 0 {
+            godot_error!("VoxelToolBuffer.do_smooth: blur radius must be non-negative");
+            return;
+        }
+        voxel_core::edition::do_smooth(
+            &mut self.buffer,
+            self.channel,
+            Vector3f::new(cx, cy, cz),
+            radius,
+            blur_radius,
+        );
+    }
+
     /// Set a single voxel at the given position.
     #[func]
     fn set_voxel(&mut self, x: i32, y: i32, z: i32, value: i64) {

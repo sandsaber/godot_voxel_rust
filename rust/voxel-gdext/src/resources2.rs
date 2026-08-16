@@ -1198,7 +1198,39 @@ impl INode3D for VoxelLodTerrainGD {
                 return;
             };
             let events = match core.try_process(&viewers) {
-                Ok(events) => events,
+                Ok(events) => {
+                    let data_block_size = core.data().block_size() as i32;
+                    for event in &events {
+                        match event {
+                            voxel_core::terrain::VoxelTerrainEvent::DataBlockLoaded(loc) => {
+                                let p = loc.position * data_block_size;
+                                self.signals()
+                                    .block_loaded()
+                                    .emit(godot::builtin::Vector3i::new(p.x, p.y, p.z));
+                            }
+                            voxel_core::terrain::VoxelTerrainEvent::DataBlockUnloaded(loc) => {
+                                let p = loc.position * data_block_size;
+                                self.signals()
+                                    .block_unloaded()
+                                    .emit(godot::builtin::Vector3i::new(p.x, p.y, p.z));
+                            }
+                            voxel_core::terrain::VoxelTerrainEvent::MeshBlockEntered(upload) => {
+                                let p = upload.key().location.position_in_blocks;
+                                self.signals()
+                                    .mesh_block_entered()
+                                    .emit(godot::builtin::Vector3i::new(p.x, p.y, p.z));
+                            }
+                            voxel_core::terrain::VoxelTerrainEvent::MeshBlockExited(loc) => {
+                                let p = loc.position_in_blocks;
+                                self.signals()
+                                    .mesh_block_exited()
+                                    .emit(godot::builtin::Vector3i::new(p.x, p.y, p.z));
+                            }
+                            _ => {}
+                        }
+                    }
+                    events
+                }
                 Err(error) => {
                     godot_error!(
                         "VoxelLodTerrain.process: core rejected the viewer update: {error}"
@@ -1243,6 +1275,23 @@ impl INode3D for VoxelLodTerrainGD {
 
 #[godot_api]
 impl VoxelLodTerrainGD {
+    /// Emitted when a new data block is loaded from stream.
+    #[signal]
+    fn block_loaded(position: godot::builtin::Vector3i);
+
+    /// Emitted when a data block is unloaded due to being outside view distance.
+    #[signal]
+    fn block_unloaded(position: godot::builtin::Vector3i);
+
+    /// Emitted when a mesh block receives its first update since it was added
+    /// in the range of viewers.
+    #[signal]
+    fn mesh_block_entered(position: godot::builtin::Vector3i);
+
+    /// Emitted when a mesh block gets unloaded.
+    #[signal]
+    fn mesh_block_exited(position: godot::builtin::Vector3i);
+
     /// Returns the number of loaded mesh blocks (all LODs).
     #[func]
     fn get_mesh_block_count(&self) -> i32 {
@@ -1608,11 +1657,12 @@ impl VoxelLodTerrainGD {
         self.process_callback_value = i32::try_from(mode).unwrap_or(0).clamp(0, 2);
     }
 
-    /// Returns a `VoxelTool` bound to this volume, allowing voxel queries and
-    /// edits. Stubbed: the binding does not yet expose a live `VoxelTool`.
+    /// Returns a `VoxelToolTerrain` bound to this Variable-LOD terrain.
     #[func]
     fn get_voxel_tool(&self) -> Variant {
-        Variant::nil()
+        let mut tool = crate::voxel_buffer::VoxelToolTerrainGD::new_gd();
+        tool.bind_mut().bind_lod_terrain(self.to_gd());
+        tool.to_variant()
     }
 
     /// Returns `true` if the area has been processed by meshing. Conservative
@@ -1765,8 +1815,7 @@ impl VoxelLodTerrainGD {
         self.material_override = Some(value);
     }
 
-    /// Physics collision layer. Stubbed: not surfaced to voxel-core; stored
-    /// faithfully so GDScript reads round-trip.
+    /// Physics collision layer applied to every block `StaticBody3D`.
     #[func]
     fn get_collision_layer(&self) -> i32 {
         self.collision_layer_value
@@ -1775,9 +1824,10 @@ impl VoxelLodTerrainGD {
     #[func]
     fn set_collision_layer(&mut self, layer: i32) {
         self.collision_layer_value = layer;
+        self.refresh_collision_bodies();
     }
 
-    /// Physics collision mask. Stubbed: stored faithfully.
+    /// Physics collision mask applied to every block `StaticBody3D`.
     #[func]
     fn get_collision_mask(&self) -> i32 {
         self.collision_mask_value
@@ -1786,9 +1836,10 @@ impl VoxelLodTerrainGD {
     #[func]
     fn set_collision_mask(&mut self, mask: i32) {
         self.collision_mask_value = mask;
+        self.refresh_collision_bodies();
     }
 
-    /// Collision margin (in voxels). Stubbed: stored faithfully.
+    /// Collision shape margin applied to every block collider.
     #[func]
     fn get_collision_margin(&self) -> f32 {
         self.collision_margin_value
@@ -1803,6 +1854,7 @@ impl VoxelLodTerrainGD {
                 "VoxelLodTerrain.set_collision_margin: margin must be non-negative and finite"
             );
         }
+        self.refresh_collision_bodies();
     }
 
     /// How many LOD levels generate colliders (0 = all LODs).
@@ -2122,6 +2174,11 @@ impl VoxelLodTerrainGD {
     fn apply_render_op(&mut self, op: crate::terrain::PendingRenderOp) {
         let material_override = self.material_override.clone();
         let generate_collision = self.generate_collision;
+        let collision_settings = crate::terrain::CollisionBodySettings::from_inspector(
+            self.collision_layer_value,
+            self.collision_mask_value,
+            self.collision_margin_value,
+        );
         let mut base_node = self.to_gd().upcast::<Node3D>();
         crate::terrain::apply_pending_render_op(
             op,
@@ -2129,7 +2186,130 @@ impl VoxelLodTerrainGD {
             &mut base_node,
             material_override.as_ref(),
             generate_collision,
+            collision_settings,
         );
+    }
+
+    pub(crate) fn edit_sphere(
+        &mut self,
+        center: voxel_core::math::Vector3f,
+        radius: f32,
+        channel: usize,
+        mode: voxel_core::edition::EditMode,
+        value: u64,
+    ) {
+        let Some(core) = self.core.as_mut() else {
+            return;
+        };
+        if let Err(error) = core.try_edit_sphere(center, radius, channel, mode, value) {
+            godot_error!("VoxelLodTerrain.edit_sphere failed: {error}");
+        }
+    }
+
+    pub(crate) fn edit_box(
+        &mut self,
+        min: voxel_core::math::Vector3i,
+        max: voxel_core::math::Vector3i,
+        channel: usize,
+        mode: voxel_core::edition::EditMode,
+        value: u64,
+    ) {
+        let Some(core) = self.core.as_mut() else {
+            return;
+        };
+        if let Err(error) = core.try_edit_box(min, max, channel, mode, value) {
+            godot_error!("VoxelLodTerrain.edit_box failed: {error}");
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn edit_hemisphere(
+        &mut self,
+        center: voxel_core::math::Vector3f,
+        radius: f32,
+        flat_direction: voxel_core::math::Vector3f,
+        smoothness: f32,
+        channel: usize,
+        mode: voxel_core::edition::EditMode,
+        value: u64,
+    ) {
+        let Some(core) = self.core.as_mut() else {
+            return;
+        };
+        if let Err(error) = core.try_edit_hemisphere(
+            center,
+            radius,
+            flat_direction,
+            smoothness,
+            channel,
+            mode,
+            value,
+        ) {
+            godot_error!("VoxelLodTerrain.edit_hemisphere failed: {error}");
+        }
+    }
+
+    pub(crate) fn edit_smooth(
+        &mut self,
+        center: voxel_core::math::Vector3f,
+        radius: f32,
+        blur_radius: i32,
+        channel: usize,
+    ) {
+        let Some(core) = self.core.as_mut() else {
+            return;
+        };
+        if let Err(error) = core.try_edit_smooth(center, radius, blur_radius, channel) {
+            godot_error!("VoxelLodTerrain.edit_smooth failed: {error}");
+        }
+    }
+
+    pub(crate) fn edit_world_voxel(
+        &mut self,
+        pos: voxel_core::math::Vector3i,
+        channel: usize,
+        raw: u64,
+    ) -> bool {
+        let Some(core) = self.core.as_mut() else {
+            return false;
+        };
+        matches!(core.try_edit_voxel(raw, pos, channel), Ok(Some(_)))
+    }
+
+    pub(crate) fn read_world_voxel(&self, pos: voxel_core::math::Vector3i, channel: usize) -> u64 {
+        let Some(core) = self.core.as_ref() else {
+            return 0;
+        };
+        let data = core.data();
+        let Ok(block_size) = i32::try_from(data.block_size()) else {
+            return 0;
+        };
+        let block_pos = voxel_core::storage::voxel_data_map::VoxelDataMap::voxel_to_block_b(
+            pos,
+            data.block_size_po2(),
+        );
+        data.block_snapshot(block_pos, 0)
+            .filter(|block| block.has_voxels())
+            .map(|block| {
+                block.voxels().get_voxel(
+                    pos.x.rem_euclid(block_size),
+                    pos.y.rem_euclid(block_size),
+                    pos.z.rem_euclid(block_size),
+                    channel,
+                )
+            })
+            .unwrap_or(0)
+    }
+
+    fn refresh_collision_bodies(&mut self) {
+        let settings = crate::terrain::CollisionBodySettings::from_inspector(
+            self.collision_layer_value,
+            self.collision_mask_value,
+            self.collision_margin_value,
+        );
+        for rendered in self.mesh_instances.values_mut() {
+            crate::terrain::apply_collision_settings_to_instance(&mut rendered.instance, settings);
+        }
     }
 }
 
@@ -3583,7 +3763,7 @@ impl VoxelBlockyModelGD {
 
     /// Getter for the canonical `color` property.
     #[func]
-    fn get_color_prop(&self) -> Color {
+    pub(crate) fn get_color_prop(&self) -> Color {
         self.color_value
     }
 

@@ -1741,7 +1741,7 @@ impl VoxelBlockyModelCubeGD {
 
     /// Set the RGBA color.
     #[func]
-    fn set_color(&mut self, r: f32, g: f32, b: f32, a: f32) {
+    pub(crate) fn set_color(&mut self, r: f32, g: f32, b: f32, a: f32) {
         self.r = r;
         self.g = g;
         self.b = b;
@@ -1998,13 +1998,12 @@ impl VoxelBlockyModelMeshGD {
     /// Produce the engine-agnostic solid [`BakedModel`] for this mesh.
     #[allow(dead_code)]
     pub fn to_baked_model(&self) -> voxel_core::meshers::blocky::BakedModel {
-        let mut m = voxel_core::meshers::blocky::BakedModel {
-            color: voxel_core::math::Color::from_rgb(self.r, self.g, self.b),
-            empty: false,
-            culls_neighbors: !self.transparent,
-            is_transparent: self.transparent,
-            ..voxel_core::meshers::blocky::BakedModel::default()
-        };
+        let mut m = voxel_core::meshers::blocky::solid_cube_model(
+            voxel_core::math::Color::from_rgb(self.r, self.g, self.b),
+        );
+        m.is_transparent = self.transparent;
+        m.culls_neighbors = !self.transparent;
+        m.cutout_sides_enabled = self.side_cutout_enabled_value;
         if self.transparent {
             m.transparency_index = 1;
         }

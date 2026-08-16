@@ -177,9 +177,13 @@ impl VoxelStreamRegionFiles {
     /// Creates region files lazily in the configured directory.
     pub(crate) fn core_stream(&self) -> Arc<dyn VoxelStream> {
         let globalized = ProjectSettings::singleton().globalize_path(&self.directory);
-        Arc::new(RegionFilesStream::new(PathBuf::from(
-            globalized.to_string(),
-        )))
+        let region_blocks = 1i32 << self.region_size_po2_value.clamp(0, 8);
+        let sector_size = u32::try_from(self.sector_size_value.max(1)).unwrap_or(512);
+        Arc::new(RegionFilesStream::with_settings(
+            PathBuf::from(globalized.to_string()),
+            region_blocks,
+            sector_size,
+        ))
     }
 
     // -----------------------------------------------------------------
@@ -223,7 +227,7 @@ impl VoxelStreamRegionFiles {
 
     #[func]
     fn set_block_size_po2(&mut self, po2: i32) {
-        self.block_size_po2_value = po2;
+        self.block_size_po2_value = po2.clamp(0, 8);
     }
 
     /// Power-of-two exponent of the region size (upstream default 4).
@@ -234,7 +238,7 @@ impl VoxelStreamRegionFiles {
 
     #[func]
     fn set_region_size_po2(&mut self, po2: i32) {
-        self.region_size_po2_value = po2;
+        self.region_size_po2_value = po2.clamp(0, 8);
     }
 
     /// Sector size in bytes used by region files (upstream default 512).
@@ -245,6 +249,6 @@ impl VoxelStreamRegionFiles {
 
     #[func]
     fn set_sector_size(&mut self, size: i32) {
-        self.sector_size_value = size;
+        self.sector_size_value = size.max(1);
     }
 }
