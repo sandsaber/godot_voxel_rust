@@ -41,8 +41,9 @@ print(mem.get_block_count())
 
 !!! note "Status: partially implemented"
     Reading and writing `.vxr` region files works. `region_size_po2` and
-    `sector_size` are applied when the stream is assigned to terrain.
-    `convert_files` is still a no-op.
+    `sector_size` are applied when the stream is assigned to terrain, and
+    `convert_files` rewrites an existing directory under new region/sector/
+    block sizes (into a sibling directory, then atomically swapped in).
 
 Disk persistence using region files, one file per region of
 `(1 << region_size_po2)` blocks per axis.

@@ -2382,11 +2382,12 @@ impl VoxelLodTerrainGD {
         max: voxel_core::math::Vector3i,
         channel: usize,
         max_items: usize,
+        keep: impl Fn(u64) -> bool,
     ) -> Vec<(voxel_core::math::Vector3i, u64)> {
         let Some(core) = self.core.as_ref() else {
             return Vec::new();
         };
-        crate::terrain::collect_core_voxels(core, min, max, channel, max_items)
+        crate::terrain::collect_core_voxels(core, min, max, channel, max_items, keep)
     }
 
     pub(crate) fn edit_world_voxel_metadata(

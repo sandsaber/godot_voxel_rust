@@ -923,6 +923,79 @@ mod stream_selection_tests {
     }
 
     #[test]
+    fn collect_core_voxels_applies_cap_to_filtered_candidates() {
+        // Random-tick starvation regression: dense untickable material must
+        // not consume the scan cap before tickable voxels later in ZYX order
+        // are seen. Without a library a candidate is a non-zero voxel with
+        // (voxel & mask) != 0, so value=1 is filtered out by mask=2.
+        // The parity constructor auto-materializes edited blocks (no viewer
+        // residency setup needed), matching how the core's own edit tests
+        // drive `try_edit_voxel`.
+        let mut data = VoxelData::new();
+        data.set_bounds(voxel_core::math::Box3i::new(
+            Vector3i::splat(-1024),
+            Vector3i::splat(2048),
+        ));
+        data.set_streaming_enabled(false);
+        data.set_full_load_completed(true);
+        let mut core = VoxelTerrainCore::legacy_variable_lod_for_parity(
+            data,
+            Arc::new(MemoryStream::new()),
+            MeshingDependency::new(Arc::new(TransvoxelMesher::new()), None),
+            1,
+        );
+        let data = core.data();
+        let channel = ChannelId::Type.index();
+        let block_size = i32::try_from(data.block_size()).unwrap();
+        let origin = Vector3i::zero();
+
+        // Fill the first block with 100 "stone" voxels (bit 0) and place one
+        // tickable voxel (bit 1) at the far corner of the scan order.
+        let mut edits = 0;
+        for z in 0..5 {
+            for y in 0..5 {
+                for x in 0..4 {
+                    assert!(
+                        core.try_edit_voxel(
+                            1,
+                            Vector3i::new(origin.x + x, origin.y + y, origin.z + z),
+                            channel
+                        )
+                        .unwrap()
+                        .is_some(),
+                        "stone edit must materialize its block"
+                    );
+                    edits += 1;
+                }
+            }
+        }
+        let tickable = Vector3i::new(origin.x, origin.y + 7, origin.z + 7);
+        assert!(
+            core.try_edit_voxel(2, tickable, channel).unwrap().is_some(),
+            "tickable edit must materialize its block"
+        );
+        assert_eq!(edits, 100);
+
+        let mask = 2u64;
+        let collected = collect_core_voxels(
+            &core,
+            origin,
+            origin + Vector3i::splat(block_size - 1),
+            channel,
+            4,
+            |value| value != 0 && (value & mask) != 0,
+        );
+        // The cap (4) applies to candidates: the untickable stone never
+        // takes a slot, and the single tickable voxel is found regardless of
+        // scan order.
+        assert_eq!(
+            collected,
+            vec![(tickable, 2)],
+            "cap must bound candidates, not the pre-filter scan"
+        );
+    }
+
+    #[test]
     fn world_to_voxel_uses_floor_for_negative_coordinates() {
         assert_eq!(world_to_voxel_coordinate(-0.1).unwrap(), -1);
     }
@@ -1770,6 +1843,7 @@ pub(crate) fn collect_core_voxels(
     max: Vector3i,
     channel: usize,
     max_items: usize,
+    keep: impl Fn(u64) -> bool,
 ) -> Vec<(Vector3i, u64)> {
     if max_items == 0 || channel >= voxel_core::storage::voxel_buffer::MAX_CHANNELS {
         return Vec::new();
@@ -1803,7 +1877,10 @@ pub(crate) fn collect_core_voxels(
                             pos.z.rem_euclid(block_size),
                             channel,
                         );
-                        if raw != 0 {
+                        // The cap must apply to *candidates*: filtering
+                        // after a capped scan would let dense untickable
+                        // material starve later tickable voxels of slots.
+                        if raw != 0 && keep(raw) {
                             out.push((pos, raw));
                         }
                     }
@@ -2846,11 +2923,12 @@ impl VoxelTerrain {
         max: Vector3i,
         channel: usize,
         max_items: usize,
+        keep: impl Fn(u64) -> bool,
     ) -> Vec<(Vector3i, u64)> {
         let Some(core) = self.core.as_ref() else {
             return Vec::new();
         };
-        collect_core_voxels(core, min, max, channel, max_items)
+        collect_core_voxels(core, min, max, channel, max_items, keep)
     }
 
     pub(crate) fn edit_world_voxel_metadata(

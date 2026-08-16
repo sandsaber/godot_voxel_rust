@@ -2226,26 +2226,31 @@ impl VoxelToolTerrainGD {
             return;
         }
         let channel = self.channel;
-        let (mut candidates, library) = if let Some(terrain) = self.terrain.as_ref() {
+        let mask = tags_mask as u32;
+        // The candidate filter runs during the scan: collecting any non-zero
+        // voxel first and filtering afterwards let dense untickable material
+        // (e.g. stone) fill the scan cap and starve tickable voxels later in
+        // ZYX order.
+        let is_candidate = |library: Option<&voxel_core::meshers::blocky::BakedLibrary>,
+                            value: u64| {
+            voxel_core::edition::ops::voxel_is_random_tick_candidate(value, mask, library)
+        };
+        let candidates = if let Some(terrain) = self.terrain.as_ref() {
             let bound = terrain.bind();
-            (
-                bound.collect_voxels_in_box(min, max, channel, MAX_SCRIPT_ITEMS),
-                bound.blocky_library(),
-            )
+            let library = bound.blocky_library();
+            bound.collect_voxels_in_box(min, max, channel, MAX_SCRIPT_ITEMS, |value| {
+                is_candidate(library.as_ref(), value)
+            })
         } else if let Some(terrain) = self.lod_terrain.as_ref() {
             let bound = terrain.bind();
-            (
-                bound.collect_voxels_in_box(min, max, channel, MAX_SCRIPT_ITEMS),
-                bound.blocky_library(),
-            )
+            let library = bound.blocky_library();
+            bound.collect_voxels_in_box(min, max, channel, MAX_SCRIPT_ITEMS, |value| {
+                is_candidate(library.as_ref(), value)
+            })
         } else {
             godot_error!("VoxelToolTerrain.run_blocky_random_tick: no terrain is bound");
             return;
         };
-        let mask = tags_mask as u32;
-        candidates.retain(|(_, value)| {
-            voxel_core::edition::ops::voxel_is_random_tick_candidate(*value, mask, library.as_ref())
-        });
         if candidates.is_empty() {
             return;
         }

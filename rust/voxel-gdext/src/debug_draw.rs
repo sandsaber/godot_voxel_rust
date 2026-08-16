@@ -270,15 +270,21 @@ pub(crate) fn refresh_debug_overlay(
     let existing = host
         .get_node_or_null(DEBUG_NODE_NAME)
         .and_then(|node| node.try_cast::<MeshInstance3D>().ok());
+    // Detach before queue_free: a same-frame disable→enable must not find
+    // and reuse the dying node through `get_node_or_null`.
+    let retire = |host: &mut Gd<Node3D>, node: &mut Gd<MeshInstance3D>| {
+        host.remove_child(&node.clone().upcast::<godot::prelude::Node>());
+        node.queue_free();
+    };
     if boxes.is_empty() {
         if let Some(mut node) = existing {
-            node.queue_free();
+            retire(host, &mut node);
         }
         return;
     }
     let Some(mesh) = build_line_mesh(&boxes) else {
         if let Some(mut node) = existing {
-            node.queue_free();
+            retire(host, &mut node);
         }
         return;
     };

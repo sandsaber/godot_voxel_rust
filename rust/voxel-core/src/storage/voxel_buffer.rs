@@ -44,10 +44,14 @@ pub const SDF_FAR_OUTSIDE: f32 = 100.0;
 /// Matches `constants::SDF_FAR_INSIDE`.
 pub const SDF_FAR_INSIDE: f32 = -100.0;
 
-/// In-memory voxel or block metadata. Lives on [`VoxelBuffer`] and survives
-/// copy/paste/edit transactions. Persists through the v4 block serializer
-/// metadata section (ROADMAP R7 narrow); foreign Godot Variant payloads need
-/// the wide R7 codec and remain unsupported.
+/// Opaque metadata attached to one voxel or to the whole [`VoxelBuffer`].
+/// The variants mirror the payload types the binding accepts: `Nil` is "no
+/// value" (setting it clears an entry), `Int` is a full `i64`, `Float` an
+/// `f64`, `Text` UTF-8, `Bytes` arbitrary binary. Entries live with the
+/// buffer: one buffer-wide value plus a sparse map keyed by local voxel
+/// position; both survive copy/paste/edit transactions and persist through
+/// the v4 block serializer. C++ saves carrying Godot `Variant` payloads
+/// (Dictionary/Object) cannot be represented until the wide codec lands.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum MetadataValue {
     /// Empty / cleared entry. Matches a Godot `nil` Variant.
@@ -1514,6 +1518,12 @@ fn clipped_area(size: Vector3i, min: Vector3i, max: Vector3i) -> Option<(Vector3
 }
 
 fn sorted_half_open_box(min: Vector3i, max: Vector3i) -> (Vector3i, Vector3i) {
+    // An inverted [min, max) interval is empty, not normalized: sorting the
+    // ends would silently turn a caller error into a valid non-empty box.
+    // The returned (lo, lo) pair matches nothing (half-open test is strict).
+    if min.x > max.x || min.y > max.y || min.z > max.z {
+        return (Vector3i::zero(), Vector3i::zero());
+    }
     let mut lo = min;
     let mut hi = max;
     Vector3i::sort_min_max(&mut lo, &mut hi);
@@ -2069,6 +2079,32 @@ mod tests {
             Some(&MetadataValue::Int(22))
         );
         assert!(dst.voxel_metadata(Vector3i::zero()).is_none());
+    }
+
+    #[test]
+    fn inverted_metadata_area_visits_nothing() {
+        let mut buffer = VoxelBuffer::with_size(Vector3i::splat(4));
+        buffer.set_voxel_metadata(Vector3i::new(1, 1, 1), MetadataValue::Int(3));
+
+        let mut visited = 0;
+        buffer.for_each_voxel_metadata_in_area(
+            Vector3i::new(2, 2, 2),
+            Vector3i::new(0, 0, 0),
+            |_, _| visited += 1,
+        );
+        assert_eq!(
+            visited, 0,
+            "inverted [min, max) must be empty, not normalized"
+        );
+
+        assert_eq!(
+            buffer.next_voxel_metadata_pos_in_area(
+                Vector3i::new(2, 2, 2),
+                Vector3i::new(0, 0, 0),
+                Vector3i::new(i32::MIN, i32::MIN, i32::MIN),
+            ),
+            None
+        );
     }
 
     #[test]

@@ -375,19 +375,43 @@ impl RegionFilesStream {
         buffer: &VoxelBuffer,
     ) -> Result<RegionForestMeta, VoxelStreamError> {
         let _ = self.ensure_meta_loaded()?;
+        // First save: derive the candidate from this stream's settings and
+        // the buffer, and validate BEFORE touching the filesystem. Writing
+        // meta.vxrm for a mismatched buffer (e.g. a wrong inspector
+        // `block_size_po2`) would lock the forest into a format no block can
+        // ever match, poisoning every future save while no voxels exist on
+        // disk yet.
+        let candidate = {
+            let state = self.lock_meta();
+            if state.saved {
+                if state.meta.matches_buffer(buffer) {
+                    return Ok(state.meta.clone());
+                }
+                return Err(VoxelStreamError::BlockFormatMismatch);
+            }
+            let mut candidate = state.meta.clone();
+            candidate.block_size_po2 = self.block_size_po2;
+            candidate.region_size_po2 = region_size_po2(self.region_size);
+            candidate.sector_size = self.sector_size;
+            candidate.capture_channel_depths(buffer);
+            if !candidate.matches_buffer(buffer) {
+                return Err(VoxelStreamError::BlockFormatMismatch);
+            }
+            candidate
+        };
+        // Write outside the meta lock: filesystem I/O must not hold up
+        // concurrent meta readers.
+        candidate
+            .save(&self.directory)
+            .map_err(|error| VoxelStreamError::Io(error.to_string()))?;
         let mut state = self.lock_meta();
         if !state.saved {
-            state.meta.block_size_po2 = self.block_size_po2;
-            state.meta.region_size_po2 = region_size_po2(self.region_size);
-            state.meta.sector_size = self.sector_size;
-            state.meta.capture_channel_depths(buffer);
-            state
-                .meta
-                .save(&self.directory)
-                .map_err(|error| VoxelStreamError::Io(error.to_string()))?;
+            state.meta = candidate;
             state.saved = true;
             state.loaded = true;
         }
+        // Another thread may have won the first-save race with a different
+        // (also valid-at-the-time) format; the locked format wins.
         if !state.meta.matches_buffer(buffer) {
             return Err(VoxelStreamError::BlockFormatMismatch);
         }
@@ -919,6 +943,29 @@ mod tests {
             loaded.voxel_metadata(Vector3i::new(1, 2, 3)),
             Some(&crate::storage::MetadataValue::Float(1.5))
         );
+    }
+
+    #[test]
+    fn first_save_with_mismatched_block_size_does_not_poison_meta() {
+        // The stream's block_size_po2 (4 -> 16) does not match the actual
+        // buffer (32): the first save must fail WITHOUT writing meta.vxrm,
+        // so a subsequent correctly-sized save still succeeds.
+        let dir = TestDir::new();
+        let stream = RegionFilesStream::with_block_size(dir.path().to_path_buf(), 16, 256, 4);
+        let wrong = VoxelBuffer::with_size(Vector3i::splat(32));
+
+        assert_eq!(
+            save(&stream, Vector3i::zero(), 0, &wrong),
+            Err(VoxelStreamError::BlockFormatMismatch)
+        );
+        assert!(
+            !dir.path().join(META_FILE_NAME).is_file(),
+            "a rejected first save must not lock the forest format"
+        );
+
+        let right = VoxelBuffer::with_size(Vector3i::splat(16));
+        save(&stream, Vector3i::zero(), 0, &right).unwrap();
+        assert!(dir.path().join(META_FILE_NAME).is_file());
     }
 
     #[test]
