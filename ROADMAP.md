@@ -76,7 +76,8 @@ overlapping data block (not per voxel).
       legacy migration)
 - [x] `VoxelStreamRegionFiles` region/sector size wired into the stream
 - [x] `convert_files` rewrites region/sector size on disk
-- [ ] Channel depths and rotation metadata
+- [x] Channel depths and rotation metadata (`meta.vxrm` locks forest
+      format: block/region/sector size + 8 channel depths)
 
 ## R8 — CI rework 🟡
 

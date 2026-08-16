@@ -1,3 +1,4 @@
+use super::forest_meta::{region_size_po2, RegionForestMeta, META_FILE_NAME};
 use super::{RegionError, RegionFile, RegionFormat};
 use crate::constants::voxel_constants::MAX_LOD;
 use crate::math::Vector3i;
@@ -102,10 +103,18 @@ impl SharedRegionFile {
     }
 }
 
+struct MetaState {
+    loaded: bool,
+    saved: bool,
+    meta: RegionForestMeta,
+}
+
 pub struct RegionFilesStream {
     directory: PathBuf,
     region_size: i32,
     sector_size: u32,
+    block_size_po2: u8,
+    meta: Mutex<MetaState>,
     regions: Mutex<HashMap<RegionKey, Arc<SharedRegionFile>>>,
 }
 
@@ -118,20 +127,60 @@ impl RegionFilesStream {
     /// `region_size` is blocks per axis (clamped to `1..=255` to match the
     /// on-disk `RegionFormat` byte field). `sector_size` is bytes.
     pub fn with_settings(directory: PathBuf, region_size: i32, sector_size: u32) -> Self {
+        Self::with_block_size(directory, region_size, sector_size, 4)
+    }
+
+    /// Same as [`with_settings`](Self::with_settings) plus the forest
+    /// `block_size_po2` written to `meta.vxrm`.
+    pub fn with_block_size(
+        directory: PathBuf,
+        region_size: i32,
+        sector_size: u32,
+        block_size_po2: u8,
+    ) -> Self {
+        let region_size = region_size.clamp(1, 255);
+        let sector_size = sector_size.max(1);
+        let block_size_po2 = block_size_po2.clamp(1, 8);
         Self {
             directory: normalize_directory(directory),
-            region_size: region_size.clamp(1, 255),
-            sector_size: sector_size.max(1),
+            region_size,
+            sector_size,
+            block_size_po2,
+            meta: Mutex::new(MetaState {
+                loaded: false,
+                saved: false,
+                meta: RegionForestMeta::from_settings(block_size_po2, region_size, sector_size),
+            }),
             regions: Mutex::new(HashMap::new()),
         }
     }
 
     pub fn region_size(&self) -> i32 {
-        self.region_size
+        self.effective_region_size()
     }
 
     pub fn sector_size(&self) -> u32 {
-        self.sector_size
+        self.meta
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .meta
+            .sector_size
+    }
+
+    pub fn block_size_po2(&self) -> u8 {
+        self.meta
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .meta
+            .block_size_po2
+    }
+
+    pub fn channel_depths(&self) -> [crate::storage::ChannelDepth; MAX_CHANNELS] {
+        self.meta
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .meta
+            .channel_depths
     }
 
     /// Rewrite every `.vxr` under `source` into `destination` using
@@ -143,7 +192,23 @@ impl RegionFilesStream {
         new_region_size: i32,
         new_sector_size: u32,
     ) -> Result<u32, VoxelStreamError> {
-        let dest = RegionFilesStream::with_settings(destination, new_region_size, new_sector_size);
+        Self::convert_directory_ex(source, destination, new_region_size, new_sector_size, 4)
+    }
+
+    /// Rewrite region files and `meta.vxrm` with an explicit `block_size_po2`.
+    pub fn convert_directory_ex(
+        source: PathBuf,
+        destination: PathBuf,
+        new_region_size: i32,
+        new_sector_size: u32,
+        new_block_size_po2: u8,
+    ) -> Result<u32, VoxelStreamError> {
+        let dest = RegionFilesStream::with_block_size(
+            destination,
+            new_region_size,
+            new_sector_size,
+            new_block_size_po2,
+        );
         let mut copied = 0u32;
         visit_region_files(&source, |path, lod_index, region_position| {
             let mut file = RegionFile::open(&path, false).map_err(|error| {
@@ -175,6 +240,17 @@ impl RegionFilesStream {
             Ok(())
         })?;
         dest.flush()?;
+        let mut meta = dest.current_meta();
+        meta.region_size_po2 = region_size_po2(new_region_size);
+        meta.sector_size = new_sector_size;
+        if copied == 0 {
+            if let Ok(Some(source_meta)) = RegionForestMeta::load(&source) {
+                meta.channel_depths = source_meta.channel_depths;
+                meta.block_size_po2 = source_meta.block_size_po2;
+            }
+        }
+        meta.save(&dest.directory)
+            .map_err(|error| VoxelStreamError::Io(error.to_string()))?;
         Ok(copied)
     }
 
@@ -252,20 +328,97 @@ impl RegionFilesStream {
     fn lock_regions(&self) -> MutexGuard<'_, HashMap<RegionKey, Arc<SharedRegionFile>>> {
         self.regions.lock().unwrap_or_else(PoisonError::into_inner)
     }
+
+    fn lock_meta(&self) -> MutexGuard<'_, MetaState> {
+        self.meta.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn effective_region_size(&self) -> i32 {
+        let state = self.lock_meta();
+        if state.loaded {
+            state.meta.region_size_blocks()
+        } else {
+            self.region_size
+        }
+    }
+
+    fn ensure_meta_loaded(&self) -> Result<bool, VoxelStreamError> {
+        let mut state = self.lock_meta();
+        if state.loaded {
+            return Ok(state.saved);
+        }
+        match RegionForestMeta::load(&self.directory) {
+            Ok(Some(meta)) => {
+                state.meta = meta;
+                state.loaded = true;
+                state.saved = true;
+                Ok(true)
+            }
+            Ok(None) | Err(super::forest_meta::ForestMetaError::Io(_)) => {
+                // Missing or unreadable sidecar: keep going so region-file I/O
+                // can report the concrete path error (symlink loops, ENOTDIR).
+                state.loaded = true;
+                state.saved = false;
+                Ok(false)
+            }
+            Err(super::forest_meta::ForestMetaError::Invalid(message)) => {
+                Err(VoxelStreamError::CorruptData(format!(
+                    "{}: {message}",
+                    self.directory.join(META_FILE_NAME).display()
+                )))
+            }
+        }
+    }
+
+    fn persist_meta_from_block(
+        &self,
+        buffer: &VoxelBuffer,
+    ) -> Result<RegionForestMeta, VoxelStreamError> {
+        let _ = self.ensure_meta_loaded()?;
+        let mut state = self.lock_meta();
+        if !state.saved {
+            state.meta.block_size_po2 = self.block_size_po2;
+            state.meta.region_size_po2 = region_size_po2(self.region_size);
+            state.meta.sector_size = self.sector_size;
+            state.meta.capture_channel_depths(buffer);
+            state
+                .meta
+                .save(&self.directory)
+                .map_err(|error| VoxelStreamError::Io(error.to_string()))?;
+            state.saved = true;
+            state.loaded = true;
+        }
+        if !state.meta.matches_buffer(buffer) {
+            return Err(VoxelStreamError::BlockFormatMismatch);
+        }
+        Ok(state.meta.clone())
+    }
+
+    fn current_meta(&self) -> RegionForestMeta {
+        self.lock_meta().meta.clone()
+    }
 }
 
 impl VoxelStream for RegionFilesStream {
     fn load_voxel_block(&self, query: VoxelLoadQuery<'_>) -> StreamResult<LoadResult> {
-        let key = RegionKey::from_block_position(
-            query.position_in_blocks,
-            query.lod_index,
-            self.region_size,
-        );
-        let local_position = key.local_block_position(query.position_in_blocks, self.region_size);
+        let has_meta = self.ensure_meta_loaded()?;
+        let meta = self.current_meta();
+        if has_meta {
+            meta.apply_channel_depths(query.voxel_buffer);
+        }
+        let region_size = meta.region_size_blocks();
+        let key =
+            RegionKey::from_block_position(query.position_in_blocks, query.lod_index, region_size);
+        let local_position = key.local_block_position(query.position_in_blocks, region_size);
+        let format = if has_meta {
+            meta.to_region_format()
+        } else {
+            RegionFormat::default()
+        };
         let region = if let Some(region) = self.get_cached_region(key) {
             region
         } else {
-            let Some(region) = self.get_or_open_region(key, false, RegionFormat::default())? else {
+            let Some(region) = self.get_or_open_region(key, false, format)? else {
                 return Ok(LoadResult::NotFound);
             };
             region
@@ -279,15 +432,13 @@ impl VoxelStream for RegionFilesStream {
     }
 
     fn save_voxel_block(&self, query: VoxelSaveQuery<'_>) -> StreamResult<()> {
-        let key = RegionKey::from_block_position(
-            query.position_in_blocks,
-            query.lod_index,
-            self.region_size,
-        );
-        let local_position = key.local_block_position(query.position_in_blocks, self.region_size);
-        let format = format_for_block(query.voxel_buffer, self.region_size, self.sector_size)?;
+        let meta = self.persist_meta_from_block(query.voxel_buffer)?;
+        let region_size = meta.region_size_blocks();
+        let key =
+            RegionKey::from_block_position(query.position_in_blocks, query.lod_index, region_size);
+        let local_position = key.local_block_position(query.position_in_blocks, region_size);
         let region = self
-            .get_or_open_region(key, true, format)?
+            .get_or_open_region(key, true, meta.to_region_format())?
             .expect("create_if_not_found always returns a region or an error");
         region
             .with_file(|file| file.save_block(local_position, query.voxel_buffer, Compression::Lz4))
@@ -515,6 +666,7 @@ fn parse_region_file_name(name: &str) -> Option<Vector3i> {
     Some(Vector3i::new(x, y, z))
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn format_for_block(
     block: &VoxelBuffer,
     region_size: i32,
@@ -581,6 +733,7 @@ mod tests {
     use crate::math::Vector3i;
     use crate::storage::{Allocator, ChannelId, VoxelBuffer};
     use crate::streams::compressed_data::Compression;
+    use crate::streams::region::forest_meta::{RegionForestMeta, META_FILE_NAME};
     use crate::streams::region::RegionFile;
     use crate::streams::{
         LoadResult, VoxelLoadQuery, VoxelSaveQuery, VoxelStream, VoxelStreamError,
@@ -699,6 +852,46 @@ mod tests {
         assert_eq!(result, LoadResult::Found);
         assert_eq!(loaded.get_voxel(1, 2, 3, ChannelId::Type.index()), 11);
         assert!(dest.path().join("lod0/r.1.0.0.vxr").is_file());
+        assert!(dest.path().join(META_FILE_NAME).is_file());
+    }
+
+    #[test]
+    fn first_save_writes_meta_vxrm_and_locks_channel_depths() {
+        let dir = TestDir::new();
+        let stream = RegionFilesStream::with_block_size(dir.path().to_path_buf(), 16, 256, 4);
+        let mut block = sample_block(3);
+        block.set_channel_depth(ChannelId::Sdf.index(), crate::storage::ChannelDepth::Bit32);
+        save(&stream, Vector3i::zero(), 0, &block).unwrap();
+        stream.flush().unwrap();
+        drop(stream);
+
+        let meta_path = dir.path().join(META_FILE_NAME);
+        assert!(meta_path.is_file());
+        let meta =
+            RegionForestMeta::from_json(&std::fs::read_to_string(meta_path).unwrap()).unwrap();
+        assert_eq!(meta.block_size_po2, 4);
+        assert_eq!(meta.region_size_po2, 4);
+        assert_eq!(meta.sector_size, 256);
+        assert_eq!(
+            meta.channel_depths[ChannelId::Sdf.index()],
+            crate::storage::ChannelDepth::Bit32
+        );
+
+        let reopened = RegionFilesStream::with_block_size(dir.path().to_path_buf(), 16, 256, 4);
+        let (result, loaded) = load(&reopened, Vector3i::zero(), 0).unwrap();
+        assert_eq!(result, LoadResult::Found);
+        assert_eq!(
+            loaded.channel_depth(ChannelId::Sdf.index()),
+            crate::storage::ChannelDepth::Bit32
+        );
+        assert_eq!(loaded.get_voxel(1, 2, 3, ChannelId::Type.index()), 3);
+
+        let mut other = sample_block(4);
+        other.set_channel_depth(ChannelId::Sdf.index(), crate::storage::ChannelDepth::Bit8);
+        assert_eq!(
+            save(&reopened, Vector3i::new(1, 0, 0), 0, &other),
+            Err(VoxelStreamError::BlockFormatMismatch)
+        );
     }
 
     #[test]

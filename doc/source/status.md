@@ -23,7 +23,7 @@ at the repository root — reference items as `R1`…`R8` in commits/PRs.
 | Blocky mesher | ✅ | Bake + AO + skirts + shadow occluders; inner-part AO is a TODO. |
 | Simple generators (flat/waves/noise/heightmap/image) | ✅ | |
 | Graph generator | 🟡 | AST interpreter with Expression/Image2D wired into the runtime; range analysis still limited. Visual editor not ported. |
-| Region files (.vxr) | ✅ format | Forest/LRU/`meta.vxrm`/file conversion not ported. |
+| Region files (.vxr) | ✅ format | `meta.vxrm` + `convert_files` live. LRU eviction and cross-process file locking remain open. |
 | Terrain paging (`VoxelTerrainCore`) | ✅ | Fixed-LOD and Variable-LOD clipbox planner, save-on-unload, viewer pairing. |
 | Edition (sphere/box/hemisphere/smooth, DDA raycast) | ✅ core | Paste / metadata / random-tick still open. |
 | Instancing | 🟡 | Scatter math only (MVP); no instance-block streaming. |
@@ -57,7 +57,7 @@ These upstream areas are absent and were not explicitly listed as deferred:
 - Multiplayer / `VoxelAreaFinder` area sync.
 - Block metadata round-trip (blocked on the Variant codec, same as the
   serializer metadata section).
-- `VoxelStreamRegionFiles` channel depths, rotation, and `convert_files`.
+- `VoxelStreamRegionFiles` `convert_files` and `meta.vxrm` channel-depth lock.
 - Real mesh→SDF baking for `VoxelMeshSDF`.
 
 ## Test & verification status

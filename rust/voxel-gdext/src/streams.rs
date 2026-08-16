@@ -179,10 +179,12 @@ impl VoxelStreamRegionFiles {
         let globalized = ProjectSettings::singleton().globalize_path(&self.directory);
         let region_blocks = 1i32 << self.region_size_po2_value.clamp(0, 8);
         let sector_size = u32::try_from(self.sector_size_value.max(1)).unwrap_or(512);
-        Arc::new(RegionFilesStream::with_settings(
+        let block_size_po2 = u8::try_from(self.block_size_po2_value.clamp(1, 8)).unwrap_or(4);
+        Arc::new(RegionFilesStream::with_block_size(
             PathBuf::from(globalized.to_string()),
             region_blocks,
             sector_size,
+            block_size_po2,
         ))
     }
 
@@ -206,6 +208,11 @@ impl VoxelStreamRegionFiles {
             .and_then(|value| value.try_to::<i32>().ok())
             .unwrap_or(self.sector_size_value)
             .max(1);
+        let block_po2 = new_settings
+            .get("block_size_po2")
+            .and_then(|value| value.try_to::<i32>().ok())
+            .unwrap_or(self.block_size_po2_value)
+            .clamp(1, 8);
         let globalized = ProjectSettings::singleton().globalize_path(&self.directory);
         let source = PathBuf::from(globalized.to_string());
         if !source.is_dir() {
@@ -224,11 +231,12 @@ impl VoxelStreamRegionFiles {
             std::process::id()
         ));
         let region_blocks = 1i32 << region_po2;
-        match RegionFilesStream::convert_directory(
+        match RegionFilesStream::convert_directory_ex(
             source.clone(),
             dest.clone(),
             region_blocks,
             u32::try_from(sector_size).unwrap_or(512),
+            u8::try_from(block_po2).unwrap_or(4),
         ) {
             Ok(copied) => {
                 if let Err(error) = replace_region_directory(&source, &dest) {
@@ -238,6 +246,7 @@ impl VoxelStreamRegionFiles {
                 }
                 self.region_size_po2_value = region_po2;
                 self.sector_size_value = sector_size;
+                self.block_size_po2_value = block_po2;
                 godot_print!("VoxelStreamRegionFiles.convert_files: rewrote {copied} blocks");
             }
             Err(error) => {

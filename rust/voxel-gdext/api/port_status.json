@@ -719,7 +719,7 @@
       "status": "partial",
       "binding_state": "registered",
       "registered_name": "VoxelStreamRegionFiles",
-      "evidence": "RegionFiles persistence is exercised through Godot, but the pinned canonical API surface is incomplete.",
+      "evidence": "RegionFiles persist .vxr plus meta.vxrm (block/region/sector size and channel depths). convert_files rewrites both. Inspector block_size_po2 is passed into the core stream.",
       "source_paths": [
         "upstream:doc/classes/VoxelStreamRegionFiles.xml",
         "rust/voxel-gdext/src/streams.rs"
