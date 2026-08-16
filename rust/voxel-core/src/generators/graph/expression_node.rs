@@ -14,7 +14,7 @@ use crate::string::expression_parser::{self, Function, Node as AstNode};
 ///
 /// The expression is parsed once at construction, then evaluated per-voxel.
 /// Variable names map to input port indices.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ExpressionNode {
     /// The parsed AST root (None if parse failed).
     ast: Option<Box<AstNode>>,

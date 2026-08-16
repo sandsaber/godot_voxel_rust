@@ -234,6 +234,19 @@ pub enum NodeKind {
     /// Output sink: writes its single input into the SDF channel of the
     /// destination `VoxelBuffer`. Treated as a leaf in topological order.
     OutputSdf { a: Option<GraphPort> },
+    /// Sample a 2D image at `(x, y)` with bilinear interpolation.
+    Image2D {
+        x: Option<GraphPort>,
+        y: Option<GraphPort>,
+        image: std::sync::Arc<crate::generators::graph::image::Image2D>,
+    },
+    /// Evaluate a parsed expression with `x`/`y`/`z` bound to the three ports.
+    Expression {
+        x: Option<GraphPort>,
+        y: Option<GraphPort>,
+        z: Option<GraphPort>,
+        expr: std::sync::Arc<crate::generators::graph::expression_node::ExpressionNode>,
+    },
 }
 
 impl NodeKind {
@@ -282,6 +295,8 @@ impl NodeKind {
             | NodeKind::SdfSmoothUnion { a, b, .. }
             | NodeKind::SdfSmoothSubtract { a, b, .. } => vec![*a, *b],
             NodeKind::OutputSdf { a } => vec![*a],
+            NodeKind::Image2D { x, y, .. } => vec![*x, *y],
+            NodeKind::Expression { x, y, z, .. } => vec![*x, *y, *z],
         }
     }
 
@@ -359,6 +374,11 @@ impl Graph {
         let id = self.nodes.iter().map(|n| n.id + 1).max().unwrap_or(0);
         self.add_node(GraphNode::new(id, kind));
         id
+    }
+
+    /// Remove every node. Used by the Godot `clear_graph` binding.
+    pub fn clear(&mut self) {
+        self.nodes.clear();
     }
 
     /// Returns the ids in topological order (producers before consumers).
@@ -716,6 +736,30 @@ impl Graph {
                     });
                     scratch.put(id, r);
                 }
+                NodeKind::Image2D { x, y, image } => {
+                    let image = image.clone();
+                    let r: Vec<f32> = (0..slice_size)
+                        .map(|i| {
+                            image.sample_bilinear(
+                                value_at(scratch, x, i, 0.0),
+                                value_at(scratch, y, i, 0.0),
+                            )
+                        })
+                        .collect();
+                    scratch.put(id, r);
+                }
+                NodeKind::Expression { x, y, z, expr } => {
+                    let xs: Vec<f32> = (0..slice_size)
+                        .map(|i| value_at(scratch, x, i, 0.0))
+                        .collect();
+                    let ys: Vec<f32> = (0..slice_size)
+                        .map(|i| value_at(scratch, y, i, 0.0))
+                        .collect();
+                    let zs: Vec<f32> = (0..slice_size)
+                        .map(|i| value_at(scratch, z, i, 0.0))
+                        .collect();
+                    scratch.put(id, expr.evaluate_slice(&[&xs, &ys, &zs]));
+                }
                 NodeKind::OutputSdf { a } => {
                     let r = monop(scratch, a, slice_size, |v| v);
                     outputs.push((GraphOutput::Sdf, r));
@@ -725,6 +769,97 @@ impl Graph {
 
         Ok(())
     }
+}
+
+/// Convert a possibly-negative script port id into a [`GraphPort`].
+/// Negative ids mean "unconnected" and become `None`.
+pub fn optional_graph_port(id: i64) -> Option<GraphPort> {
+    u32::try_from(id).ok().map(GraphPort::new)
+}
+
+/// Build a [`NodeKind`] from the compact Godot `add_node(kind, a, b, c, d, value)`
+/// contract documented in `doc/source/generators.md`.
+pub fn node_kind_from_spec(
+    kind: &str,
+    a: i64,
+    b: i64,
+    c: i64,
+    d: i64,
+    value: f32,
+) -> Option<NodeKind> {
+    let pa = optional_graph_port(a);
+    let pb = optional_graph_port(b);
+    let pc = optional_graph_port(c);
+    let pd = optional_graph_port(d);
+    Some(match kind {
+        "InputX" => NodeKind::InputX,
+        "InputY" => NodeKind::InputY,
+        "InputZ" => NodeKind::InputZ,
+        "Constant" => NodeKind::Constant(value),
+        "Add" => NodeKind::Add { a: pa, b: pb },
+        "Subtract" => NodeKind::Subtract { a: pa, b: pb },
+        "Multiply" => NodeKind::Multiply { a: pa, b: pb },
+        "Divide" => NodeKind::Divide { a: pa, b: pb },
+        "Min" => NodeKind::Min { a: pa, b: pb },
+        "Max" => NodeKind::Max { a: pa, b: pb },
+        "Sin" => NodeKind::Sin { a: pa },
+        "Cos" => NodeKind::Cos { a: pa },
+        "Abs" => NodeKind::Abs { a: pa },
+        "Sqrt" => NodeKind::Sqrt { a: pa },
+        "Floor" => NodeKind::Floor { a: pa },
+        "Fract" => NodeKind::Fract { a: pa },
+        "Pow" => NodeKind::Pow { a: pa, b: pb },
+        "Mix" => NodeKind::Mix {
+            a: pa,
+            b: pb,
+            t: pc,
+        },
+        "Clamp" => NodeKind::Clamp {
+            a: pa,
+            min_v: pb,
+            max_v: pc,
+        },
+        "SdfPlane" => NodeKind::SdfPlane { y: pa, height: pb },
+        "SdfSphere" => NodeKind::SdfSphere {
+            x: pa,
+            y: pb,
+            z: pc,
+            radius: pd,
+        },
+        "SdfBox" => NodeKind::SdfBox {
+            x: pa,
+            y: pb,
+            z: pc,
+            size_x: value,
+            size_y: value,
+            size_z: value,
+        },
+        "SdfUnion" => NodeKind::SdfUnion { a: pa, b: pb },
+        "SdfSubtract" => NodeKind::SdfSubtract { a: pa, b: pb },
+        "SdfSmoothUnion" => NodeKind::SdfSmoothUnion {
+            a: pa,
+            b: pb,
+            smoothness: value,
+        },
+        "SdfSmoothSubtract" => NodeKind::SdfSmoothSubtract {
+            a: pa,
+            b: pb,
+            smoothness: value,
+        },
+        "Noise2D" => NodeKind::Noise2D {
+            x: pa,
+            y: pb,
+            noise: crate::generators::simple::NoiseConfig::default(),
+        },
+        "Noise3D" => NodeKind::Noise3D {
+            x: pa,
+            y: pb,
+            z: pc,
+            noise: crate::generators::simple::NoiseConfig::default(),
+        },
+        "OutputSdf" => NodeKind::OutputSdf { a: pa },
+        _ => return None,
+    })
 }
 
 /// Compiled, analysis-cached form of a [`Graph`] (audit §9.6-C1).
@@ -925,6 +1060,7 @@ impl CompiledGraph {
                 // Curve/Noise — non-monotone; conservative.
                 NodeKind::Curve { .. } => inf,
                 NodeKind::Noise2D { .. } | NodeKind::Noise3D { .. } => inf,
+                NodeKind::Image2D { .. } | NodeKind::Expression { .. } => inf,
                 // SDF nodes: easy ones compose from interval primitives.
                 NodeKind::SdfPlane { y, height } => resolve(&ranges, y) - resolve(&ranges, height),
                 NodeKind::SdfBox { .. } | NodeKind::SdfTorus { .. } => inf,
@@ -1324,6 +1460,23 @@ impl CompiledGraph {
                     })
                     .collect(),
             ),
+            NodeKind::Image2D { x, y, image } => {
+                let image = image.clone();
+                scratch.set(
+                    node_index,
+                    (0..slice_size)
+                        .map(|i| {
+                            image.sample_bilinear(self.val(scratch, x, i), self.val(scratch, y, i))
+                        })
+                        .collect(),
+                );
+            }
+            NodeKind::Expression { x, y, z, expr } => {
+                let xs: Vec<f32> = (0..slice_size).map(|i| self.val(scratch, x, i)).collect();
+                let ys: Vec<f32> = (0..slice_size).map(|i| self.val(scratch, y, i)).collect();
+                let zs: Vec<f32> = (0..slice_size).map(|i| self.val(scratch, z, i)).collect();
+                scratch.set(node_index, expr.evaluate_slice(&[&xs, &ys, &zs]));
+            }
             NodeKind::OutputSdf { a } => {
                 let data: Vec<f32> = (0..slice_size).map(|i| self.val(scratch, a, i)).collect();
                 scratch.set(node_index, data);
@@ -1492,6 +1645,77 @@ mod tests {
     }
 
     // ---- C1: CompiledGraph tests (audit §9.6-C1) ----
+
+    #[test]
+    fn expression_and_image2d_nodes_evaluate() {
+        use crate::generators::graph::expression_node::ExpressionNode;
+        use crate::generators::graph::image::Image2D;
+
+        let mut g = Graph::new();
+        let x = g.push(NodeKind::InputX);
+        let expr = ExpressionNode::new("x * 2", &[("x", 0), ("y", 1), ("z", 2)]).unwrap();
+        let e = g.push(NodeKind::Expression {
+            x: Some(GraphPort::new(x)),
+            y: None,
+            z: None,
+            expr: std::sync::Arc::new(expr),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort::new(e)),
+        });
+        let compiled = CompiledGraph::compile(&g).expect("compile expression");
+        let xs = [3.0f32];
+        let zs = [0.0f32];
+        let inputs = GraphInputs {
+            x: &xs,
+            y: 0.0,
+            z: &zs,
+        };
+        let mut scratch = CompiledScratch::new();
+        let mut out = Vec::new();
+        compiled.generate_slice(&inputs, 1, &mut scratch, &mut out, false);
+        let sdf = out
+            .into_iter()
+            .find(|(k, _)| *k == GraphOutput::Sdf)
+            .and_then(|(_, v)| v.into_iter().next())
+            .unwrap();
+        assert!((sdf - 6.0).abs() < 1e-5, "expression x*2 at x=3, got {sdf}");
+
+        let mut g2 = Graph::new();
+        let ix = g2.push(NodeKind::InputX);
+        let iy = g2.push(NodeKind::InputY);
+        let img = Image2D::from_data(2, 2, vec![0.0, 1.0, 2.0, 3.0]);
+        let sample = g2.push(NodeKind::Image2D {
+            x: Some(GraphPort::new(ix)),
+            y: Some(GraphPort::new(iy)),
+            image: std::sync::Arc::new(img),
+        });
+        g2.push(NodeKind::OutputSdf {
+            a: Some(GraphPort::new(sample)),
+        });
+        assert!(CompiledGraph::compile(&g2).is_ok());
+    }
+
+    #[test]
+    fn node_kind_from_spec_builds_documented_kinds() {
+        assert!(matches!(
+            node_kind_from_spec("InputX", -1, -1, -1, -1, 0.0),
+            Some(NodeKind::InputX)
+        ));
+        assert!(matches!(
+            node_kind_from_spec("Constant", -1, -1, -1, -1, 4.5),
+            Some(NodeKind::Constant(v)) if v == 4.5
+        ));
+        assert!(matches!(
+            node_kind_from_spec("SdfSphere", 0, 1, 2, 3, 0.0),
+            Some(NodeKind::SdfSphere { .. })
+        ));
+        assert!(matches!(
+            node_kind_from_spec("OutputSdf", 4, -1, -1, -1, 0.0),
+            Some(NodeKind::OutputSdf { .. })
+        ));
+        assert!(node_kind_from_spec("NotANode", -1, -1, -1, -1, 0.0).is_none());
+    }
 
     #[test]
     fn compiled_graph_topological_order_matches_lazy() {

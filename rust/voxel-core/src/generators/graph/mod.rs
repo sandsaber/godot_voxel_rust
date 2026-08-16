@@ -18,10 +18,8 @@
 //!
 //! ## Status
 //!
-//! Minimal node set ported: `InputX/Y/Z`, `Constant`, `Add`, `Subtract`,
-//! `Multiply`, `Divide`, `Sin`, `Cos`, `Abs`, `Sqrt`, `Min`, `Max`,
-//! `Remap`, `OutputSdf`. Range analysis, `Curve`/`Image`/`Noise`/`SDF`
-//! nodes, FastNoise2 integration, and the `Expression` node are deferred.
+//! Node set includes math/SDF/noise, `Curve`, `Image2D`, and `Expression`.
+//! Range analysis is still conservative for hard nodes.
 
 pub mod expression_node;
 pub mod generator_graph;
@@ -30,6 +28,6 @@ pub mod runtime;
 
 pub use generator_graph::GraphGenerator;
 pub use runtime::{
-    CompiledGraph, CompiledScratch, Graph, GraphInputs, GraphNode, GraphNodeId, GraphOutput,
-    GraphParam, GraphPort, GraphScratch, NodeKind, TopoError,
+    node_kind_from_spec, optional_graph_port, CompiledGraph, CompiledScratch, Graph, GraphInputs,
+    GraphNode, GraphNodeId, GraphOutput, GraphParam, GraphPort, GraphScratch, NodeKind, TopoError,
 };
