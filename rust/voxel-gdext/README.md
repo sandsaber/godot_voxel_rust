@@ -69,14 +69,14 @@ terrain.add_child(viewer)   # viewer must be a child of the terrain
 ### Verified
 
 Tested headless against Godot 4.7.1.stable on Linux x86_64 (2026-07-30).
-The `smoke_test/` Godot project ships four runnable checks plus a driver script.
+The `smoke_test/` Godot project ships seven runnable checks plus a driver script.
 
 **Reproducing on a clean checkout** — the compiled library is a git-ignored build
 artifact, so build it first. The driver does everything:
 
 ```sh
 cd rust
-./voxel-gdext/smoke_test/run_smoke_test.sh          # debug build + all 4 checks
+./voxel-gdext/smoke_test/run_smoke_test.sh          # debug build + all 7 checks
 ./voxel-gdext/smoke_test/run_smoke_test.sh --release
 ```
 
@@ -96,6 +96,13 @@ It (1) `cargo build`s `voxel-gdext`, (2) copies the `.so`/`.dylib` next to the
 - **`runtime_correctness.tscn`** — verifies mesh replacement after edits,
   viewer-driven unload, invalid-input safety and RegionFiles persistence using
   public Godot-visible behavior.
+- **`variable_lod_3.tscn`** — 3-LOD `VoxelLodTerrain` paging, split/join and
+  negative coordinates.
+- **`blocky_terrain.tscn`** — Type-channel Flat + baked blocky library
+  rendering.
+- **`instancer_streaming.tscn`** — `VoxelInstancer` streaming under a noise
+  Type terrain: instance blocks follow mesh-block paging, spawn real nodes,
+  and free them when the viewer leaves.
 
 ## Android
 

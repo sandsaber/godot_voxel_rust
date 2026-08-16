@@ -95,7 +95,7 @@ jobs:
           sudo mv "godot-bin/Godot_v${GODOT_VERSION}-stable_linux.x86_64" /usr/local/bin/godot
           godot --version
 
-      - name: Run Godot smoke tests (5 scenes)
+      - name: Run Godot smoke tests (7 scenes)
         run: ./voxel-gdext/smoke_test/run_smoke_test.sh
 
   android-smoke:

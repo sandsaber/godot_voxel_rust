@@ -146,15 +146,20 @@ func _ready() -> void:
 
 		var count := int(instancer.scatter_test(4))
 		_ok(count == 4, "scatter_test returns 4 (got %d)" % count)
+		# Assert by class and transform, not node names (naming is an
+		# implementation detail): scatter_test places instances at x = 0..3.
 		var scene_children := 0
+		var positions := {}
 		for child in instancer.get_children():
-			if child is Node3D and child.name.begins_with("scatter_scene_0_"):
+			if child is Node3D:
 				scene_children += 1
-				var idx := int(child.name.trim_prefix("scatter_scene_0_"))
-				_ok(child.position.x == float(idx),
-					"scene instance %d placed at its scatter position" % idx)
+				positions[int(roundf(child.position.x))] = true
 		_ok(scene_children == 4,
 			"scene item spawns one real Node3D per instance (got %d)" % scene_children)
+		_ok(
+			positions.has(0) and positions.has(1) and positions.has(2) and positions.has(3),
+			"scene instances are placed at their scatter positions (x set: %s)" % str(positions.keys())
+		)
 
 		# Assigning a mesh flips the item back to MultiMesh and clears the scene.
 		var mesh := BoxMesh.new()

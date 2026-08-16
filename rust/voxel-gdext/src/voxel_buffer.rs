@@ -1170,15 +1170,6 @@ enum StreamedInstanceNode {
     Scene(Gd<Node3D>),
 }
 
-impl StreamedInstanceNode {
-    fn queue_free(self) {
-        match self {
-            StreamedInstanceNode::MultiMesh(mut node) => node.queue_free(),
-            StreamedInstanceNode::Scene(mut node) => node.queue_free(),
-        }
-    }
-}
-
 #[godot_api]
 impl INode3D for VoxelInstancerGD {
     fn init(base: Base<Node3D>) -> Self {

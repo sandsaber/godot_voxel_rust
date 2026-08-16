@@ -400,11 +400,12 @@ impl VoxelGeneratorNoise {
             frequency: Some(self.frequency_value),
             ..NoiseConfig::default()
         };
+        let channel = channel_id_from_index(self.channel_value as usize).unwrap_or(ChannelId::Sdf);
         let noise = Noise {
             noise: config.build(),
             height_start: self.height_start_value,
             height_range: self.height_range_value,
-            ..Noise::default()
+            channel,
         };
         Arc::new(noise)
     }
