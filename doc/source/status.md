@@ -38,7 +38,7 @@ That file is the product queue; this page is the parity matrix.
 | Mesher selection (`mesher` property) | ✅ | Transvoxel, cubes, blocky (library required for visible geometry). |
 | Generators usable by terrain | ✅ | Flat / Waves / Noise / Heightmap / Image / Graph (Graph is never silent Waves). |
 | Streams usable by terrain | ✅ | `VoxelStreamMemory`, `VoxelStreamRegionFiles` (inspector region/sector/`block_size_po2`, live `convert_files`, `meta.vxrm`). |
-| Editing terrain | ✅ tool | Live `VoxelToolTerrain` on both nodes: sphere/box/hemisphere/smooth/paste, batched per data block, in-memory metadata, tags-aware random-tick. Disk persistence of metadata is R7. |
+| Editing terrain | ✅ tool | Live `VoxelToolTerrain` on both nodes: sphere/box/hemisphere/smooth/paste, batched per data block, tags-aware random-tick. Metadata persists through save/load (R7 narrow); C++ Dictionary/Object payloads stay unreadable until R7 wide. |
 | Raycast | ✅ | DDA voxel traversal over the SDF channel. |
 | `VoxelLodTerrain` | ✅ runtime | Production clipbox planner, 3-LOD smoke scene, collision settings, lifecycle signals, wireframe debug-draw. GPU/normalmap inspector fields remain stored stubs. |
 | Instancer rendering | 🟡 | Scatter uploads MultiMeshes. As a terrain child it streams one instance block per paged LOD0 mesh block. Scene-item instantiation is still open. |
@@ -52,7 +52,6 @@ Tracked in ROADMAP; this is the honest size, not a new queue.
 
 | Item | Size | Notes |
 |---|---|---|
-| **R7 narrow** — persist `MetadataValue` in the v4 metadata section | One PR-stage | Our worlds survive save/load. Still skip C++ Dictionary/Object payloads. |
 | **R7 wide** — Godot Variant codec + v2/v3 migration | Separate project | Would pull Variant into core or need a thick gdext encoder. |
 | **R3** — `VoxelAreaFinder` + replication boundary | Design first, then several stages | Network product. Out of the current PR queue. |
 | **R5 leftover** — scene-item instancer | Medium | MultiMesh path already streams. |

@@ -87,4 +87,68 @@ fn main() {
         .expect("lz4 seed must deserialize");
     write_seed("block_serializer", "valid_4x4x4_lz4.bin", &payload);
     write_seed("region_file", "valid_4x4x4_lz4.bin", &payload);
+
+    // ------------------------------------------------------------------
+    // Metadata section (R7): a valid payload carrying every MetadataValue
+    // kind, plus two hostile-section anchors (foreign C++ custom tag 32 and a
+    // truncated entry) for the skip-not-fail contract. Hostile sections are
+    // spliced in front of the trailing magic with the same u32 envelope the
+    // serializer uses.
+    // ------------------------------------------------------------------
+    use voxel_core::storage::MetadataValue;
+    let mut meta_buffer = VoxelBuffer::with_size(Vector3i::splat(2));
+    VoxelFormat::new().configure_buffer(&mut meta_buffer);
+    meta_buffer.set_voxel(5, 1, 0, 0, ChannelId::Type.index());
+    meta_buffer.set_block_metadata(MetadataValue::Text("seed".into()));
+    meta_buffer.set_voxel_metadata(Vector3i::new(0, 1, 0), MetadataValue::Int(64));
+    meta_buffer.set_voxel_metadata(Vector3i::new(1, 1, 1), MetadataValue::Float(0.25));
+    meta_buffer.set_voxel_metadata(Vector3i::new(1, 0, 0), MetadataValue::Bytes(vec![1, 2, 3]));
+
+    let mut meta_payload = Vec::new();
+    block_serializer::serialize_and_compress(&meta_buffer, &mut meta_payload, Compression::Lz4)
+        .expect("serialize_and_compress metadata seed");
+    let mut meta_check = VoxelBuffer::with_size(Vector3i::zero());
+    block_serializer::decompress_and_deserialize(&meta_payload, &mut meta_check)
+        .expect("metadata seed must deserialize");
+    assert_eq!(
+        meta_check.voxel_metadata(Vector3i::new(0, 1, 0)),
+        Some(&MetadataValue::Int(64))
+    );
+    write_seed(
+        "block_serializer",
+        "metadata-section-lz4.bin",
+        &meta_payload,
+    );
+    write_seed("region_file", "metadata-section-lz4.bin", &meta_payload);
+
+    let hostile = |section: &[u8]| -> Vec<u8> {
+        // Start from the metadata-free block so the spliced section is the
+        // only one, serialize with a verbatim (None) compression envelope,
+        // then insert the section in front of the trailing magic.
+        let mut raw = Vec::new();
+        block_serializer::serialize_and_compress(&buffer, &mut raw, Compression::None)
+            .expect("serialize seed base");
+        let magic = raw.split_off(raw.len() - 4);
+        raw.extend_from_slice(&(section.len() as u32).to_le_bytes());
+        raw.extend_from_slice(section);
+        raw.extend_from_slice(&magic);
+        raw
+    };
+
+    // Foreign C++ custom tag (32 = Godot Variant): must decode as lossy, not
+    // panic and not fail the voxel load.
+    let foreign = hostile(&[32, 0xde, 0xad]);
+    let mut foreign_check = VoxelBuffer::with_size(Vector3i::zero());
+    block_serializer::decompress_and_deserialize(&foreign, &mut foreign_check)
+        .expect("foreign-tag seed must load voxels");
+    write_seed("block_serializer", "metadata-foreign-tag.bin", &foreign);
+    write_seed("region_file", "metadata-foreign-tag.bin", &foreign);
+
+    // Truncated u64 entry: skip-not-fail again.
+    let truncated = hostile(&[1u8, 0x00, 0x01]);
+    let mut truncated_check = VoxelBuffer::with_size(Vector3i::zero());
+    block_serializer::decompress_and_deserialize(&truncated, &mut truncated_check)
+        .expect("truncated-metadata seed must load voxels");
+    write_seed("block_serializer", "metadata-truncated.bin", &truncated);
+    write_seed("region_file", "metadata-truncated.bin", &truncated);
 }

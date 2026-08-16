@@ -762,9 +762,9 @@ impl VoxelBufferGD {
     }
 
     // ---- Block metadata (C++ `VoxelBuffer::set_block_metadata` family) ----
-    // Live in-memory store. Persistence through the Variant serializer is
-    // still deferred (ROADMAP R7). Supported payloads: nil/int/float/String/
-    // PackedByteArray.
+    // Persisted through the v4 block serializer metadata section (R7 narrow).
+    // Supported payloads: nil/int/float/String/PackedByteArray. C++ Variant
+    // (Dictionary/Object) payloads need the wide R7 codec.
 
     /// Sets opaque block metadata on this buffer.
     #[func]

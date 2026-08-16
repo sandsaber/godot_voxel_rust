@@ -25,10 +25,13 @@
 //! Values with no C++ equivalent (`Float`, `Text`, `Bytes`) use app-specific
 //! tags starting at 40 (C++ reserves `[32, 40)` for its own custom types, e.g.
 //! 32 = Godot `Variant`). A section containing such foreign entries — or any
-//! undecodable content — is skipped without failing the load: voxel data must
-//! always survive a metadata problem, matching the upstream behavior of
-//! ignoring `deserialize_metadata` failures. Direct [`deserialize`] surfaces
-//! the loss as [`Error::MetadataSkipped`] after loading voxel data;
+//! undecodable content — is skipped without failing the load: when *reading*,
+//! voxel data must always survive a metadata problem, matching the upstream
+//! behavior of ignoring `deserialize_metadata` failures (entries positioned
+//! outside the buffer are skipped individually, as upstream does). When
+//! *writing*, a metadata position outside the buffer is a caller error and
+//! fails the save rather than silently dropping data. Direct [`deserialize`]
+//! surfaces the loss as [`Error::MetadataSkipped`] after loading voxel data;
 //! [`decompress_and_deserialize_with_limits`] reports it as
 //! [`DeserializeStatus::MetadataLost`]. Voxel entries are written in sorted
 //! position order so output is deterministic.
@@ -74,7 +77,9 @@ pub enum Error {
     UnexpectedEof,
     /// Trailing `0x900df00d` mismatch — the stream is corrupt or truncated.
     BadTrailingMagic { expected: u32, found: u32 },
-    /// Tag/version/compression/depth byte outside the valid range.
+    /// Invalid stream content (bad tag/version/compression/depth nibble,
+    /// inconsistent section length) or an invalid buffer handed to
+    /// [`serialize`] (e.g. a metadata position outside the buffer).
     InvalidFormat(String),
     /// Unsupported on-disk version (v2/v3 migration needs the Godot Variant
     /// codec, which is not yet ported).
@@ -399,13 +404,7 @@ pub fn deserialize_with_limits(
         if remaining_before_magic < 4 {
             return Err(Error::UnexpectedEof);
         }
-        let metadata_pos = r.position();
-        let metadata_size = u32::from_le_bytes([
-            src[metadata_pos],
-            src[metadata_pos + 1],
-            src[metadata_pos + 2],
-            src[metadata_pos + 3],
-        ]) as usize;
+        let metadata_size = r.try_get_32().ok_or(Error::UnexpectedEof)? as usize;
         let expected_metadata_section_len = 4usize
             .checked_add(metadata_size)
             .ok_or_else(|| Error::InvalidFormat("metadata section size overflow".to_string()))?;
@@ -416,11 +415,7 @@ pub fn deserialize_with_limits(
             )));
         }
         if metadata_size > 0 {
-            // `r` still points at the size field; slice the section bytes
-            // directly so the reader shift by the u32 never matters.
-            let section = src
-                .get(metadata_pos + 4..metadata_pos + 4 + metadata_size)
-                .ok_or(Error::UnexpectedEof)?;
+            let section = r.try_take(metadata_size).ok_or(Error::UnexpectedEof)?;
             limits
                 .check_bytes("block metadata section", metadata_size)
                 .map_err(Error::Limit)?;
@@ -442,14 +437,19 @@ enum MetadataDecodeError {
     /// tag this build does not know; its payload length is unknowable, so the
     /// rest of the section cannot be parsed either.
     ForeignEntry,
-    /// A decodable entry holds invalid contents (bad UTF-8, position outside
-    /// the buffer…).
+    /// A decodable entry holds invalid contents (bad UTF-8, more entries than
+    /// voxels…), or the section is truncated mid-entry.
     Corrupt,
 }
 
 /// Decode a metadata section (the `[size bytes]` part) into `buffer`. Only
 /// commits on full success so a skipped section never leaves half-populated
 /// metadata behind.
+///
+/// Entries with positions outside the buffer are skipped individually, the
+/// way upstream C++ does (`ZN_ASSERT_CONTINUE_MSG`); the C++ writer only
+/// validates positions against `MAX_SIZE`, not the block size, so even a
+/// legitimate C++ save can contain such entries.
 fn decode_metadata_section(
     src: &[u8],
     buffer_size: Vector3i,
@@ -458,16 +458,25 @@ fn decode_metadata_section(
 ) -> Result<(), MetadataDecodeError> {
     let mut r = MemoryReader::little(src);
     let block_metadata = read_metadata_value(&mut r, limits)?;
+    // A legitimate section cannot hold more entries than the buffer has
+    // voxels (duplicates would be the only way past that), and the cap keeps
+    // a hostile 64 MiB section of 7-byte nil entries from expanding into an
+    // unbounded `Vec` + `HashMap` — volume is already budgeted upstream by
+    // the `check_bytes("block voxel bytes", …)` gate.
+    let volume = buffer_size.volume_u64();
     let mut entries: Vec<(Vector3i, MetadataValue)> = Vec::new();
     while r.position() < src.len() {
         let x = i32::from(r.try_get_16().ok_or(MetadataDecodeError::UnexpectedEof)?);
         let y = i32::from(r.try_get_16().ok_or(MetadataDecodeError::UnexpectedEof)?);
         let z = i32::from(r.try_get_16().ok_or(MetadataDecodeError::UnexpectedEof)?);
         let value = read_metadata_value(&mut r, limits)?;
+        if entries.len() as u64 >= volume {
+            return Err(MetadataDecodeError::Corrupt);
+        }
         // u16 coordinates are non-negative by construction; only the upper
         // bound can fail.
         if x >= buffer_size.x || y >= buffer_size.y || z >= buffer_size.z {
-            return Err(MetadataDecodeError::Corrupt);
+            continue;
         }
         entries.push((Vector3i::new(x, y, z), value));
     }
@@ -537,7 +546,18 @@ pub fn serialize_and_compress(
 }
 
 /// Decompress `src`, then deserialize. Ported from
-/// `BlockSerializer::decompress_and_deserialize`.
+/// `BlockSerializer::decompress_and_deserialize`. If the block carries a
+/// metadata section that cannot be decoded (foreign C++ entries, corruption),
+/// the loss is accepted silently: voxel data loads anyway, matching the
+/// non-limits C++ wrapper. Callers that need to surface the loss must use
+/// [`decompress_and_deserialize_with_limits`] and check for
+/// [`DeserializeStatus::MetadataLost`].
+pub fn decompress_and_deserialize(src: &[u8], buffer: &mut VoxelBuffer) -> Result<(), Error> {
+    let status = decompress_and_deserialize_with_limits(src, buffer, DecodeLimits::default())?;
+    let _ = status;
+    Ok(())
+}
+
 /// Outcome of a decompress+deserialize operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeserializeStatus {
@@ -548,15 +568,6 @@ pub enum DeserializeStatus {
     /// a corrupt section). The caller must decide whether to accept the lossy
     /// load or reject it.
     MetadataLost,
-}
-
-pub fn decompress_and_deserialize(src: &[u8], buffer: &mut VoxelBuffer) -> Result<(), Error> {
-    let status = decompress_and_deserialize_with_limits(src, buffer, DecodeLimits::default())?;
-    // Default: accept metadata loss silently for backward compatibility with
-    // existing callers that use the non-limits wrapper. Callers that care
-    // should use decompress_and_deserialize_with_limits directly.
-    let _ = status;
-    Ok(())
 }
 
 /// Decompress `src`, then deserialize with explicit allocation limits.
@@ -1046,7 +1057,7 @@ mod tests {
         section.extend_from_slice(&0u16.to_le_bytes());
         section.extend_from_slice(&0u16.to_le_bytes());
         section.extend_from_slice(&0u16.to_le_bytes());
-        section.push(40u8); // …then a foreign app-specific tag (f64 without payload)
+        section.push(32u8); // …then a foreign C++ custom tag (Godot Variant)
         append_metadata_section(&mut bytes, &section);
 
         let mut dst = VoxelBuffer::new(Allocator::Default);
@@ -1101,21 +1112,58 @@ mod tests {
     }
 
     #[test]
-    fn voxel_metadata_position_outside_buffer_is_skipped_on_decode() {
+    fn voxel_metadata_position_outside_buffer_is_skipped_entry_wise() {
+        // Upstream C++ only validates writer positions against MAX_SIZE, not
+        // the block size, so a legitimate C++ save can contain out-of-range
+        // entries. C++ skips them one by one; so do we — the valid neighbours
+        // must still load.
         let mut bytes = Vec::new();
         serialize(&uniform_block(), &mut bytes).unwrap();
         let mut section = Vec::new();
         section.push(0u8);
-        section.extend_from_slice(&5u16.to_le_bytes()); // x=5 in a 2³ buffer
-        section.extend_from_slice(&0u16.to_le_bytes());
-        section.extend_from_slice(&0u16.to_le_bytes());
-        section.push(1u8);
-        section.extend_from_slice(&1u64.to_le_bytes());
+        for &(x, value) in &[(0u16, 1u64), (5, 2), (1, 3)] {
+            section.extend_from_slice(&x.to_le_bytes());
+            section.extend_from_slice(&0u16.to_le_bytes());
+            section.extend_from_slice(&0u16.to_le_bytes());
+            section.push(1u8);
+            section.extend_from_slice(&value.to_le_bytes());
+        }
+        append_metadata_section(&mut bytes, &section);
+
+        let mut dst = VoxelBuffer::new(Allocator::Default);
+        deserialize(&bytes, &mut dst).unwrap();
+        assert_eq!(dst.size(), Vector3i::new(2, 2, 2));
+        assert_eq!(
+            dst.voxel_metadata(Vector3i::new(0, 0, 0)),
+            Some(&MetadataValue::Int(1))
+        );
+        assert_eq!(
+            dst.voxel_metadata(Vector3i::new(1, 0, 0)),
+            Some(&MetadataValue::Int(3))
+        );
+        assert!(dst.voxel_metadata(Vector3i::new(5, 0, 0)).is_none());
+    }
+
+    #[test]
+    fn metadata_section_rejects_more_entries_than_voxels() {
+        // 8 voxels in a 2³ buffer; nine in-bounds entries can only be
+        // duplicates, and a hostile section must not expand into an unbounded
+        // collection — the decoder caps it at the volume.
+        let mut bytes = Vec::new();
+        serialize(&uniform_block(), &mut bytes).unwrap();
+        let mut section = Vec::new();
+        section.push(0u8);
+        for _ in 0..9 {
+            section.extend_from_slice(&0u16.to_le_bytes());
+            section.extend_from_slice(&0u16.to_le_bytes());
+            section.extend_from_slice(&0u16.to_le_bytes());
+            section.push(0u8); // nil entry: 7 bytes each
+        }
         append_metadata_section(&mut bytes, &section);
 
         let mut dst = VoxelBuffer::new(Allocator::Default);
         assert_eq!(deserialize(&bytes, &mut dst), Err(Error::MetadataSkipped));
-        assert_eq!(dst.size(), Vector3i::new(2, 2, 2));
+        assert!(!dst.has_voxel_metadata());
     }
 
     #[test]
@@ -1133,14 +1181,16 @@ mod tests {
 
     #[test]
     fn metadata_section_respects_decode_limits() {
+        // The 2³ uniform block's worst-case voxel bytes are 8×8×8 = 512, so a
+        // budget of 550 passes the voxel gate but rejects the ~605-byte
+        // section: the metadata budget must be reachable on its own.
         let mut src = uniform_block();
-        src.set_block_metadata(MetadataValue::Int(1));
+        src.set_block_metadata(MetadataValue::Text("m".repeat(600)));
         let mut bytes = Vec::new();
         serialize(&src, &mut bytes).unwrap();
 
-        // The 9-byte section exceeds a 4-byte total budget → hard limit error.
         let limits = crate::streams::DecodeLimits {
-            max_bytes: 4,
+            max_bytes: 550,
             ..crate::streams::DecodeLimits::default()
         };
         let mut dst = VoxelBuffer::new(Allocator::Default);
@@ -1165,5 +1215,87 @@ mod tests {
             Err(Error::MetadataSkipped)
         );
         assert_eq!(dst.size(), src.size());
+    }
+
+    #[test]
+    fn nil_block_entry_with_voxel_entries_writes_leading_type_empty() {
+        // The exact C++ shape for "no block metadata, one u64 voxel entry":
+        // the section must begin with the bare TYPE_EMPTY byte.
+        let mut src = uniform_block();
+        src.set_voxel_metadata(Vector3i::new(1, 0, 0), MetadataValue::Int(2));
+
+        let mut ours = Vec::new();
+        serialize(&src, &mut ours).unwrap();
+
+        let mut cpp_style = Vec::new();
+        serialize(&uniform_block(), &mut cpp_style).unwrap();
+        let magic = cpp_style.split_off(cpp_style.len() - BLOCK_TRAILING_MAGIC_SIZE);
+        let mut section = Vec::new();
+        section.push(0u8); // TYPE_EMPTY block metadata
+        section.extend_from_slice(&1u16.to_le_bytes());
+        section.extend_from_slice(&0u16.to_le_bytes());
+        section.extend_from_slice(&0u16.to_le_bytes());
+        section.push(1u8);
+        section.extend_from_slice(&2u64.to_le_bytes());
+        cpp_style.extend_from_slice(&(section.len() as u32).to_le_bytes());
+        cpp_style.extend_from_slice(&section);
+        cpp_style.extend_from_slice(&magic);
+
+        assert_eq!(ours, cpp_style);
+    }
+
+    #[test]
+    fn metadata_round_trips_float_nan_payload_bits() {
+        let nan = f64::from_bits(0x7ff8_1234_5678_9abc);
+        assert!(nan.is_nan());
+        let mut src = sample_buffer();
+        src.set_voxel_metadata(Vector3i::new(0, 0, 0), MetadataValue::Float(nan));
+
+        let mut bytes = Vec::new();
+        serialize(&src, &mut bytes).unwrap();
+        let mut dst = VoxelBuffer::new(Allocator::Default);
+        deserialize(&bytes, &mut dst).unwrap();
+
+        match dst.voxel_metadata(Vector3i::new(0, 0, 0)) {
+            Some(MetadataValue::Float(v)) => assert_eq!(v.to_bits(), nan.to_bits()),
+            other => panic!("expected float metadata, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn duplicate_positions_in_section_keep_last_entry() {
+        let mut bytes = Vec::new();
+        serialize(&uniform_block(), &mut bytes).unwrap();
+        let mut section = Vec::new();
+        section.push(0u8);
+        for value in [1u64, 2] {
+            section.extend_from_slice(&1u16.to_le_bytes());
+            section.extend_from_slice(&0u16.to_le_bytes());
+            section.extend_from_slice(&0u16.to_le_bytes());
+            section.push(1u8);
+            section.extend_from_slice(&value.to_le_bytes());
+        }
+        append_metadata_section(&mut bytes, &section);
+
+        let mut dst = VoxelBuffer::new(Allocator::Default);
+        deserialize(&bytes, &mut dst).unwrap();
+        assert_eq!(
+            dst.voxel_metadata(Vector3i::new(1, 0, 0)),
+            Some(&MetadataValue::Int(2))
+        );
+    }
+
+    #[test]
+    fn zero_length_metadata_section_is_accepted() {
+        // A `[u32 0]` before the magic means "no metadata" and must load
+        // cleanly, matching the C++ guard.
+        let mut bytes = Vec::new();
+        serialize(&uniform_block(), &mut bytes).unwrap();
+        append_metadata_section(&mut bytes, &[]);
+
+        let mut dst = VoxelBuffer::new(Allocator::Default);
+        deserialize(&bytes, &mut dst).unwrap();
+        assert!(dst.block_metadata().is_nil());
+        assert!(!dst.has_voxel_metadata());
     }
 }

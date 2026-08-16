@@ -45,8 +45,9 @@ pub const SDF_FAR_OUTSIDE: f32 = 100.0;
 pub const SDF_FAR_INSIDE: f32 = -100.0;
 
 /// In-memory voxel or block metadata. Lives on [`VoxelBuffer`] and survives
-/// copy/paste/edit transactions. Persistence through the Godot Variant
-/// serializer is intentionally deferred (ROADMAP R7).
+/// copy/paste/edit transactions. Persists through the v4 block serializer
+/// metadata section (ROADMAP R7 narrow); foreign Godot Variant payloads need
+/// the wide R7 codec and remain unsupported.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum MetadataValue {
     /// Empty / cleared entry. Matches a Godot `nil` Variant.

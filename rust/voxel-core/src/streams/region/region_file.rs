@@ -590,10 +590,8 @@ impl<F: VoxelFile> RegionFile<F> {
         // META-1 parity: our MetadataValue entries decode in full; MetadataLost
         // now means the section held foreign C++ custom/Variant entries or was
         // corrupt. Upstream C++ ignores `deserialize_metadata` failures, so the
-        // voxel data is still loaded and accepted here.
-        if status == block_serializer::DeserializeStatus::MetadataLost {
-            // Accept the loss silently; the status stays available to callers.
-        }
+        // voxel data is still loaded and the loss is accepted here too.
+        let _ = status;
         Ok(())
     }
 
@@ -947,6 +945,36 @@ mod tests {
             Some(&crate::storage::MetadataValue::Int(-9))
         );
         assert_eq!(loaded.get_voxel(1, 1, 1, 0), 7);
+    }
+
+    #[test]
+    fn metadata_growing_a_block_beyond_one_sector_round_trips() {
+        // With 64-byte sectors, a 600-character text entry forces the block
+        // payload across several sectors; sector accounting must follow the
+        // larger serialized size.
+        let mut rf = open_memory(small_format());
+        let position = Vector3i::new(1, 0, 0);
+        let mut block = sample_block(3);
+        block.set_voxel_metadata(
+            Vector3i::new(0, 0, 0),
+            crate::storage::MetadataValue::Text("s".repeat(600)),
+        );
+        rf.save_block(position, &block, compressed_data::Compression::None)
+            .unwrap();
+
+        let bi = rf.header.blocks[rf.block_index(position).unwrap()];
+        assert!(
+            bi.sector_count() > 1,
+            "the metadata must push the payload past one sector"
+        );
+
+        let mut loaded = VoxelBuffer::new(Allocator::Default);
+        rf.load_block(position, &mut loaded).unwrap();
+        assert_eq!(
+            loaded.voxel_metadata(Vector3i::new(0, 0, 0)),
+            Some(&crate::storage::MetadataValue::Text("s".repeat(600)))
+        );
+        assert_eq!(loaded.get_voxel(1, 1, 1, 0), 3);
     }
 
     #[test]
