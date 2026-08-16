@@ -2908,6 +2908,37 @@ struct VariableLodRuntimeState {
     coverage_holds: CoverageHoldLedger,
 }
 
+/// One resident mesh block for the debug overlay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DebugMeshBlock {
+    pub position: Vector3i,
+    pub lod: u8,
+    pub visual_active: bool,
+    pub collision_active: bool,
+    pub is_loaded: bool,
+}
+
+/// One edited data block for the debug overlay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DebugEditedBlock {
+    pub position: Vector3i,
+    pub lod: u8,
+    pub modified: bool,
+}
+
+/// Boxes the Godot overlay can draw without locking planner internals again.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TerrainDebugSnapshot {
+    pub volume_bounds: Box3i,
+    pub mesh_block_size: i32,
+    pub lod_count: u8,
+    pub data_block_count: usize,
+    pub mesh_blocks: Vec<DebugMeshBlock>,
+    pub viewer_mesh_boxes: Vec<(u8, Box3i)>,
+    pub edited_blocks: Vec<DebugEditedBlock>,
+    pub metadata_voxels: Vec<Vector3i>,
+}
+
 /// Cloneable read-only access to storage owned by [`VoxelTerrainCore`].
 ///
 /// The wrapped shared handle is intentionally private. This type does not
@@ -4256,6 +4287,84 @@ impl VoxelTerrainCore {
     /// Number of LOD levels.
     pub fn lod_count(&self) -> u8 {
         self.lod_count
+    }
+
+    /// Snapshot of boxes a debug overlay can draw. Clipbox streaming has no
+    /// legacy octree, so "octree nodes" are the resident mesh blocks (leaves).
+    pub fn debug_snapshot(&self) -> TerrainDebugSnapshot {
+        const MAX_ITEMS: usize = 4_096;
+        let mesh_block_size = i32::try_from(self.data.block_size()).unwrap_or(16);
+        let lod_count = self.lod_count;
+        let mut mesh_blocks = Vec::new();
+        for lod in 0..lod_count {
+            if (lod as usize) >= self.mesh_maps.len() {
+                break;
+            }
+            for (position, entry) in &self.mesh_maps[lod as usize] {
+                if mesh_blocks.len() >= MAX_ITEMS {
+                    break;
+                }
+                mesh_blocks.push(DebugMeshBlock {
+                    position: *position,
+                    lod,
+                    visual_active: entry.visual_active,
+                    collision_active: entry.collision_active,
+                    is_loaded: entry.is_loaded,
+                });
+            }
+        }
+        let mut viewer_mesh_boxes = Vec::new();
+        for viewer in &self.paired_viewers {
+            for (lod, mesh_box) in viewer.state.mesh_box_per_lod.iter().enumerate() {
+                if mesh_box.size.x <= 0 || mesh_box.size.y <= 0 || mesh_box.size.z <= 0 {
+                    continue;
+                }
+                viewer_mesh_boxes.push((lod as u8, *mesh_box));
+            }
+        }
+        let mut edited_blocks = Vec::new();
+        let mut metadata_voxels = Vec::new();
+        for lod in 0..self.data.lod_count() {
+            self.data.with_lod_map(lod, |map| {
+                let positions: Vec<_> = map.block_positions().collect();
+                for position in positions {
+                    let Some(block) = map.get_block(position) else {
+                        continue;
+                    };
+                    if block.is_edited() && edited_blocks.len() < MAX_ITEMS {
+                        edited_blocks.push(DebugEditedBlock {
+                            position,
+                            lod: lod as u8,
+                            modified: block.is_modified(),
+                        });
+                    }
+                    if lod == 0 && block.has_voxels() && metadata_voxels.len() < MAX_ITEMS {
+                        let origin = Vector3i::new(
+                            position.x.saturating_mul(mesh_block_size),
+                            position.y.saturating_mul(mesh_block_size),
+                            position.z.saturating_mul(mesh_block_size),
+                        );
+                        block.voxels().for_each_voxel_metadata(|local, _| {
+                            if metadata_voxels.len() < MAX_ITEMS {
+                                metadata_voxels.push(origin + local);
+                            }
+                        });
+                    }
+                }
+            });
+        }
+        TerrainDebugSnapshot {
+            volume_bounds: self.data.bounds(),
+            mesh_block_size,
+            lod_count,
+            data_block_count: (0..self.data.lod_count())
+                .map(|lod| self.data.with_lod_map(lod, |map| map.block_count()))
+                .sum(),
+            mesh_blocks,
+            viewer_mesh_boxes,
+            edited_blocks,
+            metadata_voxels,
+        }
     }
 
     /// Cumulative terrain statistics (blocks loaded/unloaded, meshes built/dropped).

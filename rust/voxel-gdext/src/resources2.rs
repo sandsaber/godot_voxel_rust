@@ -1245,6 +1245,7 @@ impl INode3D for VoxelLodTerrainGD {
         for op in pending_ops {
             self.apply_render_op(op);
         }
+        self.refresh_debug_draw();
     }
 
     fn exit_tree(&mut self) {
@@ -1269,6 +1270,12 @@ impl INode3D for VoxelLodTerrainGD {
         for (_, mut rendered) in self.mesh_instances.drain() {
             rendered.instance.queue_free();
         }
+        crate::debug_draw::refresh_debug_overlay(
+            &mut self.to_gd().upcast::<Node3D>(),
+            None,
+            false,
+            crate::debug_draw::DebugDrawFlags::default(),
+        );
         self.render_state.reset();
     }
 }
@@ -1535,10 +1542,16 @@ impl VoxelLodTerrainGD {
         let Some(core) = self.core.as_ref() else {
             return 0;
         };
-        // No public per-LOD counter is exposed by the core; report the count of
-        // mesh blocks as a deterministic proxy that is always available.
-        let _ = core;
-        self.get_mesh_block_count()
+        i32::try_from(core.debug_snapshot().data_block_count).unwrap_or(i32::MAX)
+    }
+
+    /// Clipbox "leaf" count — resident mesh blocks across every LOD.
+    #[func]
+    fn get_octree_node_count(&self) -> i32 {
+        let Some(core) = self.core.as_ref() else {
+            return 0;
+        };
+        i32::try_from(core.debug_snapshot().mesh_blocks.len()).unwrap_or(i32::MAX)
     }
 
     /// Gets how many meshes the terrain currently has (alias of
@@ -1574,26 +1587,85 @@ impl VoxelLodTerrainGD {
         self.voxel_to_data_block_position(voxel_position, lod_index)
     }
 
-    /// Gets debug information about a specific voxel data chunk. Returns `null`
-    /// in the headless binding.
+    /// Gets debug information about a specific voxel data chunk.
     #[func]
-    fn debug_get_data_block_info(&self, _block_pos: Vector3, _lod: i32) -> Variant {
-        Variant::nil()
+    fn debug_get_data_block_info(&self, block_pos: Vector3, lod: i32) -> Variant {
+        let Some(core) = self.core.as_ref() else {
+            return Variant::nil();
+        };
+        let lod = u8::try_from(lod.max(0)).unwrap_or(0);
+        let position = voxel_core::math::Vector3i::new(
+            block_pos.x.floor() as i32,
+            block_pos.y.floor() as i32,
+            block_pos.z.floor() as i32,
+        );
+        let Some(block) = core.data().block_snapshot(position, lod as usize) else {
+            return Variant::nil();
+        };
+        let mut dict = VarDictionary::new();
+        dict.set("found", true);
+        dict.set("lod", i32::from(lod));
+        dict.set("edited", block.is_edited());
+        dict.set("modified", block.is_modified());
+        dict.set("has_voxels", block.has_voxels());
+        dict.to_variant()
     }
 
-    /// Gets debug information about a specific mesh. Returns `null` in the
-    /// headless binding.
+    /// Gets debug information about a specific mesh block.
     #[func]
-    fn debug_get_mesh_block_info(&self, _block_pos: Vector3, _lod: i32) -> Variant {
-        Variant::nil()
+    fn debug_get_mesh_block_info(&self, block_pos: Vector3, lod: i32) -> Variant {
+        let Some(core) = self.core.as_ref() else {
+            return Variant::nil();
+        };
+        let lod = u8::try_from(lod.max(0)).unwrap_or(0);
+        if lod >= core.lod_count() {
+            return Variant::nil();
+        }
+        let position = voxel_core::math::Vector3i::new(
+            block_pos.x.floor() as i32,
+            block_pos.y.floor() as i32,
+            block_pos.z.floor() as i32,
+        );
+        let Some(entry) = core.mesh_blocks_at_lod(lod).get(&position) else {
+            return Variant::nil();
+        };
+        let mut dict = VarDictionary::new();
+        dict.set("found", true);
+        dict.set("lod", i32::from(lod));
+        dict.set("visual_active", entry.visual_active);
+        dict.set("collision_active", entry.collision_active);
+        dict.set("loaded", entry.is_loaded);
+        dict.to_variant()
     }
 
-    /// Gets debug information about the grid of octrees used to stream the
-    /// terrain at multiple levels of detail. Returns an empty array in the
-    /// headless binding.
+    /// Resident mesh-block leaves of the clipbox planner. Each entry is a
+    /// Dictionary `{position, lod, size, visual_active, collision_active}`.
     #[func]
     fn debug_get_octrees_detailed(&self) -> Variant {
-        Variant::nil()
+        let Some(core) = self.core.as_ref() else {
+            return Array::<Variant>::new().to_variant();
+        };
+        let snapshot = core.debug_snapshot();
+        let mut out = Array::<Variant>::new();
+        for block in snapshot.mesh_blocks {
+            let mut dict = VarDictionary::new();
+            dict.set(
+                "position",
+                Vector3i::new(block.position.x, block.position.y, block.position.z),
+            );
+            dict.set("lod", i32::from(block.lod));
+            dict.set(
+                "size",
+                snapshot
+                    .mesh_block_size
+                    .checked_shl(u32::from(block.lod))
+                    .unwrap_or(i32::MAX),
+            );
+            dict.set("visual_active", block.visual_active);
+            dict.set("collision_active", block.collision_active);
+            out.push(&dict.to_variant());
+        }
+        out.to_variant()
     }
 
     /// Captures a top-down representation of the SDF at multiple LOD levels
@@ -2037,8 +2109,7 @@ impl VoxelLodTerrainGD {
         self.normalmap_use_gpu_value = enabled;
     }
 
-    /// Master toggle for debug drawing. Stubbed: no debug rendering is
-    /// performed in the headless binding.
+    /// Master toggle for the wireframe debug overlay.
     #[func]
     fn debug_is_draw_enabled(&self) -> bool {
         self.debug_draw_enabled_value
@@ -2047,6 +2118,7 @@ impl VoxelLodTerrainGD {
     #[func]
     fn debug_set_draw_enabled(&mut self, enabled: bool) {
         self.debug_draw_enabled_value = enabled;
+        self.refresh_debug_draw();
     }
 
     /// Debug-draw flag for shadow occluders. Stubbed.
@@ -2060,8 +2132,7 @@ impl VoxelLodTerrainGD {
         self.debug_draw_shadow_occluders_value = enabled;
     }
 
-    /// Toggles a `DebugDrawFlag`. No debug rendering is performed in the
-    /// headless binding; the flag is stored faithfully.
+    /// Toggles a `DebugDrawFlag` and refreshes the wireframe overlay.
     #[func]
     fn debug_set_draw_flag(&mut self, flag_index: i64, enabled: bool) {
         match flag_index {
@@ -2100,6 +2171,7 @@ impl VoxelLodTerrainGD {
                 );
             }
         }
+        self.refresh_debug_draw();
     }
 
     /// Returns the current value of a `DebugDrawFlag`. No debug rendering is
@@ -2282,6 +2354,26 @@ impl VoxelLodTerrainGD {
         if let Err(error) = core.try_paste(origin, src, channel_mask) {
             godot_error!("VoxelLodTerrain.paste failed: {error}");
         }
+    }
+
+    fn refresh_debug_draw(&mut self) {
+        let snapshot = self.core.as_ref().map(|core| core.debug_snapshot());
+        let flags = crate::debug_draw::DebugDrawFlags {
+            octree_nodes: self.debug_draw_octree_nodes_value,
+            octree_bounds: self.debug_draw_octree_bounds_value,
+            volume_bounds: self.debug_draw_volume_bounds_value,
+            active_mesh_blocks: self.debug_draw_active_mesh_blocks_value,
+            viewer_clipboxes: self.debug_draw_viewer_clipboxes_value,
+            loaded_visual_collision: self.debug_draw_loaded_visual_and_collision_blocks_value,
+            active_visual_collision: self.debug_draw_active_visual_and_collision_blocks_value,
+            edited_blocks: self.debug_draw_edited_blocks_value,
+        };
+        crate::debug_draw::refresh_debug_overlay(
+            &mut self.to_gd().upcast::<Node3D>(),
+            snapshot.as_ref(),
+            self.debug_draw_enabled_value,
+            flags,
+        );
     }
 
     pub(crate) fn collect_voxels_in_box(

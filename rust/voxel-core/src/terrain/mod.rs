@@ -23,13 +23,13 @@ pub use variable_lod_coverage::{
     RenderTopologyBatch, TopologyOperation, TransitionFace, TransitionMask, VariableLodCoverage,
 };
 pub use voxel_terrain_core::{
-    DataRefField, IndeterminateIoResolution, JournalPersistenceState, MeshBlockEntry,
-    MeshLifecycleEventDescriptor, MeshLifecycleEventKind, MeshOutputApplyError, MeshRefField,
-    PairedViewer, PersistenceOperation, PreparedPublicationConflict, SaveFlushError,
-    UnsavedBlockSave, UnsavedBlockSaveDetails, VariableLodConstructionError,
-    VariableLodCoverageHoldError, ViewerId, ViewerInputError, ViewerState, ViewerUpdate,
-    VoxelEditOutcome, VoxelTerrainCore, VoxelTerrainDataView, VoxelTerrainEvent,
-    VoxelTerrainRuntimeError, VoxelTerrainStats,
+    DataRefField, DebugEditedBlock, DebugMeshBlock, IndeterminateIoResolution,
+    JournalPersistenceState, MeshBlockEntry, MeshLifecycleEventDescriptor, MeshLifecycleEventKind,
+    MeshOutputApplyError, MeshRefField, PairedViewer, PersistenceOperation,
+    PreparedPublicationConflict, SaveFlushError, TerrainDebugSnapshot, UnsavedBlockSave,
+    UnsavedBlockSaveDetails, VariableLodConstructionError, VariableLodCoverageHoldError, ViewerId,
+    ViewerInputError, ViewerState, ViewerUpdate, VoxelEditOutcome, VoxelTerrainCore,
+    VoxelTerrainDataView, VoxelTerrainEvent, VoxelTerrainRuntimeError, VoxelTerrainStats,
 };
 
 // Task 4/6 integration seam. These zero-runtime function-pointer contracts

@@ -1236,6 +1236,24 @@ fn voxel_metadata_survives_block_edit_and_paste() {
     assert!(core.voxel_metadata(Vector3i::new(3, 4, 5)).is_none());
 }
 
+#[test]
+fn debug_snapshot_reports_volume_and_edited_block() {
+    let mut core = make_edit_core_with_lods(1);
+    let snapshot = core.debug_snapshot();
+    assert!(snapshot.volume_bounds.size.x > 0);
+    assert_eq!(snapshot.lod_count, 1);
+    assert!(core
+        .try_edit_voxel(7, Vector3i::new(1, 1, 1), ChannelId::Type.index())
+        .expect("edit")
+        .is_some());
+    let snapshot = core.debug_snapshot();
+    assert!(snapshot.data_block_count > 0);
+    assert!(snapshot
+        .edited_blocks
+        .iter()
+        .any(|block| block.position == Vector3i::zero() && block.modified));
+}
+
 fn requested_mesh_locations(core: &VoxelTerrainCore) -> Vec<MeshBlockLocation> {
     let mut locations = core
         .mesh_maps

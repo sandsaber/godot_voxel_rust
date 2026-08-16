@@ -34,7 +34,8 @@ renderer/API parity, not a missing runtime.
 - [x] Consume `RenderTopologyChanged` / per-block transition masks in Godot
 - [x] Collision surfaces + inspector layer/mask/margin on both terrain nodes
 - [x] `block_loaded` / `mesh_block_entered` signals on `VoxelLodTerrain`
-- [ ] Upstream octree debug-draw / visual parity
+- [x] Upstream octree debug-draw / visual parity (clipbox leaves +
+      volume/viewer/edit wireframes on `VoxelLodTerrain`)
 
 ## R3 — Multiplayer / areas ⬜
 

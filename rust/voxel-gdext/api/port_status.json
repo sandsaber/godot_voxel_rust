@@ -543,7 +543,7 @@
       "status": "partial",
       "binding_state": "registered",
       "registered_name": "VoxelLodTerrain",
-      "evidence": "Registered and now a real runtime: owns a VoxelTerrainCore built via new_variable_lod, drives try_process through the production Variable LOD planner, consumes mesh lifecycle and RenderTopologyChanged events (u_transition_mask), uploads ArrayMeshes, and can emit regular-only collision surfaces when generate_collisions is on. 3-LOD paging is exercised by variable_lod_3. Pinned inspector API (normalmaps, GPU, most debug draws) is still stored stubs.",
+      "evidence": "Registered and now a real runtime: owns a VoxelTerrainCore built via new_variable_lod, drives try_process through the production Variable LOD planner, consumes mesh lifecycle and RenderTopologyChanged events (u_transition_mask), uploads ArrayMeshes, and can emit regular-only collision surfaces when generate_collisions is on. Debug-draw flags rebuild a wireframe overlay (clipbox leaves, volume bounds, viewer clipboxes, edited/metadata boxes). 3-LOD paging is exercised by variable_lod_3. GPU/normalmap inspector fields remain stored stubs.",
       "source_paths": [
         "upstream:doc/classes/VoxelLodTerrain.xml",
         "rust/voxel-gdext/src/resources2.rs"
