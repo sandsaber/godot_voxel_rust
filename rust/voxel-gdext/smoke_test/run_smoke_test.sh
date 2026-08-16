@@ -129,22 +129,22 @@ echo ">> copied $SRC -> $DST ($(wc -c < "$DST") bytes)"
 ls -l "$DST" "$SCRIPT_DIR/voxel_gdext.gdextension"
 
 echo
-echo ">> [1/5] API test (class registration + func surface)..."
+echo ">> [1/6] API test (class registration + func surface)..."
 run_godot_check "API" \
 	"$GODOT" --headless --path "$SCRIPT_DIR" --verbose api_test.tscn
 
 echo
-echo ">> [2/5] runtime paging test (terrain + generator + viewer, real frames)..."
+echo ">> [2/6] runtime paging test (terrain + generator + viewer, real frames)..."
 run_godot_check "runtime paging" \
 	"$GODOT" --headless --path "$SCRIPT_DIR" runtime_scene.tscn
 
 echo
-echo ">> [3/5] smoke scene (VoxelTerrain node in a scene)..."
+echo ">> [3/6] smoke scene (VoxelTerrain node in a scene)..."
 run_godot_check "smoke scene" \
 	"$GODOT" --headless --path "$SCRIPT_DIR" smoke_test.tscn
 
 echo
-echo ">> [4/5] runtime correctness (remesh + unload + safety + persistence)..."
+echo ">> [4/6] runtime correctness (remesh + unload + safety + persistence)..."
 run_godot_check "runtime correctness" \
 	"$GODOT" --headless --path "$SCRIPT_DIR" runtime_correctness.tscn
 
