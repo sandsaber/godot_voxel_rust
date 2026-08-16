@@ -7,7 +7,7 @@ use godot::prelude::*;
 use voxel_core::instancing::scatter::{InstanceGenerator, RandomScatterGenerator};
 use voxel_core::instancing::{InstanceLibrary, ScatterConfig};
 use voxel_core::math::{Vector3f, Vector3i};
-use voxel_core::storage::{VoxelBuffer, VoxelFormat};
+use voxel_core::storage::{ChannelId, VoxelBuffer, VoxelFormat};
 
 pub(crate) const MAX_SCRIPT_ITEMS: usize = 65_536;
 pub(crate) const MAX_SCRIPT_VOXELS: u64 = 2_097_152;
@@ -1181,14 +1181,17 @@ impl VoxelInstancerGD {
 // VoxelToolTerrainGD — RefCounted terrain editing tool
 // ---------------------------------------------------------------------------
 
-/// A Godot `RefCounted` that wraps a reference to a [`VoxelTerrain`](crate::terrain::VoxelTerrain)
-/// for GDScript-callable terrain editing operations.
+/// A Godot `RefCounted` that wraps a live [`VoxelTerrain`](crate::terrain::VoxelTerrain)
+/// and applies sphere/box/voxel edits through `VoxelTerrainCore::try_edit_voxel`.
 #[derive(GodotClass)]
 #[class(base = RefCounted, tool, rename = VoxelToolTerrain)]
 pub struct VoxelToolTerrainGD {
     base: Base<RefCounted>,
-    /// Weak reference to the terrain node path.
+    /// Weak reference to the terrain node path (canonical inspector field).
     terrain_path: GString,
+    terrain: Option<Gd<crate::terrain::VoxelTerrain>>,
+    channel: usize,
+    value: u64,
 }
 
 #[godot_api]
@@ -1197,6 +1200,9 @@ impl IRefCounted for VoxelToolTerrainGD {
         Self {
             base,
             terrain_path: "..".to_godot(),
+            terrain: None,
+            channel: ChannelId::Sdf.index(),
+            value: 1,
         }
     }
 }
@@ -1211,6 +1217,117 @@ impl VoxelToolTerrainGD {
     #[func]
     fn get_terrain_path(&self) -> GString {
         self.terrain_path.clone()
+    }
+
+    #[func]
+    fn set_channel(&mut self, channel: i32) {
+        let Ok(channel) = validate_channel(channel) else {
+            godot_error!("VoxelToolTerrain.set_channel: invalid channel");
+            return;
+        };
+        self.channel = channel;
+    }
+
+    #[func]
+    fn get_channel(&self) -> i32 {
+        i32::try_from(self.channel).unwrap_or(0)
+    }
+
+    #[func]
+    fn set_value(&mut self, value: i64) {
+        let Ok(value) = validate_voxel_value(value) else {
+            godot_error!("VoxelToolTerrain.set_value: invalid voxel value");
+            return;
+        };
+        self.value = value;
+    }
+
+    #[func]
+    fn do_sphere(&mut self, center: Vector3, radius: f32, mode: i32) {
+        if !center.x.is_finite()
+            || !center.y.is_finite()
+            || !center.z.is_finite()
+            || !radius.is_finite()
+        {
+            godot_error!("VoxelToolTerrain.do_sphere: center and radius must be finite");
+            return;
+        }
+        if radius < 0.0 {
+            godot_error!("VoxelToolTerrain.do_sphere: radius must be non-negative");
+            return;
+        }
+        let Some(mut terrain) = self.terrain.clone() else {
+            godot_error!("VoxelToolTerrain.do_sphere: no terrain is bound");
+            return;
+        };
+        let edit_mode = match mode {
+            0 => voxel_core::edition::EditMode::Add,
+            1 => voxel_core::edition::EditMode::Remove,
+            _ => voxel_core::edition::EditMode::Set,
+        };
+        let channel = self.channel;
+        let value = self.value;
+        let mut bound = terrain.bind_mut();
+        bound.edit_sphere(
+            voxel_core::math::Vector3f::new(center.x, center.y, center.z),
+            radius,
+            channel,
+            edit_mode,
+            value,
+        );
+    }
+
+    #[func]
+    fn do_box(&mut self, min: godot::builtin::Vector3i, max: godot::builtin::Vector3i, mode: i32) {
+        let Some(mut terrain) = self.terrain.clone() else {
+            godot_error!("VoxelToolTerrain.do_box: no terrain is bound");
+            return;
+        };
+        let edit_mode = match mode {
+            0 => voxel_core::edition::EditMode::Add,
+            1 => voxel_core::edition::EditMode::Remove,
+            _ => voxel_core::edition::EditMode::Set,
+        };
+        let channel = self.channel;
+        let value = self.value;
+        let mut bound = terrain.bind_mut();
+        bound.edit_box(
+            Vector3i::new(min.x, min.y, min.z),
+            Vector3i::new(max.x, max.y, max.z),
+            channel,
+            edit_mode,
+            value,
+        );
+    }
+
+    #[func]
+    fn set_voxel(&mut self, position: godot::builtin::Vector3i, value: i64) {
+        let Ok(value) = validate_voxel_value(value) else {
+            godot_error!("VoxelToolTerrain.set_voxel: invalid voxel value");
+            return;
+        };
+        let Some(mut terrain) = self.terrain.clone() else {
+            godot_error!("VoxelToolTerrain.set_voxel: no terrain is bound");
+            return;
+        };
+        let channel = self.channel;
+        terrain.bind_mut().edit_world_voxel(
+            Vector3i::new(position.x, position.y, position.z),
+            channel,
+            value,
+        );
+    }
+
+    #[func]
+    fn get_voxel(&self, position: godot::builtin::Vector3i) -> i64 {
+        let Some(terrain) = self.terrain.as_ref() else {
+            return 0;
+        };
+        i64::try_from(terrain.bind().read_world_voxel(
+            Vector3i::new(position.x, position.y, position.z),
+            self.channel,
+        ))
+        .unwrap_or_default()
     }
 
     // -----------------------------------------------------------------
@@ -1264,6 +1381,12 @@ impl VoxelToolTerrainGD {
         _tags_mask: i32,
     ) {
         // TODO(port): drive the blocky random-tick loop against the terrain.
+    }
+}
+
+impl VoxelToolTerrainGD {
+    pub(crate) fn bind_terrain(&mut self, terrain: Gd<crate::terrain::VoxelTerrain>) {
+        self.terrain = Some(terrain);
     }
 }
 

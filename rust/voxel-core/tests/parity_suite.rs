@@ -680,15 +680,21 @@ mod terrain_parity {
         data.set_streaming_enabled(false);
         data.set_full_load_completed(true);
         let gen: voxel_core::storage::SharedVoxelGenerator = Arc::new(Flat::default());
-        data.set_generator(Some(gen));
+        data.set_generator(Some(gen.clone()));
         let mesher = Arc::new(TransvoxelMesher::new());
-        let dep = MeshingDependency::new(mesher, None);
+        let dep = MeshingDependency::new(mesher, Some(gen));
         let stream: Arc<dyn voxel_core::streams::VoxelStream> =
             Arc::new(voxel_core::streams::MemoryStream::new());
-        let mut core = VoxelTerrainCore::legacy_variable_lod_for_parity(data, stream, dep, 2);
-        // This parity fixture pins the legacy three-stage multi-LOD route's
-        // observable output; force it back off the (now-default) planner path.
-        core.use_legacy_variable_path_for_test();
+        let settings = voxel_core::terrain::lod_clipbox::LodClipboxSettings {
+            data_block_size: 16,
+            mesh_block_size: 16,
+            lod_count: 2,
+            lod0_distance_voxels: 16,
+            secondary_distance_voxels: 16,
+            unload_hysteresis_blocks: 2,
+        };
+        let mut core = VoxelTerrainCore::new_variable_lod(data, stream, dep, settings)
+            .expect("variable LOD terrain constructs");
 
         let viewers = vec![ViewerUpdate {
             id: 0,
@@ -702,6 +708,7 @@ mod terrain_parity {
         }];
         for _ in 0..20 {
             core.try_process(&viewers).unwrap();
+            core.wait_for_pending_tasks();
         }
 
         let lod0 = core.mesh_blocks_at_lod(0).len();

@@ -350,6 +350,13 @@ func _run_lifecycle_checks() -> void:
 		),
 		"SDF edit succeeds and reads back while the target block is viewed"
 	)
+	var tool = terrain.get_voxel_tool()
+	_ok(tool != null, "get_voxel_tool returns a live VoxelToolTerrain")
+	if tool != null:
+		var before := float(terrain.get_voxel_sdf(edit_voxel.x, edit_voxel.y, edit_voxel.z))
+		tool.do_sphere(Vector3(edit_voxel.x, edit_voxel.y, edit_voxel.z), 1.5, 0)
+		var after := float(terrain.get_voxel_sdf(edit_voxel.x, edit_voxel.y, edit_voxel.z))
+		_ok(after != before or after < 0.0, "VoxelToolTerrain.do_sphere edits the bound terrain")
 	_ok(
 		bool(terrain.flush_pending_saves())
 		and terrain.is_inside_tree()

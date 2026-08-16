@@ -228,7 +228,7 @@ pub fn do_box(
 }
 
 /// Blend the shape SDF with the existing voxel SDF value.
-fn blend_sdf(existing: f32, shape_sdf: f32, mode: EditMode) -> f32 {
+pub fn blend_sdf(existing: f32, shape_sdf: f32, mode: EditMode) -> f32 {
     match mode {
         EditMode::Add => existing.min(shape_sdf),
         EditMode::Remove => existing.max(-shape_sdf),

@@ -42,6 +42,10 @@ func _ready() -> void:
 	# Configure the LOD count BEFORE adding the node to the tree: _ready()
 	# constructs the Variable LOD core with this count and rejects later changes.
 	terrain.set_lod_count(3)
+	if terrain.has_method("set_generate_collisions"):
+		terrain.set_generate_collisions(true)
+	elif terrain.has_method("set_generate_collision"):
+		terrain.set_generate_collision(true)
 	add_child(terrain)
 	var lod_count := int(terrain.get_lod_count())
 	if lod_count == 3:

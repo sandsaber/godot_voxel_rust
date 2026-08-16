@@ -29,9 +29,10 @@ pub mod shadow_occluders;
 
 pub use bake::bake_library;
 pub use baked_library::{
-    Aabb, BakedFluid, BakedLibrary, BakedModel, BakedModelMesh, DynamicBitset, FluidSurface,
-    ModelSurface, SideSurface, AIR_ID, FLUID_BOTTOM_HEIGHT, FLUID_TOP_HEIGHT, MAX_FLUIDS,
-    MAX_MATERIALS, MAX_MODELS, MAX_SURFACES, NULL_FLUID_INDEX,
+    full_cube_side_surface, solid_cube_model, Aabb, BakedFluid, BakedLibrary, BakedModel,
+    BakedModelMesh, DynamicBitset, FluidSurface, ModelSurface, SideSurface, AIR_ID,
+    FLUID_BOTTOM_HEIGHT, FLUID_TOP_HEIGHT, MAX_FLUIDS, MAX_MATERIALS, MAX_MODELS, MAX_SURFACES,
+    NULL_FLUID_INDEX,
 };
 pub use lod_skirts::append_skirts;
 pub use mesher::{generate_mesh, BlockyArrays};
