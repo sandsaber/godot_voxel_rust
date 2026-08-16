@@ -14,7 +14,7 @@ That file is the product queue; this page is the parity matrix.
 |---|---|---|
 | Math / containers / threading | ✅ | Direct ports, heavily tested. |
 | Voxel storage (`VoxelBuffer`, channels, compression, memory pool) | ✅ | In-memory block + per-voxel `MetadataValue` (int/float/string/bytes). Typed pool recycling deferred. |
-| Block serializer v4 | 🟡 | Voxel channels + `meta.vxrm` forest format persist. The v4 metadata *section* is still omitted (empty-section compatible with C++). v2/v3 migration needs a Variant codec. |
+| Block serializer v4 | ✅ | Voxel channels, `meta.vxrm` forest format, and the v4 metadata section persist (`MetadataValue` nil/int/float/string/bytes; nil/int byte-identical to C++; foreign Variant entries skipped non-fatally). v2/v3 migration still needs a Variant codec. |
 | LZ4 / ZSTD compression | ✅ | LZ4 pure-Rust by default; ZSTD behind an optional feature (it bundles C). |
 | Transvoxel mesher | ✅ | Regular + transition cells, texturing modes; verified against C++ goldens (bit-exact indices/masks, 1e-5 floats). |
 | Cubes mesher | ✅ | Greedy + simple, palette; atlased mode deferred. |
@@ -23,7 +23,7 @@ That file is the product queue; this page is the parity matrix.
 | Graph generator | ✅ runtime | AST interpreter with Expression/Image2D. Range analysis still limited. |
 | Region files (`.vxr` + `meta.vxrm`) | ✅ | Channel depths locked on first save. `convert_files` rewrites region/sector/block size. LRU eviction and cross-process file locking remain open. |
 | Terrain paging (`VoxelTerrainCore`) | ✅ | Fixed-LOD and Variable-LOD clipbox planner, save-on-unload, viewer pairing, debug snapshot. |
-| Edition (sphere/box/hemisphere/smooth/paste, DDA raycast, random-tick) | ✅ core | Tags-aware random-tick when a baked library is present. Metadata is in-memory only until narrow R7. |
+| Edition (sphere/box/hemisphere/smooth/paste, DDA raycast, random-tick) | ✅ core | Tags-aware random-tick when a baked library is present. `MetadataValue` persists through save/load (narrow R7). |
 | Instancing | 🟡 | Scatter math + MultiMesh + per-mesh-block streaming. Scene-item instancer (real nodes) is still open. |
 | Modifiers | 🟡 | Sphere modifier real; mesh modifier is a box stand-in; not integrated into streaming. |
 | GPU compute / detail rendering / shaders | ⬜ | Deferred by design (keeps the core pure-Rust for Android/WASM). |

@@ -587,12 +587,12 @@ impl<F: VoxelFile> RegionFile<F> {
         let status =
             block_serializer::decompress_and_deserialize_with_limits(&payload, out_block, limits)
                 .map_err(RegionError::BlockSerializer)?;
-        // META-1 parity: surface metadata loss as a non-fatal warning via
-        // debug log. The voxel data is still loaded correctly.
+        // META-1 parity: our MetadataValue entries decode in full; MetadataLost
+        // now means the section held foreign C++ custom/Variant entries or was
+        // corrupt. Upstream C++ ignores `deserialize_metadata` failures, so the
+        // voxel data is still loaded and accepted here.
         if status == block_serializer::DeserializeStatus::MetadataLost {
-            // In a full implementation this would route through the engine's
-            // logger; for now we accept the loss silently (consistent with
-            // the non-metadata port) but the status is available to callers.
+            // Accept the loss silently; the status stays available to callers.
         }
         Ok(())
     }
@@ -918,6 +918,35 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn save_then_load_round_trips_block_and_voxel_metadata() {
+        let mut rf = open_memory(small_format());
+        let mut block = sample_block(7);
+        block.set_block_metadata(crate::storage::MetadataValue::Text("block".into()));
+        block.set_voxel_metadata(
+            Vector3i::new(1, 1, 1),
+            crate::storage::MetadataValue::Int(-9),
+        );
+        rf.save_block(
+            Vector3i::new(0, 0, 0),
+            &block,
+            compressed_data::Compression::None,
+        )
+        .unwrap();
+
+        let mut loaded = VoxelBuffer::new(Allocator::Default);
+        rf.load_block(Vector3i::new(0, 0, 0), &mut loaded).unwrap();
+        assert_eq!(
+            *loaded.block_metadata(),
+            crate::storage::MetadataValue::Text("block".into())
+        );
+        assert_eq!(
+            loaded.voxel_metadata(Vector3i::new(1, 1, 1)),
+            Some(&crate::storage::MetadataValue::Int(-9))
+        );
+        assert_eq!(loaded.get_voxel(1, 1, 1, 0), 7);
     }
 
     #[test]

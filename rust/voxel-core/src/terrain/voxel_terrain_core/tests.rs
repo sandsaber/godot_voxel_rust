@@ -4536,6 +4536,64 @@ fn terrain_try_edit_voxel_materializes_marks_and_persists_on_unload() {
 }
 
 #[test]
+fn terrain_voxel_metadata_persists_on_unload_and_reloads() {
+    use crate::storage::{MetadataValue, VoxelBuffer};
+    let stream = Arc::new(MemoryStream::new());
+    let mut core = build_core_with_materializable_data(stream.clone());
+    let bs = core.data_block_size();
+    let meta_position = Vector3i::new(1, 1, 1);
+
+    assert!(core
+        .data
+        .try_set_block(Vector3i::zero(), VoxelDataBlock::empty(0))
+        .unwrap());
+    core.loaded_data_residency[0].insert(
+        Vector3i::zero(),
+        DataResidencyRefs::with_resident_viewers(0),
+    );
+
+    let viewer = vec![ViewerUpdate {
+        id: 1,
+        world_position_voxels: Vector3i::zero(),
+        horizontal_view_distance_voxels: bs,
+        vertical_view_distance_voxels: bs,
+        demand: MeshDemand {
+            visuals: true,
+            collisions: true,
+        },
+    }];
+    core.try_process(&viewer).unwrap();
+
+    assert!(core
+        .try_edit_voxel_metadata(meta_position, Some(MetadataValue::Text("gold".into())))
+        .unwrap()
+        .is_some());
+    assert_eq!(
+        core.voxel_metadata(meta_position),
+        Some(MetadataValue::Text("gold".into()))
+    );
+
+    // Walk the viewer away: the edited block must flush to the stream with
+    // its metadata, then reload intact when the viewer returns.
+    let empty_viewers = Vec::new();
+    process_until(&mut core, &empty_viewers, |_core, _events| {
+        let mut loaded = VoxelBuffer::new(crate::storage::Allocator::Default);
+        stream.load_block(Vector3i::zero(), 0, &mut loaded) == LoadResult::Found
+            && loaded.voxel_metadata(meta_position) == Some(&MetadataValue::Text("gold".into()))
+    });
+
+    process_until(&mut core, &viewer, |core, _events| {
+        core.data()
+            .block_snapshot(Vector3i::zero(), 0)
+            .is_some_and(|block| block.has_voxels())
+    });
+    assert_eq!(
+        core.voxel_metadata(meta_position),
+        Some(MetadataValue::Text("gold".into()))
+    );
+}
+
+#[test]
 fn failed_unload_save_keeps_payload_and_retries() {
     let stream = Arc::new(FailThenMemoryStream::new(1));
     let mut core = build_core_with_stream(stream.clone());

@@ -856,6 +856,72 @@ mod tests {
     }
 
     #[test]
+    fn region_stream_round_trips_metadata_across_reopen() {
+        let dir = TestDir::new();
+        let stream = RegionFilesStream::new(dir.path().to_path_buf());
+        let position = Vector3i::new(2, -3, 4);
+
+        let mut block = sample_block(41);
+        block.set_block_metadata(crate::storage::MetadataValue::Bytes(vec![9, 8, 7]));
+        block.set_voxel_metadata(
+            Vector3i::new(1, 2, 3),
+            crate::storage::MetadataValue::Text("maple".into()),
+        );
+        save(&stream, position, 0, &block).unwrap();
+        stream.flush().unwrap();
+        drop(stream);
+
+        let reopened = RegionFilesStream::new(dir.path().to_path_buf());
+        let (result, loaded) = load(&reopened, position, 0).unwrap();
+        assert_eq!(result, LoadResult::Found);
+        assert_eq!(
+            *loaded.block_metadata(),
+            crate::storage::MetadataValue::Bytes(vec![9, 8, 7])
+        );
+        assert_eq!(
+            loaded.voxel_metadata(Vector3i::new(1, 2, 3)),
+            Some(&crate::storage::MetadataValue::Text("maple".into()))
+        );
+        assert_eq!(loaded.get_voxel(1, 2, 3, ChannelId::Type.index()), 41);
+    }
+
+    #[test]
+    fn convert_directory_preserves_metadata() {
+        let src = TestDir::new();
+        let stream = RegionFilesStream::with_settings(src.path().to_path_buf(), 32, 512);
+        let mut block = sample_block(11);
+        block.set_block_metadata(crate::storage::MetadataValue::Int(5));
+        block.set_voxel_metadata(
+            Vector3i::new(1, 2, 3),
+            crate::storage::MetadataValue::Float(1.5),
+        );
+        save(&stream, Vector3i::new(17, 0, 0), 0, &block).unwrap();
+        stream.flush().unwrap();
+        drop(stream);
+
+        let dest = TestDir::new();
+        let copied = RegionFilesStream::convert_directory(
+            src.path().to_path_buf(),
+            dest.path().to_path_buf(),
+            16,
+            256,
+        )
+        .unwrap();
+        assert_eq!(copied, 1);
+        let reopened = RegionFilesStream::with_settings(dest.path().to_path_buf(), 16, 256);
+        let (result, loaded) = load(&reopened, Vector3i::new(17, 0, 0), 0).unwrap();
+        assert_eq!(result, LoadResult::Found);
+        assert_eq!(
+            *loaded.block_metadata(),
+            crate::storage::MetadataValue::Int(5)
+        );
+        assert_eq!(
+            loaded.voxel_metadata(Vector3i::new(1, 2, 3)),
+            Some(&crate::storage::MetadataValue::Float(1.5))
+        );
+    }
+
+    #[test]
     fn first_save_writes_meta_vxrm_and_locks_channel_depths() {
         let dir = TestDir::new();
         let stream = RegionFilesStream::with_block_size(dir.path().to_path_buf(), 16, 256, 4);

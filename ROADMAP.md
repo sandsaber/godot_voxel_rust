@@ -91,26 +91,28 @@ Persistence of that metadata is R7, not a hole in the tool.
 
 Leftover: editor polish, not a missing compile path.
 
-## R7 — Streams & metadata 🟡
+## R7 — Streams & metadata ✅ (narrow slice)
 
-Forest format is locked on disk. Per-voxel metadata is live in memory only.
+Forest format is locked on disk. `MetadataValue` now persists: the v4 block
+serializer writes/reads the metadata section (block entry + sorted per-voxel
+entries). `nil`/`int` entries are byte-identical to C++ `VoxelMetadata`
+(TYPE_EMPTY/TYPE_U64); `float`/`string`/`bytes` use app-specific tags (≥40).
+Foreign C++ custom/Variant entries are skipped without failing the voxel load,
+matching upstream.
 
 - [x] `VoxelStreamRegionFiles` region/sector size wired into the stream
 - [x] `convert_files` rewrites region/sector size on disk
 - [x] `meta.vxrm` locks forest format (block/region/sector size + 8 channel
       depths)
-- [ ] **Narrow (next product slice, if we continue):** persist our
-      `MetadataValue` (`nil` / `int` / `float` / `string` / `bytes`) in the
-      v4 metadata section. Byte-compatible with C++ when the section is empty.
-      Enough for *our* worlds to survive save/load. Not enough to read a C++
-      save that stored Dictionary/Object Variants.
+- [x] **Narrow:** persist our `MetadataValue` (`nil`/`int`/`float`/`string`/
+      `bytes`) in the v4 metadata section. Byte-compatible with C++ when the
+      section is empty; `nil`/`int` round-trip both ways. Our worlds survive
+      save/load, including `convert_files` rewrites and memory-stream paging.
 - [ ] **Wide (separate project, not the next commit):** full Godot Variant
       codec + custom-metadata factory. That is what unblocks reading arbitrary
       C++ metadata and v2/v3 region migration. It either pulls Variant into
-      `voxel-core` or needs a thick gdext-only encoder.
-
-Do the narrow slice if the goal is "metadata survives `.vxr`". Do not start
-the wide codec without an explicit decision.
+      `voxel-core` or needs a thick gdext-only encoder. Do not start without
+      an explicit decision.
 
 ## R8 — CI rework ✅
 
