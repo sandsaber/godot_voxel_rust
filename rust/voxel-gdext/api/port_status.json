@@ -253,7 +253,7 @@
       "status": "partial",
       "binding_state": "registered",
       "registered_name": "VoxelBuffer",
-      "evidence": "46 canonical #[func] methods (37 real delegation to voxel-core: create/set/get/fill/fill_area/clear/is_uniform/compress/decompress/copy_channel/downscale/byte_array/mirror/rotate_90/remap/op_add/sub/min/max/paste/get_size/get_voxel_f/set_voxel_f/get_voxel_v/set_voxel_v/get_channel_depth/set_channel_depth/get_channel_compression/get_allocator; 9 stubs: get_voxel_tool returns nil, 5 metadata methods + 2 texture methods + 1 debug method require subsystems voxel-core does not implement) + 29 #[constant] declarations + behavioral tests (api_test.gd, parity_suite). Status partial because 8 methods lack matching observable behavior.",
+      "evidence": "46 canonical #[func] methods (43 real: create/set/get/fill/fill_area/clear/is_uniform/compress/decompress/copy_channel/downscale/byte_array/mirror/rotate_90/remap/op_add/sub/min/max/paste/get_size/get_voxel_f/set_voxel_f/get_voxel_v/set_voxel_v/get_channel_depth/set_channel_depth/get_channel_compression/get_allocator plus in-memory block/voxel metadata). Remaining stubs: get_voxel_tool, 2 texture methods, 1 debug method. Variant serializer codec is still deferred. + 29 #[constant] declarations + behavioral tests (api_test.gd, parity_suite). Status partial because a few methods lack matching observable behavior.",
       "source_paths": [
         "upstream:doc/classes/VoxelBuffer.xml",
         "rust/voxel-gdext/src/voxel_buffer.rs"
@@ -828,7 +828,7 @@
       "status": "partial",
       "binding_state": "registered",
       "registered_name": "VoxelToolTerrain",
-      "evidence": "VoxelTerrain.get_voxel_tool returns a tool bound to the live core. do_sphere/do_box/set_voxel/get_voxel route through try_edit_voxel. Hemisphere, metadata, and random-tick remain stubs.",
+      "evidence": "VoxelTerrain.get_voxel_tool returns a tool bound to the live core. do_sphere/do_box/hemisphere/smooth/paste/set_voxel/get_voxel route through VoxelTerrainCore edits. In-memory voxel metadata and tags-aware run_blocky_random_tick are live. Serializer Variant codec remains deferred.",
       "source_paths": [
         "upstream:doc/classes/VoxelToolTerrain.xml",
         "rust/voxel-gdext/src/voxel_buffer.rs"

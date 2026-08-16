@@ -12,7 +12,7 @@ use godot::prelude::*;
 use voxel_core::instancing::scatter::{InstanceGenerator, RandomScatterGenerator};
 use voxel_core::instancing::{InstanceLibrary, ScatterConfig};
 use voxel_core::math::{Vector3f, Vector3i};
-use voxel_core::storage::{ChannelId, VoxelBuffer, VoxelFormat};
+use voxel_core::storage::{ChannelId, MetadataValue, VoxelBuffer, VoxelFormat};
 
 pub(crate) const MAX_SCRIPT_ITEMS: usize = 65_536;
 pub(crate) const MAX_SCRIPT_VOXELS: u64 = 2_097_152;
@@ -69,6 +69,35 @@ pub(crate) fn validate_position(
 
 pub(crate) fn validate_voxel_value(value: i64) -> Result<u64, &'static str> {
     u64::try_from(value).map_err(|_| "voxel value must be non-negative")
+}
+
+pub(crate) fn metadata_from_variant(value: &Variant) -> Result<MetadataValue, &'static str> {
+    if value.is_nil() {
+        return Ok(MetadataValue::Nil);
+    }
+    if let Ok(v) = value.try_to::<i64>() {
+        return Ok(MetadataValue::Int(v));
+    }
+    if let Ok(v) = value.try_to::<f64>() {
+        return Ok(MetadataValue::Float(v));
+    }
+    if let Ok(v) = value.try_to::<GString>() {
+        return Ok(MetadataValue::Text(v.to_string()));
+    }
+    if let Ok(v) = value.try_to::<PackedByteArray>() {
+        return Ok(MetadataValue::Bytes(v.as_slice().to_vec()));
+    }
+    Err("metadata must be nil, int, float, String, or PackedByteArray")
+}
+
+pub(crate) fn metadata_to_variant(value: &MetadataValue) -> Variant {
+    match value {
+        MetadataValue::Nil => Variant::nil(),
+        MetadataValue::Int(v) => v.to_variant(),
+        MetadataValue::Float(v) => v.to_variant(),
+        MetadataValue::Text(v) => GString::from(v.as_str()).to_variant(),
+        MetadataValue::Bytes(v) => PackedByteArray::from(v.as_slice()).to_variant(),
+    }
 }
 
 pub(crate) fn validate_finite_f64(value: f64) -> Result<f32, &'static str> {
@@ -733,74 +762,113 @@ impl VoxelBufferGD {
     }
 
     // ---- Block metadata (C++ `VoxelBuffer::set_block_metadata` family) ----
-    // The voxel-core port does not model block metadata yet, so these are
-    // no-op stubs that log once. They keep the GDScript API surface intact.
+    // Live in-memory store. Persistence through the Variant serializer is
+    // still deferred (ROADMAP R7). Supported payloads: nil/int/float/String/
+    // PackedByteArray.
 
-    /// Sets opaque block metadata. Stubbed (voxel-core has no metadata yet).
+    /// Sets opaque block metadata on this buffer.
     #[func]
-    fn set_block_metadata(&mut self, _metadata: Variant) {
-        godot_error!("VoxelBuffer.set_block_metadata: not implemented in this port");
+    fn set_block_metadata(&mut self, metadata: Variant) {
+        match metadata_from_variant(&metadata) {
+            Ok(value) => self.buffer.set_block_metadata(value),
+            Err(error) => godot_error!("VoxelBuffer.set_block_metadata: {error}"),
+        }
     }
 
-    /// Returns opaque block metadata. Stubbed (voxel-core has no metadata yet).
+    /// Returns opaque block metadata, or `nil` when none is set.
     #[func]
     fn get_block_metadata(&self) -> Variant {
-        godot_error!("VoxelBuffer.get_block_metadata: not implemented in this port");
-        Variant::nil()
+        metadata_to_variant(self.buffer.block_metadata())
     }
 
     // ---- Per-voxel metadata (C++ `VoxelBuffer::set_voxel_metadata` family) ----
 
-    /// Sets the metadata entry for a single voxel. Stubbed.
+    /// Sets the metadata entry for a single voxel. `nil` clears the entry.
     #[func]
-    fn set_voxel_metadata(&mut self, _position: godot::builtin::Vector3i, _metadata: Variant) {
-        godot_error!("VoxelBuffer.set_voxel_metadata: not implemented in this port");
+    fn set_voxel_metadata(&mut self, position: godot::builtin::Vector3i, metadata: Variant) {
+        let pos = Vector3i::new(position.x, position.y, position.z);
+        let Ok(pos) = validate_position(pos, self.buffer.size()) else {
+            godot_error!("VoxelBuffer.set_voxel_metadata: position is outside the buffer");
+            return;
+        };
+        match metadata_from_variant(&metadata) {
+            Ok(value) => self.buffer.set_voxel_metadata(pos, value),
+            Err(error) => godot_error!("VoxelBuffer.set_voxel_metadata: {error}"),
+        }
     }
 
-    /// Returns the metadata entry for a single voxel. Stubbed.
+    /// Returns the metadata entry for a single voxel, or `nil` when none.
     #[func]
-    fn get_voxel_metadata(&self, _position: godot::builtin::Vector3i) -> Variant {
-        godot_error!("VoxelBuffer.get_voxel_metadata: not implemented in this port");
-        Variant::nil()
+    fn get_voxel_metadata(&self, position: godot::builtin::Vector3i) -> Variant {
+        let pos = Vector3i::new(position.x, position.y, position.z);
+        match self.buffer.voxel_metadata(pos) {
+            Some(value) => metadata_to_variant(value),
+            None => Variant::nil(),
+        }
     }
 
-    /// Clears the metadata entry for a single voxel. Stubbed.
+    /// Clears the metadata entry for a single voxel.
     #[func]
-    fn clear_voxel_metadata(&mut self, _position: godot::builtin::Vector3i) {
-        godot_error!("VoxelBuffer.clear_voxel_metadata: not implemented in this port");
+    fn clear_voxel_metadata(&mut self, position: godot::builtin::Vector3i) {
+        let pos = Vector3i::new(position.x, position.y, position.z);
+        self.buffer.clear_voxel_metadata(pos);
     }
 
-    /// Returns the next voxel position carrying metadata, or
-    /// `(0,0,0)` if there is none (stubbed — always reports empty). Matches
-    /// the C++ `for_each_voxel_metadata_in_area` iterator pattern by
-    /// returning zero positions in this port.
+    /// Returns the next voxel position carrying metadata in `[min, max)`
+    /// after `start` (ZXY order), or `(0,0,0)` if there is none. Pass
+    /// `Vector3i(INT32_MIN, …)` to obtain the first entry, including one at
+    /// the origin.
     #[func]
     fn next_voxel_metadata_pos_in_area(
         &self,
-        _min: godot::builtin::Vector3i,
-        _max: godot::builtin::Vector3i,
-        _start: godot::builtin::Vector3i,
+        min: godot::builtin::Vector3i,
+        max: godot::builtin::Vector3i,
+        start: godot::builtin::Vector3i,
     ) -> godot::builtin::Vector3i {
-        godot::builtin::Vector3i::ZERO
+        match self.buffer.next_voxel_metadata_pos_in_area(
+            Vector3i::new(min.x, min.y, min.z),
+            Vector3i::new(max.x, max.y, max.z),
+            Vector3i::new(start.x, start.y, start.z),
+        ) {
+            Some(pos) => godot::builtin::Vector3i::new(pos.x, pos.y, pos.z),
+            None => godot::builtin::Vector3i::ZERO,
+        }
     }
 
-    /// Iterate every voxel metadata entry in an area, invoking `callback`
-    /// with `(position, metadata)`. Stubbed (voxel-core has no metadata yet).
+    /// Iterate every voxel metadata entry in `[min, max)`, invoking `callback`
+    /// with `(position, metadata)`.
     #[func]
     fn for_each_voxel_metadata_in_area(
         &mut self,
-        _min: godot::builtin::Vector3i,
-        _max: godot::builtin::Vector3i,
-        _callback: Callable,
+        min: godot::builtin::Vector3i,
+        max: godot::builtin::Vector3i,
+        callback: Callable,
     ) {
-        // No metadata storage in this port; the C++ overload iterates an
-        // internal map, but we have nothing to iterate. Stubbed to a no-op.
+        if !callback.is_valid() {
+            godot_error!("VoxelBuffer.for_each_voxel_metadata_in_area: callback is invalid");
+            return;
+        }
+        self.buffer.for_each_voxel_metadata_in_area(
+            Vector3i::new(min.x, min.y, min.z),
+            Vector3i::new(max.x, max.y, max.z),
+            |pos, value| {
+                let gpos = godot::builtin::Vector3i::new(pos.x, pos.y, pos.z);
+                callback.call(&[gpos.to_variant(), metadata_to_variant(value)]);
+            },
+        );
     }
 
-    /// Iterate every voxel metadata entry in the whole buffer. Stubbed.
+    /// Iterate every voxel metadata entry in the whole buffer.
     #[func]
-    fn for_each_voxel_metadata(&mut self, _callback: Callable) {
-        // No metadata storage in this port; stubbed to a no-op.
+    fn for_each_voxel_metadata(&mut self, callback: Callable) {
+        if !callback.is_valid() {
+            godot_error!("VoxelBuffer.for_each_voxel_metadata: callback is invalid");
+            return;
+        }
+        self.buffer.for_each_voxel_metadata(|pos, value| {
+            let gpos = godot::builtin::Vector3i::new(pos.x, pos.y, pos.z);
+            callback.call(&[gpos.to_variant(), metadata_to_variant(value)]);
+        });
     }
 
     // ---- 3D texture helpers (C++ SDF-ZXY texture bridge) ----
@@ -1719,14 +1787,94 @@ impl VoxelToolTerrainGD {
         godot_error!("VoxelToolTerrain.do_smooth: no terrain is bound");
     }
 
+    /// Set per-voxel metadata at a world-space position. `nil` clears it.
+    #[func]
+    fn set_voxel_metadata(&mut self, position: godot::builtin::Vector3i, metadata: Variant) {
+        let pos = Vector3i::new(position.x, position.y, position.z);
+        let value = match metadata_from_variant(&metadata) {
+            Ok(value) => value,
+            Err(error) => {
+                godot_error!("VoxelToolTerrain.set_voxel_metadata: {error}");
+                return;
+            }
+        };
+        let stored = if value.is_nil() { None } else { Some(value) };
+        if let Some(mut terrain) = self.terrain.clone() {
+            terrain.bind_mut().edit_world_voxel_metadata(pos, stored);
+            return;
+        }
+        if let Some(mut terrain) = self.lod_terrain.clone() {
+            terrain.bind_mut().edit_world_voxel_metadata(pos, stored);
+            return;
+        }
+        godot_error!("VoxelToolTerrain.set_voxel_metadata: no terrain is bound");
+    }
+
+    /// Get per-voxel metadata at a world-space position, or `nil`.
+    #[func]
+    fn get_voxel_metadata(&self, position: godot::builtin::Vector3i) -> Variant {
+        let pos = Vector3i::new(position.x, position.y, position.z);
+        let value = if let Some(terrain) = self.terrain.as_ref() {
+            terrain.bind().read_world_voxel_metadata(pos)
+        } else if let Some(terrain) = self.lod_terrain.as_ref() {
+            terrain.bind().read_world_voxel_metadata(pos)
+        } else {
+            return Variant::nil();
+        };
+        match value {
+            Some(metadata) => metadata_to_variant(&metadata),
+            None => Variant::nil(),
+        }
+    }
+
     /// Executes a function for each voxel holding metadata in the given area.
     /// The callback takes two arguments: voxel position (`Vector3i`) and voxel
-    /// metadata (`Variant`). Matches upstream's pinned
-    /// `for_each_voxel_metadata_in_area`. Faithful stub: no metadata store is
-    /// bound yet, so the callback is never invoked.
+    /// metadata (`Variant`).
     #[func]
-    fn for_each_voxel_metadata_in_area(&self, _voxel_area: Aabb, _callback: Callable) {
-        // TODO(port): iterate the bound terrain's per-voxel metadata.
+    fn for_each_voxel_metadata_in_area(&self, voxel_area: Aabb, callback: Callable) {
+        if !callback.is_valid() {
+            godot_error!("VoxelToolTerrain.for_each_voxel_metadata_in_area: callback is invalid");
+            return;
+        }
+        if !voxel_area.position.x.is_finite()
+            || !voxel_area.position.y.is_finite()
+            || !voxel_area.position.z.is_finite()
+            || !voxel_area.size.x.is_finite()
+            || !voxel_area.size.y.is_finite()
+            || !voxel_area.size.z.is_finite()
+        {
+            godot_error!("VoxelToolTerrain.for_each_voxel_metadata_in_area: area must be finite");
+            return;
+        }
+        let min = Vector3i::new(
+            voxel_area.position.x.floor() as i32,
+            voxel_area.position.y.floor() as i32,
+            voxel_area.position.z.floor() as i32,
+        );
+        let max = Vector3i::new(
+            (voxel_area.position.x + voxel_area.size.x).ceil() as i32,
+            (voxel_area.position.y + voxel_area.size.y).ceil() as i32,
+            (voxel_area.position.z + voxel_area.size.z).ceil() as i32,
+        );
+        if let Some(terrain) = self.terrain.as_ref() {
+            terrain
+                .bind()
+                .for_each_world_voxel_metadata(min, max, |pos, value| {
+                    let gpos = godot::builtin::Vector3i::new(pos.x, pos.y, pos.z);
+                    callback.call(&[gpos.to_variant(), metadata_to_variant(value)]);
+                });
+            return;
+        }
+        if let Some(terrain) = self.lod_terrain.as_ref() {
+            terrain
+                .bind()
+                .for_each_world_voxel_metadata(min, max, |pos, value| {
+                    let gpos = godot::builtin::Vector3i::new(pos.x, pos.y, pos.z);
+                    callback.call(&[gpos.to_variant(), metadata_to_variant(value)]);
+                });
+            return;
+        }
+        godot_error!("VoxelToolTerrain.for_each_voxel_metadata_in_area: no terrain is bound");
     }
 
     /// Paste a `VoxelBuffer` into the bound terrain so `src(0,0,0)` lands at
@@ -1762,8 +1910,11 @@ impl VoxelToolTerrainGD {
 
     /// Picks voxels within `area` and calls `callback(position, value)` on a
     /// strided subset. `voxel_count` is the maximum number of callbacks;
-    /// `batch_count` controls the stride. `tags_mask` is reserved until model
-    /// tags are wired; non-zero voxels on the tool channel are candidates.
+    /// `batch_count` controls the stride. When a `VoxelMesherBlocky` library
+    /// is attached, only `random_tickable` models whose `tags_mask` intersects
+    /// `tags_mask` are candidates (`tags_mask == 0` means any tag). Without a
+    /// library, non-zero voxels on the tool channel are candidates and a
+    /// non-zero `tags_mask` filters by `(value & tags_mask) != 0`.
     #[func]
     fn run_blocky_random_tick(
         &mut self,
@@ -1771,7 +1922,7 @@ impl VoxelToolTerrainGD {
         voxel_count: i32,
         callback: Callable,
         batch_count: i32,
-        _tags_mask: i32,
+        tags_mask: i32,
     ) {
         if !callback.is_valid() {
             godot_error!("VoxelToolTerrain.run_blocky_random_tick: callback is invalid");
@@ -1806,18 +1957,26 @@ impl VoxelToolTerrainGD {
             return;
         }
         let channel = self.channel;
-        let candidates = if let Some(terrain) = self.terrain.as_ref() {
-            terrain
-                .bind()
-                .collect_voxels_in_box(min, max, channel, MAX_SCRIPT_ITEMS)
+        let (mut candidates, library) = if let Some(terrain) = self.terrain.as_ref() {
+            let bound = terrain.bind();
+            (
+                bound.collect_voxels_in_box(min, max, channel, MAX_SCRIPT_ITEMS),
+                bound.blocky_library(),
+            )
         } else if let Some(terrain) = self.lod_terrain.as_ref() {
-            terrain
-                .bind()
-                .collect_voxels_in_box(min, max, channel, MAX_SCRIPT_ITEMS)
+            let bound = terrain.bind();
+            (
+                bound.collect_voxels_in_box(min, max, channel, MAX_SCRIPT_ITEMS),
+                bound.blocky_library(),
+            )
         } else {
             godot_error!("VoxelToolTerrain.run_blocky_random_tick: no terrain is bound");
             return;
         };
+        let mask = tags_mask as u32;
+        candidates.retain(|(_, value)| {
+            voxel_core::edition::ops::voxel_is_random_tick_candidate(*value, mask, library.as_ref())
+        });
         if candidates.is_empty() {
             return;
         }

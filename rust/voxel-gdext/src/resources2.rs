@@ -2297,6 +2297,39 @@ impl VoxelLodTerrainGD {
         crate::terrain::collect_core_voxels(core, min, max, channel, max_items)
     }
 
+    pub(crate) fn edit_world_voxel_metadata(
+        &mut self,
+        pos: voxel_core::math::Vector3i,
+        metadata: Option<voxel_core::storage::MetadataValue>,
+    ) -> bool {
+        let Some(core) = self.core.as_mut() else {
+            return false;
+        };
+        matches!(core.try_edit_voxel_metadata(pos, metadata), Ok(Some(_)))
+    }
+
+    pub(crate) fn read_world_voxel_metadata(
+        &self,
+        pos: voxel_core::math::Vector3i,
+    ) -> Option<voxel_core::storage::MetadataValue> {
+        self.core.as_ref().and_then(|core| core.voxel_metadata(pos))
+    }
+
+    pub(crate) fn for_each_world_voxel_metadata(
+        &self,
+        min: voxel_core::math::Vector3i,
+        max: voxel_core::math::Vector3i,
+        visit: impl FnMut(voxel_core::math::Vector3i, &voxel_core::storage::MetadataValue),
+    ) {
+        if let Some(core) = self.core.as_ref() {
+            core.for_each_voxel_metadata_in_area(min, max, visit);
+        }
+    }
+
+    pub(crate) fn blocky_library(&self) -> Option<voxel_core::meshers::blocky::BakedLibrary> {
+        crate::terrain::resolve_blocky_library(self.mesher_resource.as_ref())
+    }
+
     pub(crate) fn surface_points_for_block(
         &self,
         position: voxel_core::math::Vector3i,
@@ -3958,6 +3991,24 @@ impl VoxelBlockyModelGD {
     const SIDE_POSITIVE_Z: i32 = 5;
     #[constant]
     const SIDE_COUNT: i32 = 6;
+}
+
+impl VoxelBlockyModelGD {
+    /// Bake inspector fields (color, tags, random-tick) into a core model.
+    pub(crate) fn to_baked_model(&self) -> voxel_core::meshers::blocky::BakedModel {
+        let mut model =
+            voxel_core::meshers::blocky::solid_cube_model(voxel_core::math::Color::from_rgb(
+                self.color_value.r,
+                self.color_value.g,
+                self.color_value.b,
+            ));
+        model.is_random_tickable = self.random_tickable_value;
+        model.tags_mask = self.tags_mask_value as u32;
+        model.culls_neighbors = self.culls_neighbors_value;
+        model.lod_skirts = self.lod_skirts_enabled_value;
+        model.transparency_index = self.transparency_index_value.clamp(0, 255) as u8;
+        model
+    }
 }
 
 // ---------------------------------------------------------------------------

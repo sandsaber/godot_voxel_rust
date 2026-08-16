@@ -5,6 +5,7 @@
 //! and are engine-agnostic (no Godot dependency).
 
 use crate::math::{Vector3f, Vector3i};
+use crate::meshers::blocky::BakedLibrary;
 use crate::storage::{ChannelDepth, ChannelId, VoxelBuffer};
 
 /// Edit mode (add/remove/set). Matches C++ `Mode` in `funcs.h:492`.
@@ -500,6 +501,32 @@ pub fn box_blur(
     }
 }
 
+/// Whether a voxel id should participate in blocky random-tick.
+///
+/// When a baked library is present the model must be `is_random_tickable`,
+/// and `tags_mask` (when non-zero) must intersect the model's tag bits.
+/// Without a library, non-zero voxels are candidates; a non-zero `tags_mask`
+/// then filters by `(voxel_id as u32) & tags_mask`.
+pub fn voxel_is_random_tick_candidate(
+    voxel: u64,
+    tags_mask: u32,
+    library: Option<&BakedLibrary>,
+) -> bool {
+    if voxel == 0 {
+        return false;
+    }
+    if let Some(library) = library {
+        let Some(model) = library.models.get(voxel as usize) else {
+            return false;
+        };
+        if !model.is_random_tickable {
+            return false;
+        }
+        return tags_mask == 0 || (model.tags_mask & tags_mask) != 0;
+    }
+    tags_mask == 0 || ((voxel as u32) & tags_mask) != 0
+}
+
 /// Run blocky random tick: iterate over random tickable voxels within a box
 /// and invoke `callback` for each one selected. Returns the number of
 /// callbacks invoked. Matches `ops::run_blocky_random_tick` semantics:
@@ -558,6 +585,35 @@ mod tests {
         fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
         fmt.configure_buffer(&mut buf);
         buf
+    }
+
+    #[test]
+    fn random_tick_candidate_honors_tags_and_library() {
+        assert!(!voxel_is_random_tick_candidate(0, 0, None));
+        assert!(voxel_is_random_tick_candidate(3, 0, None));
+        assert!(voxel_is_random_tick_candidate(3, 1, None));
+        assert!(!voxel_is_random_tick_candidate(2, 1, None));
+
+        let library = crate::meshers::blocky::BakedLibrary {
+            models: vec![
+                crate::meshers::blocky::BakedModel::default(),
+                crate::meshers::blocky::BakedModel {
+                    is_random_tickable: true,
+                    tags_mask: 0b01,
+                    ..crate::meshers::blocky::BakedModel::default()
+                },
+                crate::meshers::blocky::BakedModel {
+                    is_random_tickable: false,
+                    tags_mask: 0b01,
+                    ..crate::meshers::blocky::BakedModel::default()
+                },
+            ],
+            ..crate::meshers::blocky::BakedLibrary::default()
+        };
+        assert!(voxel_is_random_tick_candidate(1, 0, Some(&library)));
+        assert!(voxel_is_random_tick_candidate(1, 0b01, Some(&library)));
+        assert!(!voxel_is_random_tick_candidate(1, 0b10, Some(&library)));
+        assert!(!voxel_is_random_tick_candidate(2, 0, Some(&library)));
     }
 
     #[test]

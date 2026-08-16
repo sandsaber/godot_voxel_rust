@@ -18,6 +18,7 @@ use super::depth::ChannelDepth;
 use super::funcs;
 use super::voxel_memory_pool::VoxelMemoryPool;
 use crate::math::Vector3i;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Number of channels. Matches `MAX_CHANNELS`. Indexed by [`ChannelId`].
@@ -42,6 +43,32 @@ pub const QUANTIZED_SDF_16_BITS_SCALE_INV: f32 = 1.0 / QUANTIZED_SDF_16_BITS_SCA
 pub const SDF_FAR_OUTSIDE: f32 = 100.0;
 /// Matches `constants::SDF_FAR_INSIDE`.
 pub const SDF_FAR_INSIDE: f32 = -100.0;
+
+/// In-memory voxel or block metadata. Lives on [`VoxelBuffer`] and survives
+/// copy/paste/edit transactions. Persistence through the Godot Variant
+/// serializer is intentionally deferred (ROADMAP R7).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum MetadataValue {
+    /// Empty / cleared entry. Matches a Godot `nil` Variant.
+    #[default]
+    Nil,
+    /// Signed integer payload.
+    Int(i64),
+    /// Floating-point payload.
+    Float(f64),
+    /// UTF-8 text payload.
+    Text(String),
+    /// Opaque byte payload.
+    Bytes(Vec<u8>),
+}
+
+impl MetadataValue {
+    /// True when this value is the empty sentinel.
+    #[inline]
+    pub fn is_nil(&self) -> bool {
+        matches!(self, Self::Nil)
+    }
+}
 
 /// Matches `mixel4::encode_indices_to_packed_u16(0, 1, 2, 3)`.
 pub const MIXEL4_DEFAULT_INDICES: u64 = 0x3210;
@@ -395,6 +422,10 @@ pub struct VoxelBuffer {
     allocator: Allocator,
     /// Optional pool used when `allocator == Pool`.
     pool: Option<Arc<VoxelMemoryPool>>,
+    /// Opaque metadata attached to the whole buffer (C++ block metadata).
+    block_metadata: MetadataValue,
+    /// Sparse per-voxel metadata keyed by local buffer coordinates.
+    voxel_metadata: HashMap<Vector3i, MetadataValue>,
 }
 
 impl std::fmt::Debug for VoxelBuffer {
@@ -416,6 +447,8 @@ impl VoxelBuffer {
             channels: std::array::from_fn(default_channel_for_index),
             allocator,
             pool: None,
+            block_metadata: MetadataValue::Nil,
+            voxel_metadata: HashMap::new(),
         }
     }
 
@@ -451,6 +484,8 @@ impl VoxelBuffer {
             ch.compression = Compression::Uniform;
             ch.defval = get_default_raw_value(channel_id_from_index(i).unwrap(), ch.depth);
         }
+        self.block_metadata = MetadataValue::Nil;
+        self.voxel_metadata.clear();
     }
 
     /// Size in voxels.
@@ -1067,6 +1102,7 @@ impl VoxelBuffer {
                 }
             }
         }
+        self.copy_voxel_metadata_from(src, src_min, dst_min);
     }
 
     /// Raw bytes of a channel (decompressed). Matches `get_channel_as_bytes`.
@@ -1132,15 +1168,15 @@ impl VoxelBuffer {
         dst.compression = Compression::Uniform;
     }
 
-    /// Copy all voxel data and channel depths into `dst`. Metadata is not part
-    /// of the Rust storage port yet, so this matches the voxel-data half of C++
-    /// `copy_to`.
+    /// Copy all voxel data, channel depths, and in-memory metadata into `dst`.
     pub fn copy_to(&self, dst: &mut VoxelBuffer) {
         dst.create(self.size);
         for ci in 0..MAX_CHANNELS {
             dst.set_channel_depth(ci, self.channels[ci].depth);
         }
         dst.copy_channels_from(self);
+        dst.block_metadata = self.block_metadata.clone();
+        dst.voxel_metadata.clone_from(&self.voxel_metadata);
     }
 
     pub fn copy_to_owned(&self) -> VoxelBuffer {
@@ -1169,6 +1205,8 @@ impl VoxelBuffer {
             target.compression = source.compression;
             target.size_in_bytes = source.size_in_bytes;
         }
+        dst.block_metadata = self.block_metadata.clone();
+        dst.voxel_metadata.clone_from(&self.voxel_metadata);
         Ok(dst)
     }
 
@@ -1294,6 +1332,126 @@ impl VoxelBuffer {
         }
     }
 
+    /// Replace the buffer-wide (block) metadata entry.
+    pub fn set_block_metadata(&mut self, metadata: MetadataValue) {
+        self.block_metadata = metadata;
+    }
+
+    /// Buffer-wide metadata. `Nil` when none is set.
+    pub fn block_metadata(&self) -> &MetadataValue {
+        &self.block_metadata
+    }
+
+    /// Set or clear metadata for one local voxel. `Nil` removes the entry.
+    pub fn set_voxel_metadata(&mut self, position: Vector3i, metadata: MetadataValue) {
+        if metadata.is_nil() {
+            self.voxel_metadata.remove(&position);
+            return;
+        }
+        self.voxel_metadata.insert(position, metadata);
+    }
+
+    /// Metadata for one local voxel, if any.
+    pub fn voxel_metadata(&self, position: Vector3i) -> Option<&MetadataValue> {
+        self.voxel_metadata.get(&position)
+    }
+
+    /// Remove metadata for one local voxel.
+    pub fn clear_voxel_metadata(&mut self, position: Vector3i) {
+        self.voxel_metadata.remove(&position);
+    }
+
+    /// Drop every per-voxel metadata entry. Block metadata is left untouched.
+    pub fn clear_all_voxel_metadata(&mut self) {
+        self.voxel_metadata.clear();
+    }
+
+    /// True when at least one voxel carries metadata.
+    pub fn has_voxel_metadata(&self) -> bool {
+        !self.voxel_metadata.is_empty()
+    }
+
+    /// Visit every per-voxel metadata entry.
+    pub fn for_each_voxel_metadata(&self, mut f: impl FnMut(Vector3i, &MetadataValue)) {
+        for (position, value) in &self.voxel_metadata {
+            f(*position, value);
+        }
+    }
+
+    /// Visit metadata whose local position is in `[min, max)` (max exclusive).
+    pub fn for_each_voxel_metadata_in_area(
+        &self,
+        min: Vector3i,
+        max: Vector3i,
+        mut f: impl FnMut(Vector3i, &MetadataValue),
+    ) {
+        let (lo, hi) = sorted_half_open_box(min, max);
+        for (position, value) in &self.voxel_metadata {
+            if point_in_half_open_box(*position, lo, hi) {
+                f(*position, value);
+            }
+        }
+    }
+
+    /// Next metadata position in `[min, max)` strictly after `start` in ZXY
+    /// order. Used by the GDScript iterator helper.
+    pub fn next_voxel_metadata_pos_in_area(
+        &self,
+        min: Vector3i,
+        max: Vector3i,
+        start: Vector3i,
+    ) -> Option<Vector3i> {
+        let (lo, hi) = sorted_half_open_box(min, max);
+        let mut best: Option<Vector3i> = None;
+        for position in self.voxel_metadata.keys().copied() {
+            if !point_in_half_open_box(position, lo, hi) {
+                continue;
+            }
+            if !metadata_pos_after(position, start) {
+                continue;
+            }
+            if best.is_none_or(|current| metadata_pos_after(current, position)) {
+                best = Some(position);
+            }
+        }
+        best
+    }
+
+    /// Copy overlapping per-voxel metadata from `src` using the same
+    /// `src_min`/`dst_min` convention as [`paste`](Self::paste).
+    pub fn copy_voxel_metadata_from(
+        &mut self,
+        src: &VoxelBuffer,
+        src_min: Vector3i,
+        dst_min: Vector3i,
+    ) {
+        if src.voxel_metadata.is_empty() {
+            return;
+        }
+        let src_size = src.size;
+        let dst_size = self.size;
+        for (src_pos, value) in &src.voxel_metadata {
+            if src_pos.x < src_min.x || src_pos.y < src_min.y || src_pos.z < src_min.z {
+                continue;
+            }
+            if src_pos.x >= src_size.x || src_pos.y >= src_size.y || src_pos.z >= src_size.z {
+                continue;
+            }
+            let dst_pos = Vector3i::new(
+                dst_min.x + (src_pos.x - src_min.x),
+                dst_min.y + (src_pos.y - src_min.y),
+                dst_min.z + (src_pos.z - src_min.z),
+            );
+            if dst_pos.x < 0 || dst_pos.y < 0 || dst_pos.z < 0 {
+                continue;
+            }
+            if dst_pos.x >= dst_size.x || dst_pos.y >= dst_size.y || dst_pos.z >= dst_size.z {
+                continue;
+            }
+            self.voxel_metadata.insert(dst_pos, value.clone());
+        }
+    }
+
     // ---- internal helpers ----
 
     /// Allocate a typed voxel buffer of `voxel_count` elements for `depth`.
@@ -1352,6 +1510,26 @@ fn clipped_area(size: Vector3i, min: Vector3i, max: Vector3i) -> Option<(Vector3
         return None;
     }
     Some((lo, hi))
+}
+
+fn sorted_half_open_box(min: Vector3i, max: Vector3i) -> (Vector3i, Vector3i) {
+    let mut lo = min;
+    let mut hi = max;
+    Vector3i::sort_min_max(&mut lo, &mut hi);
+    (lo, hi)
+}
+
+fn point_in_half_open_box(position: Vector3i, lo: Vector3i, hi: Vector3i) -> bool {
+    position.x >= lo.x
+        && position.y >= lo.y
+        && position.z >= lo.z
+        && position.x < hi.x
+        && position.y < hi.y
+        && position.z < hi.z
+}
+
+fn metadata_pos_after(position: Vector3i, start: Vector3i) -> bool {
+    (position.z, position.x, position.y) > (start.z, start.x, start.y)
 }
 
 #[inline]
@@ -1831,6 +2009,90 @@ mod tests {
         let src = VoxelBuffer::with_size(Vector3i::new(2, 2, 2));
         let mut dst = VoxelBuffer::with_size(Vector3i::new(1, 1, 1));
         dst.copy_channel_from(&src, ChannelId::Type.index());
+    }
+
+    #[test]
+    fn voxel_metadata_round_trips_and_clears() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::new(4, 4, 4));
+        buf.set_block_metadata(MetadataValue::Text("chunk".into()));
+        buf.set_voxel_metadata(Vector3i::new(1, 2, 3), MetadataValue::Int(42));
+        buf.set_voxel_metadata(Vector3i::new(0, 0, 1), MetadataValue::Float(1.5));
+        assert_eq!(buf.block_metadata(), &MetadataValue::Text("chunk".into()));
+        assert_eq!(
+            buf.voxel_metadata(Vector3i::new(1, 2, 3)),
+            Some(&MetadataValue::Int(42))
+        );
+        buf.set_voxel_metadata(Vector3i::new(1, 2, 3), MetadataValue::Nil);
+        assert!(buf.voxel_metadata(Vector3i::new(1, 2, 3)).is_none());
+        assert!(buf.has_voxel_metadata());
+        buf.clear_all_voxel_metadata();
+        assert!(!buf.has_voxel_metadata());
+        assert_eq!(buf.block_metadata(), &MetadataValue::Text("chunk".into()));
+    }
+
+    #[test]
+    fn metadata_survives_copy_to_and_is_cleared_by_create() {
+        let mut src = VoxelBuffer::with_size(Vector3i::new(2, 2, 2));
+        src.set_block_metadata(MetadataValue::Int(7));
+        src.set_voxel_metadata(Vector3i::new(1, 0, 0), MetadataValue::Bytes(vec![1, 2]));
+        let dst = src.copy_to_owned();
+        assert_eq!(dst.block_metadata(), &MetadataValue::Int(7));
+        assert_eq!(
+            dst.voxel_metadata(Vector3i::new(1, 0, 0)),
+            Some(&MetadataValue::Bytes(vec![1, 2]))
+        );
+        src.create(Vector3i::new(2, 2, 2));
+        assert!(src.block_metadata().is_nil());
+        assert!(!src.has_voxel_metadata());
+    }
+
+    #[test]
+    fn paste_copies_overlapping_voxel_metadata() {
+        let mut src = VoxelBuffer::with_size(Vector3i::new(2, 2, 2));
+        src.set_voxel(3, 0, 0, 0, ChannelId::Type.index());
+        src.set_voxel_metadata(Vector3i::new(0, 0, 0), MetadataValue::Int(11));
+        src.set_voxel_metadata(Vector3i::new(1, 1, 1), MetadataValue::Int(22));
+        let mut dst = VoxelBuffer::with_size(Vector3i::new(4, 4, 4));
+        dst.paste(
+            &src,
+            Vector3i::zero(),
+            Vector3i::new(1, 1, 1),
+            1 << ChannelId::Type.index(),
+        );
+        assert_eq!(
+            dst.voxel_metadata(Vector3i::new(1, 1, 1)),
+            Some(&MetadataValue::Int(11))
+        );
+        assert_eq!(
+            dst.voxel_metadata(Vector3i::new(2, 2, 2)),
+            Some(&MetadataValue::Int(22))
+        );
+        assert!(dst.voxel_metadata(Vector3i::zero()).is_none());
+    }
+
+    #[test]
+    fn next_voxel_metadata_pos_walks_zxy_after_start() {
+        let mut buf = VoxelBuffer::with_size(Vector3i::new(4, 4, 4));
+        buf.set_voxel_metadata(Vector3i::new(1, 0, 0), MetadataValue::Int(1));
+        buf.set_voxel_metadata(Vector3i::new(0, 1, 0), MetadataValue::Int(2));
+        buf.set_voxel_metadata(Vector3i::new(0, 0, 1), MetadataValue::Int(3));
+        let min = Vector3i::zero();
+        let max = Vector3i::splat(4);
+        let first = buf
+            .next_voxel_metadata_pos_in_area(min, max, Vector3i::new(i32::MIN, i32::MIN, i32::MIN))
+            .expect("first");
+        let second = buf
+            .next_voxel_metadata_pos_in_area(min, max, first)
+            .expect("second");
+        let third = buf
+            .next_voxel_metadata_pos_in_area(min, max, second)
+            .expect("third");
+        assert!(buf
+            .next_voxel_metadata_pos_in_area(min, max, third)
+            .is_none());
+        assert_eq!(first, Vector3i::new(0, 1, 0));
+        assert_eq!(second, Vector3i::new(1, 0, 0));
+        assert_eq!(third, Vector3i::new(0, 0, 1));
     }
 
     #[test]

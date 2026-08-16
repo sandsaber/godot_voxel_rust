@@ -604,14 +604,17 @@ impl VoxelMesherBlockyGD {
 }
 
 impl VoxelMesherBlockyGD {
-    /// Build the engine-agnostic mesher, carrying the attached baked library.
-    pub fn core_mesher(&self) -> std::sync::Arc<dyn voxel_core::meshers::VoxelMesher> {
-        let library = self
-            .library_resource
+    /// Clone the attached baked library, if any.
+    pub(crate) fn core_library(&self) -> Option<voxel_core::meshers::blocky::BakedLibrary> {
+        self.library_resource
             .as_ref()
             .and_then(|resource| resource.clone().try_cast::<VoxelBlockyLibraryGD>().ok())
             .map(|library| library.bind().core_library())
-            .unwrap_or_default();
+    }
+
+    /// Build the engine-agnostic mesher, carrying the attached baked library.
+    pub fn core_mesher(&self) -> std::sync::Arc<dyn voxel_core::meshers::VoxelMesher> {
+        let library = self.core_library().unwrap_or_default();
         let type_channel = self.type_channel.max(0) as usize;
         std::sync::Arc::new(
             voxel_core::meshers::BlockyMesher::new(std::sync::Arc::new(library))
@@ -1125,10 +1128,7 @@ fn baked_model_from_resource(model: &Gd<Resource>) -> voxel_core::meshers::block
         return fluid.bind().to_baked_model();
     }
     if let Ok(blocky) = model.clone().try_cast::<VoxelBlockyModelGD>() {
-        let color = blocky.bind().get_color_prop();
-        return voxel_core::meshers::blocky::solid_cube_model(voxel_core::math::Color::from_rgb(
-            color.r, color.g, color.b,
-        ));
+        return blocky.bind().to_baked_model();
     }
     voxel_core::meshers::blocky::solid_cube_model(voxel_core::math::Color::from_rgb(0.5, 0.5, 0.5))
 }

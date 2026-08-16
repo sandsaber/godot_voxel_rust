@@ -1193,6 +1193,49 @@ fn batch_paste_copies_source_buffer_into_lod0() {
     );
 }
 
+#[test]
+fn voxel_metadata_survives_block_edit_and_paste() {
+    use crate::storage::{MetadataValue, VoxelBuffer};
+    let mut core = make_edit_core_with_lods(1);
+    assert!(core
+        .try_edit_voxel_metadata(Vector3i::new(3, 4, 5), Some(MetadataValue::Int(99)))
+        .expect("metadata edit should publish")
+        .is_some());
+    assert_eq!(
+        core.voxel_metadata(Vector3i::new(3, 4, 5)),
+        Some(MetadataValue::Int(99))
+    );
+
+    let mut visited = Vec::new();
+    core.for_each_voxel_metadata_in_area(
+        Vector3i::new(3, 4, 5),
+        Vector3i::new(4, 5, 6),
+        |pos, value| {
+            visited.push((pos, value.clone()));
+        },
+    );
+    assert_eq!(
+        visited,
+        vec![(Vector3i::new(3, 4, 5), MetadataValue::Int(99))]
+    );
+
+    let mut src = VoxelBuffer::with_size(Vector3i::splat(1));
+    src.set_voxel(4, 0, 0, 0, ChannelId::Type.index());
+    src.set_voxel_metadata(Vector3i::zero(), MetadataValue::Text("pasted".into()));
+    core.try_paste(Vector3i::new(1, 1, 1), &src, 1 << ChannelId::Type.index())
+        .expect("paste should publish");
+    assert_eq!(
+        core.voxel_metadata(Vector3i::new(1, 1, 1)),
+        Some(MetadataValue::Text("pasted".into()))
+    );
+
+    assert!(core
+        .try_edit_voxel_metadata(Vector3i::new(3, 4, 5), None)
+        .expect("clear should publish")
+        .is_some());
+    assert!(core.voxel_metadata(Vector3i::new(3, 4, 5)).is_none());
+}
+
 fn requested_mesh_locations(core: &VoxelTerrainCore) -> Vec<MeshBlockLocation> {
     let mut locations = core
         .mesh_maps

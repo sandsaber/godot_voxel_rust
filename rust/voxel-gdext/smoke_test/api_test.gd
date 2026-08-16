@@ -89,6 +89,12 @@ func _ready() -> void:
 		buf.set_voxel(0, 0, 0, 0, 7)
 		var iv = buf.get_voxel(0, 0, 0, 0)
 		_ok(int(iv) == 7, "VoxelBuffer set_voxel/get_voxel round-trips (got %d)" % int(iv))
+		buf.set_block_metadata("chunk")
+		_ok(str(buf.get_block_metadata()) == "chunk", "VoxelBuffer block metadata round-trips")
+		buf.set_voxel_metadata(Vector3i(1, 2, 3), 42)
+		_ok(int(buf.get_voxel_metadata(Vector3i(1, 2, 3))) == 42, "VoxelBuffer voxel metadata round-trips")
+		buf.clear_voxel_metadata(Vector3i(1, 2, 3))
+		_ok(buf.get_voxel_metadata(Vector3i(1, 2, 3)) == null, "VoxelBuffer clear_voxel_metadata drops the entry")
 
 	# 8. Name-like properties use class-specific accessors. Generic
 	#    get_name/set_name methods shadow Resource methods and become errors in

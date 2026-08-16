@@ -2853,6 +2853,39 @@ impl VoxelTerrain {
         collect_core_voxels(core, min, max, channel, max_items)
     }
 
+    pub(crate) fn edit_world_voxel_metadata(
+        &mut self,
+        pos: Vector3i,
+        metadata: Option<voxel_core::storage::MetadataValue>,
+    ) -> bool {
+        let Some(core) = self.core.as_mut() else {
+            return false;
+        };
+        matches!(core.try_edit_voxel_metadata(pos, metadata), Ok(Some(_)))
+    }
+
+    pub(crate) fn read_world_voxel_metadata(
+        &self,
+        pos: Vector3i,
+    ) -> Option<voxel_core::storage::MetadataValue> {
+        self.core.as_ref().and_then(|core| core.voxel_metadata(pos))
+    }
+
+    pub(crate) fn for_each_world_voxel_metadata(
+        &self,
+        min: Vector3i,
+        max: Vector3i,
+        visit: impl FnMut(Vector3i, &voxel_core::storage::MetadataValue),
+    ) {
+        if let Some(core) = self.core.as_ref() {
+            core.for_each_voxel_metadata_in_area(min, max, visit);
+        }
+    }
+
+    pub(crate) fn blocky_library(&self) -> Option<voxel_core::meshers::blocky::BakedLibrary> {
+        resolve_blocky_library(self.mesher_resource.as_ref())
+    }
+
     fn collision_settings(&self) -> CollisionBodySettings {
         CollisionBodySettings::from_inspector(
             self.collision_layer_value,
@@ -2944,6 +2977,17 @@ pub(crate) fn resolve_core_mesher(
         );
     }
     Arc::new(TransvoxelMesher::new())
+}
+
+pub(crate) fn resolve_blocky_library(
+    resource: Option<&Gd<Resource>>,
+) -> Option<voxel_core::meshers::blocky::BakedLibrary> {
+    let mesher = resource?
+        .clone()
+        .try_cast::<crate::resources::VoxelMesherBlockyGD>()
+        .ok()?;
+    let library = mesher.bind().core_library();
+    library
 }
 
 impl VoxelTerrain {

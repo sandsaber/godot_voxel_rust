@@ -53,7 +53,8 @@ overlapping data block (not per voxel).
 - [x] Hemisphere brush (`do_hemisphere`) in core and `VoxelToolTerrain`
 - [x] Smooth mode (`do_smooth` box-blur) in core and `VoxelToolTerrain`
 - [x] Paste (`do_paste`) and blocky random-tick on `VoxelToolTerrain`
-- [ ] Per-voxel metadata store / `for_each_voxel_metadata_in_area`
+- [x] Per-voxel metadata store / `for_each_voxel_metadata_in_area` (in-memory;
+      serializer Variant codec is still R7)
 
 ## R5 — Instancing rendering ⬜
 

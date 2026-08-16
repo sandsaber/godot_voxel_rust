@@ -3537,6 +3537,136 @@ impl VoxelTerrainCore {
         })
     }
 
+    /// Set or clear per-voxel metadata at a world-space position. The write
+    /// goes through the same LOD0 block transaction as voxel edits, so it
+    /// marks the block edited and stays on the live buffer.
+    pub fn try_edit_voxel_metadata(
+        &mut self,
+        position: Vector3i,
+        metadata: Option<crate::storage::MetadataValue>,
+    ) -> Result<Option<VoxelEditOutcome>, VoxelTerrainRuntimeError> {
+        let block_size = self.data_block_size();
+        if block_size <= 0 {
+            return Ok(None);
+        }
+        let block_pos = Vector3i::new(
+            position.x.div_euclid(block_size),
+            position.y.div_euclid(block_size),
+            position.z.div_euclid(block_size),
+        );
+        self.try_edit_lod0_block(block_pos, |buffer, origin| {
+            let local = position - origin;
+            match metadata {
+                Some(value) if !value.is_nil() => buffer.set_voxel_metadata(local, value),
+                _ => buffer.clear_voxel_metadata(local),
+            }
+        })
+    }
+
+    /// Snapshot-read metadata at a world-space voxel, if the LOD0 block is
+    /// resident and the voxel carries an entry.
+    pub fn voxel_metadata(&self, position: Vector3i) -> Option<crate::storage::MetadataValue> {
+        let data = self.data();
+        let Ok(block_size) = i32::try_from(data.block_size()) else {
+            return None;
+        };
+        if block_size <= 0 {
+            return None;
+        }
+        let block_pos = crate::storage::voxel_data_map::VoxelDataMap::voxel_to_block_b(
+            position,
+            data.block_size_po2(),
+        );
+        let block = data.block_snapshot(block_pos, 0)?;
+        if !block.has_voxels() {
+            return None;
+        }
+        let local = Vector3i::new(
+            position.x.rem_euclid(block_size),
+            position.y.rem_euclid(block_size),
+            position.z.rem_euclid(block_size),
+        );
+        block.voxels().voxel_metadata(local).cloned()
+    }
+
+    /// Visit every resident LOD0 metadata entry whose world position is in
+    /// `[min, max)` (max exclusive).
+    pub fn for_each_voxel_metadata_in_area(
+        &self,
+        min: Vector3i,
+        max: Vector3i,
+        mut visit: impl FnMut(Vector3i, &crate::storage::MetadataValue),
+    ) {
+        let data = self.data();
+        let Ok(block_size) = i32::try_from(data.block_size()) else {
+            return;
+        };
+        if block_size <= 0 {
+            return;
+        }
+        let lo = Vector3i::new(min.x.min(max.x), min.y.min(max.y), min.z.min(max.z));
+        let hi = Vector3i::new(min.x.max(max.x), min.y.max(max.y), min.z.max(max.z));
+        if lo.x == hi.x || lo.y == hi.y || lo.z == hi.z {
+            return;
+        }
+        let last = Vector3i::new(
+            hi.x.saturating_sub(1),
+            hi.y.saturating_sub(1),
+            hi.z.saturating_sub(1),
+        );
+        let min_block = crate::storage::voxel_data_map::VoxelDataMap::voxel_to_block_b(
+            lo,
+            data.block_size_po2(),
+        );
+        let max_block = crate::storage::voxel_data_map::VoxelDataMap::voxel_to_block_b(
+            last,
+            data.block_size_po2(),
+        );
+        let mut z = min_block.z;
+        while z <= max_block.z {
+            let mut y = min_block.y;
+            while y <= max_block.y {
+                let mut x = min_block.x;
+                while x <= max_block.x {
+                    let block_pos = Vector3i::new(x, y, z);
+                    if let Some(block) = data.block_snapshot(block_pos, 0) {
+                        if block.has_voxels() {
+                            let origin = Vector3i::new(
+                                block_pos.x.saturating_mul(block_size),
+                                block_pos.y.saturating_mul(block_size),
+                                block_pos.z.saturating_mul(block_size),
+                            );
+                            block.voxels().for_each_voxel_metadata(|local, value| {
+                                let world = origin + local;
+                                if world.x >= lo.x
+                                    && world.y >= lo.y
+                                    && world.z >= lo.z
+                                    && world.x < hi.x
+                                    && world.y < hi.y
+                                    && world.z < hi.z
+                                {
+                                    visit(world, value);
+                                }
+                            });
+                        }
+                    }
+                    x = match x.checked_add(1) {
+                        Some(next) => next,
+                        None => break,
+                    };
+                }
+                y = match y.checked_add(1) {
+                    Some(next) => next,
+                    None => break,
+                };
+            }
+            z = match z.checked_add(1) {
+                Some(next) => next,
+                None => break,
+            };
+        }
+    }
+
     /// Paste `src` into the volume so `src(0,0,0)` lands at `origin`.
     /// `channel_mask` is a bitset of channels to copy.
     pub fn try_paste(
