@@ -140,4 +140,4 @@ through the same `DecodeLimits`-guarded decode as disk data.
 - Client-side prediction or edit reconciliation beyond revision ordering.
 - Replicating instancer state (R5) and graph/generator *changes* at runtime
   (generator identity is assumed synced at world start).
-- Reading C++ Variant metadata over the network (blocked by R7 wide).
+- Variant metadata rides inside block snapshots via the R7 wide codec (tag 32); engine-only Variant types (objects, callables) remain unsupported on both sides.

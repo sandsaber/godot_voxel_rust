@@ -3702,7 +3702,7 @@ impl VoxelTerrainReplicatorGD {
             (center.y as i32).div_euclid(block_size),
             (center.z as i32).div_euclid(block_size),
         );
-        let radius = radius_blocks.max(0);
+        let radius = radius_blocks.clamp(0, 1 << 20);
         let area = voxel_core::math::Box3i::new(
             center_blocks - Vector3i::splat(radius),
             Vector3i::splat(2 * radius + 1),
@@ -3737,13 +3737,9 @@ impl VoxelTerrainReplicatorGD {
         let Some(core) = bound.core() else {
             return out;
         };
-        for (target, snapshot) in self.server.poll_outbound(core) {
-            // One poll per peer: frames destined for other peers must not
-            // leak through this call (they would also be marked sent and
-            // starve the real recipient).
-            if target != peer {
-                continue;
-            }
+        // Per-peer computation: the all-peers poll marks every peer's
+        // frames sent on the first call, starving everyone else.
+        for snapshot in self.server.poll_outbound_for_peer(core, peer) {
             let mut frame = Vec::new();
             snapshot.encode(&mut frame);
             let packed = PackedByteArray::from(frame.as_slice());

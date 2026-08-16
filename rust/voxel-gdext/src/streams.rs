@@ -208,11 +208,22 @@ impl VoxelStreamRegionFiles {
             .and_then(|value| value.try_to::<i32>().ok())
             .unwrap_or(self.sector_size_value)
             .max(1);
-        let block_po2 = new_settings
+        let requested_block_po2 = new_settings
             .get("block_size_po2")
             .and_then(|value| value.try_to::<i32>().ok())
             .unwrap_or(self.block_size_po2_value)
             .clamp(1, 8);
+        // Block-size conversion is NOT supported: loaded VoxelBuffers keep
+        // their original dimensions, so a destination stream with a
+        // different block size rejects every save (BlockFormatMismatch).
+        if requested_block_po2 != self.block_size_po2_value {
+            godot_error!(
+                "VoxelStreamRegionFiles.convert_files: block_size_po2 cannot be changed (source={}, requested={}); use the current value",
+                self.block_size_po2_value,
+                requested_block_po2
+            );
+        }
+        let block_po2 = self.block_size_po2_value;
         let globalized = ProjectSettings::singleton().globalize_path(&self.directory);
         let source = PathBuf::from(globalized.to_string());
         if !source.is_dir() {
@@ -312,6 +323,13 @@ fn replace_region_directory(
     source: &std::path::Path,
     converted: &std::path::Path,
 ) -> Result<(), String> {
+    // Move the OLD region trees aside first (rename, not delete): a crash
+    // mid-swap leaves the backup recoverable. Delete only after every
+    // converted entry has landed.
+    let backup = source.with_extension("vxr-backup");
+    let _ = std::fs::remove_dir_all(&backup);
+    std::fs::create_dir_all(&backup).map_err(|e| format!("create {}: {e}", backup.display()))?;
+
     let entries =
         std::fs::read_dir(source).map_err(|e| format!("read {}: {e}", source.display()))?;
     for entry in entries {
@@ -321,15 +339,12 @@ fn replace_region_directory(
         let is_region =
             name.starts_with("lod") || (name.starts_with("r.") && name.ends_with(".vxr"));
         if is_region {
-            if path.is_dir() {
-                std::fs::remove_dir_all(&path)
-                    .map_err(|e| format!("remove {}: {e}", path.display()))?;
-            } else {
-                std::fs::remove_file(&path)
-                    .map_err(|e| format!("remove {}: {e}", path.display()))?;
-            }
+            let to = backup.join(entry.file_name());
+            std::fs::rename(&path, &to)
+                .map_err(|e| format!("move {} -> {}: {e}", path.display(), to.display()))?;
         }
     }
+
     let converted_entries =
         std::fs::read_dir(converted).map_err(|e| format!("read {}: {e}", converted.display()))?;
     for entry in converted_entries {
@@ -339,6 +354,8 @@ fn replace_region_directory(
         std::fs::rename(&from, &to)
             .map_err(|e| format!("move {} -> {}: {e}", from.display(), to.display()))?;
     }
-    let _ = std::fs::remove_dir_all(converted);
+
+    // Only now is the old data safe to discard.
+    let _ = std::fs::remove_dir_all(&backup);
     Ok(())
 }

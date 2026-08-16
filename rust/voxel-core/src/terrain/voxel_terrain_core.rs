@@ -3642,10 +3642,15 @@ impl VoxelTerrainCore {
             // mechanism edit publication uses via blocks_pending_update).
             // mesh_block_size == data_block_size in the minimum supported
             // clipbox configuration (lod_clipbox docs); divide positions in
-            // voxels by the block size to get mesh-block coordinates.
+            // voxels by the block size to get mesh-block coordinates. Pad by
+            // the mesher's minimum so neighbours that sample across the
+            // boundary remesh too (no seams).
+            let padding = self.meshing_dependency.mesher().minimum_padding() as i32;
             let divisor = block_size.max(1);
-            let min = position_in_blocks * block_size;
-            let max = min + Vector3i::splat(block_size);
+            let min = (position_in_blocks * block_size) - Vector3i::splat(padding);
+            let max = (position_in_blocks * block_size)
+                + Vector3i::splat(block_size)
+                + Vector3i::splat(padding);
             let x0 = min.x.div_euclid(divisor);
             let y0 = min.y.div_euclid(divisor);
             let z0 = min.z.div_euclid(divisor);

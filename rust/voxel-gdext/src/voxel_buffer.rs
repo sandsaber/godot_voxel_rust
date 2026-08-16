@@ -198,6 +198,20 @@ fn variant_wire_to_godot(value: &voxel_core::streams::variant_wire::VariantWireV
 fn variant_wire_from_godot(
     value: &Variant,
 ) -> Option<voxel_core::streams::variant_wire::VariantWireValue> {
+    variant_wire_from_godot_depth(value, 0)
+}
+
+/// Max nesting accepted from GDScript — matches the wire decoder's
+/// DecodeLimits::max_variant_depth default.
+const VARIANT_CONVERSION_MAX_DEPTH: u32 = 64;
+
+fn variant_wire_from_godot_depth(
+    value: &Variant,
+    depth: u32,
+) -> Option<voxel_core::streams::variant_wire::VariantWireValue> {
+    if depth > VARIANT_CONVERSION_MAX_DEPTH {
+        return None; // cyclic or absurdly nested — reject whole-value
+    }
     use voxel_core::streams::variant_wire::VariantWireValue as V;
     // Scalars must map too: the canonical C++ metadata dictionary is
     // string keys with int/float/string/null values.
@@ -276,8 +290,8 @@ fn variant_wire_from_godot(
         for (key, value) in dict.iter_shared() {
             // Nested keys: wide types only; unsupported key types reject the
             // whole conversion (None) rather than half-converting.
-            let key = variant_wire_from_godot(&key)?;
-            let value = variant_wire_from_godot(&value)?;
+            let key = variant_wire_from_godot_depth(&key, depth + 1)?;
+            let value = variant_wire_from_godot_depth(&value, depth + 1)?;
             pairs.push((key, value));
         }
         return Some(V::Dictionary(pairs));
@@ -285,7 +299,7 @@ fn variant_wire_from_godot(
     if let Ok(arr) = value.try_to::<VarArray>() {
         let mut items = Vec::new();
         for item in arr.iter_shared() {
-            items.push(variant_wire_from_godot(&item)?);
+            items.push(variant_wire_from_godot_depth(&item, depth + 1)?);
         }
         return Some(V::Array(items));
     }
@@ -2266,9 +2280,10 @@ impl VoxelToolTerrainGD {
     // Pinned VoxelToolTerrain methods
     // (upstream 5828cbeb: VoxelToolTerrain.xml).
     //
-    // The Rust binding wraps a terrain by node path and does not yet expose
-    // the live terrain data; these methods are faithful no-op stubs that
-    // round-trip the GDScript contract without panicking.
+    // The Rust binding wraps a live terrain core and edits it directly
+    // (sphere/box/hemisphere/smooth/paste, per-voxel metadata, blocky
+    // random-tick). Each brush runs as one storage transaction per
+    // overlapping data block.
     // -----------------------------------------------------------------
 
     /// Operates on a hemisphere, where `flat_direction` points away from the

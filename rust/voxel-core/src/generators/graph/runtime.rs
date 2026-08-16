@@ -858,6 +858,16 @@ pub fn node_kind_from_spec(
             noise: crate::generators::simple::NoiseConfig::default(),
         },
         "OutputSdf" => NodeKind::OutputSdf { a: pa },
+        // Image2D round-trip: the pixel data is lost (only ports and a 1×1
+        // fill survive the compact spec) — same limitation as Expression's
+        // text field being carried separately via `expr`.
+        "Image2D" => NodeKind::Image2D {
+            x: pa,
+            y: pb,
+            image: std::sync::Arc::new(crate::generators::graph::image::Image2D::new_filled(
+                1, 1, value,
+            )),
+        },
         _ => return None,
     })
 }
