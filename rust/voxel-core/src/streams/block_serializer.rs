@@ -60,6 +60,10 @@ const BLOCK_TRAILING_MAGIC_SIZE: usize = 4;
 const METADATA_TYPE_EMPTY: u8 = 0;
 const METADATA_TYPE_U64: u8 = 1;
 const METADATA_TYPE_CUSTOM_BEGIN: u8 = 32;
+/// C++ `VoxelMetadataVariant` (METADATA_TYPE_VARIANT): payload is Godot's
+/// `encode_variant(..., allow_objects = false)` byte stream, written with NO
+/// length prefix (custom-type payloads are self-delimiting upstream).
+const METADATA_TYPE_VARIANT: u8 = METADATA_TYPE_CUSTOM_BEGIN;
 const METADATA_TYPE_APP_SPECIFIC_BEGIN: u8 = 40;
 const METADATA_TYPE_F64: u8 = METADATA_TYPE_APP_SPECIFIC_BEGIN;
 const METADATA_TYPE_TEXT: u8 = METADATA_TYPE_APP_SPECIFIC_BEGIN + 1;
@@ -281,6 +285,15 @@ fn store_metadata_value(
         MetadataValue::Bytes(b) => {
             w.store_8(METADATA_TYPE_BYTES);
             store_length_prefixed(w, b)?;
+        }
+        MetadataValue::Variant(value) => {
+            // Matches the C++ custom-entry layout: tag byte followed by the
+            // Variant wire payload with no length prefix. Encoded into a
+            // scratch buffer because the writer borrows `dst`.
+            w.store_8(METADATA_TYPE_VARIANT);
+            let mut payload = Vec::new();
+            crate::streams::variant_wire::encode_variant(value, &mut payload);
+            w.store_buffer(&payload);
         }
     }
     Ok(())
@@ -525,6 +538,19 @@ fn read_metadata_value(
                 .map(<[u8]>::to_vec)
                 .map(MetadataValue::Bytes)
                 .ok_or(MetadataDecodeError::UnexpectedEof)
+        }
+        METADATA_TYPE_VARIANT => {
+            // C++ VoxelMetadataVariant: a Godot-wire Variant follows the tag
+            // with no length prefix. Types this codec intentionally rejects
+            // (objects, callables, node paths, transforms…) keep the old
+            // behavior: the section is foreign and the voxel load survives.
+            match crate::streams::variant_wire::decode_variant(r, limits.max_variant_depth) {
+                Ok(value) => Ok(MetadataValue::Variant(value)),
+                Err(crate::streams::variant_wire::VariantWireError::UnsupportedType(_)) => {
+                    Err(MetadataDecodeError::ForeignEntry)
+                }
+                Err(_) => Err(MetadataDecodeError::Corrupt),
+            }
         }
         other if other >= METADATA_TYPE_CUSTOM_BEGIN => Err(MetadataDecodeError::ForeignEntry),
         _ => Err(MetadataDecodeError::Corrupt),
@@ -1312,6 +1338,76 @@ mod tests {
             dst.voxel_metadata(Vector3i::new(1, 0, 0)),
             Some(&MetadataValue::Int(2))
         );
+    }
+
+    #[test]
+    fn variant_metadata_round_trips_through_tag_32() {
+        use crate::streams::variant_wire::VariantWireValue as V;
+        let mut src = sample_buffer();
+        let dict = V::Dictionary(vec![
+            (V::Text("count".into()), V::Int(7)),
+            (V::Text("color".into()), V::Color([1.0, 0.5, 0.25, 1.0])),
+            (
+                V::Text("items".into()),
+                V::Array(vec![V::Bool(true), V::Float(-1.5)]),
+            ),
+        ]);
+        src.set_block_metadata(MetadataValue::Variant(dict.clone()));
+
+        let mut bytes = Vec::new();
+        serialize(&src, &mut bytes).unwrap();
+        let mut dst = VoxelBuffer::new(Allocator::Default);
+        deserialize(&bytes, &mut dst).unwrap();
+        assert_eq!(*dst.block_metadata(), MetadataValue::Variant(dict));
+    }
+
+    #[test]
+    fn cpp_variant_section_decodes_and_is_self_delimiting() {
+        // Hand-built C++-style section: tag 32 + Godot-wire Dictionary
+        // {"hp": 10}, followed by a second (narrow) entry — proving the
+        // unprefixed variant payload consumes exactly its own bytes.
+        use crate::streams::variant_wire::VariantWireValue as V;
+        let mut variant_payload = Vec::new();
+        crate::streams::variant_wire::encode_variant(
+            &V::Dictionary(vec![(V::Text("hp".into()), V::Int(10))]),
+            &mut variant_payload,
+        );
+        let mut section = vec![32u8]; // METADATA_TYPE_VARIANT block entry
+        section.extend_from_slice(&variant_payload);
+        // Second entry: voxel (0,0,0) carries a u64 via the C++ tag.
+        section.extend_from_slice(&[0, 0, 0, 0, 0, 0]); // position
+        section.push(1); // TYPE_U64
+        section.extend_from_slice(&5u64.to_le_bytes());
+
+        let mut bytes = Vec::new();
+        serialize(&sample_buffer(), &mut bytes).unwrap();
+        append_metadata_section(&mut bytes, &section);
+
+        let mut dst = VoxelBuffer::new(Allocator::Default);
+        deserialize(&bytes, &mut dst).unwrap();
+        assert_eq!(
+            *dst.block_metadata(),
+            MetadataValue::Variant(V::Dictionary(vec![(V::Text("hp".into()), V::Int(10))]))
+        );
+        assert_eq!(
+            dst.voxel_metadata(Vector3i::zero()),
+            Some(&MetadataValue::Int(5))
+        );
+    }
+
+    #[test]
+    fn variant_object_entries_remain_foreign() {
+        // Object-as-id flag in the wire header: still skipped (foreign),
+        // never decoded into our representation.
+        let mut section = vec![32u8];
+        section.extend_from_slice(&((24u32) | (1u32 << 16)).to_le_bytes());
+        section.extend_from_slice(&99u64.to_le_bytes());
+        let mut bytes = Vec::new();
+        serialize(&sample_buffer(), &mut bytes).unwrap();
+        append_metadata_section(&mut bytes, &section);
+
+        let mut dst = VoxelBuffer::new(Allocator::Default);
+        assert_eq!(deserialize(&bytes, &mut dst), Err(Error::MetadataSkipped));
     }
 
     #[test]

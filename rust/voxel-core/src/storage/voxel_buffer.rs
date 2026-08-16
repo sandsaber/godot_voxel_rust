@@ -65,6 +65,11 @@ pub enum MetadataValue {
     Text(String),
     /// Opaque byte payload.
     Bytes(Vec<u8>),
+    /// Wide Godot Variant payload (C++ `VoxelMetadataVariant`, custom tag
+    /// 32): dictionaries, arrays, vectors, colors, packed arrays. Encoded
+    /// in Godot's Variant wire format — see
+    /// [`crate::streams::variant_wire`].
+    Variant(crate::streams::variant_wire::VariantWireValue),
 }
 
 impl MetadataValue {

@@ -167,6 +167,32 @@ fn main() {
     );
     write_seed("region_file", "metadata-entry-flood.bin", &flooded_seed);
 
+    // Wide Variant section: a Godot-wire Dictionary under tag 32 exercises
+    // the variant decoder through the region/block fuzz entry points.
+    let mut variant_section = vec![0u8]; // TYPE_EMPTY block entry
+    let mut variant_payload = Vec::new();
+    voxel_core::streams::variant_wire::encode_variant(
+        &voxel_core::streams::variant_wire::VariantWireValue::Dictionary(vec![
+            (
+                voxel_core::streams::variant_wire::VariantWireValue::Text("k".into()),
+                voxel_core::streams::variant_wire::VariantWireValue::Array(vec![
+                    voxel_core::streams::variant_wire::VariantWireValue::Int(1),
+                    voxel_core::streams::variant_wire::VariantWireValue::Bool(true),
+                ]),
+            ),
+        ]),
+        &mut variant_payload,
+    );
+    variant_section.push(32); // METADATA_TYPE_VARIANT voxel entry
+    variant_section.extend_from_slice(&[0, 0, 0, 0, 0, 0]); // position (0,0,0)
+    variant_section.extend_from_slice(&variant_payload);
+    let variant_seed = hostile(&variant_section);
+    let mut variant_check = VoxelBuffer::with_size(Vector3i::zero());
+    block_serializer::decompress_and_deserialize(&variant_seed, &mut variant_check)
+        .expect("variant seed must load voxels and decode metadata");
+    write_seed("block_serializer", "metadata-variant.bin", &variant_seed);
+    write_seed("region_file", "metadata-variant.bin", &variant_seed);
+
     // Text entry whose declared length (0x00ffffff) trips the string budget
     // before any bytes are consumed.
     let mut budget = vec![0u8]; // TYPE_EMPTY block entry

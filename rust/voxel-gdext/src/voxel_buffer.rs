@@ -87,7 +87,12 @@ pub(crate) fn metadata_from_variant(value: &Variant) -> Result<MetadataValue, &'
     if let Ok(v) = value.try_to::<PackedByteArray>() {
         return Ok(MetadataValue::Bytes(v.as_slice().to_vec()));
     }
-    Err("metadata must be nil, int, float, String, or PackedByteArray")
+    // Wide (R7) types: bool, vectors, rect/plane/quaternion/AABB/color,
+    // Dictionary, Array, and packed arrays map onto the Variant arm.
+    if let Some(wide) = variant_wire_from_godot(value) {
+        return Ok(MetadataValue::Variant(wide));
+    }
+    Err("metadata must be nil, int, float, String, PackedByteArray, bool, Vector2/3/4, Rect2, Plane, Quaternion, AABB, Color, Dictionary, Array, or a packed array")
 }
 
 pub(crate) fn metadata_to_variant(value: &MetadataValue) -> Variant {
@@ -97,7 +102,218 @@ pub(crate) fn metadata_to_variant(value: &MetadataValue) -> Variant {
         MetadataValue::Float(v) => v.to_variant(),
         MetadataValue::Text(v) => GString::from(v.as_str()).to_variant(),
         MetadataValue::Bytes(v) => PackedByteArray::from(v.as_slice()).to_variant(),
+        MetadataValue::Variant(v) => variant_wire_to_godot(v),
     }
+}
+
+fn variant_wire_to_godot(value: &voxel_core::streams::variant_wire::VariantWireValue) -> Variant {
+    use godot::builtin::{Aabb as GAabb, Plane as GPlane, Rect2};
+    use voxel_core::streams::variant_wire::VariantWireValue as V;
+    match value {
+        V::Nil => Variant::nil(),
+        V::Bool(b) => b.to_variant(),
+        V::Int(i) => i.to_variant(),
+        V::Float(f) => f.to_variant(),
+        V::Text(s) => GString::from(s.as_str()).to_variant(),
+        V::Vector2(v) => godot::builtin::Vector2::new(v[0] as f32, v[1] as f32).to_variant(),
+        V::Vector2i(v) => godot::builtin::Vector2i::new(v[0], v[1]).to_variant(),
+        V::Rect2(v) => {
+            Rect2::from_components(v[0] as f32, v[1] as f32, v[2] as f32, v[3] as f32).to_variant()
+        }
+        V::Rect2i(v) => {
+            godot::builtin::Rect2i::from_components(v[0], v[1], v[2], v[3]).to_variant()
+        }
+        V::Vector3(v) => {
+            godot::builtin::Vector3::new(v[0] as f32, v[1] as f32, v[2] as f32).to_variant()
+        }
+        V::Vector3i(v) => godot::builtin::Vector3i::new(v[0], v[1], v[2]).to_variant(),
+        V::Vector4(v) => {
+            godot::builtin::Vector4::new(v[0] as f32, v[1] as f32, v[2] as f32, v[3] as f32)
+                .to_variant()
+        }
+        V::Vector4i(v) => godot::builtin::Vector4i::new(v[0], v[1], v[2], v[3]).to_variant(),
+        V::Plane(v) => GPlane::new(
+            godot::builtin::Vector3::new(v[0] as f32, v[1] as f32, v[2] as f32),
+            v[3] as f32,
+        )
+        .to_variant(),
+        V::Quaternion(v) => {
+            godot::builtin::Quaternion::new(v[0] as f32, v[1] as f32, v[2] as f32, v[3] as f32)
+                .to_variant()
+        }
+        V::Aabb(v) => GAabb::new(
+            godot::builtin::Vector3::new(v[0] as f32, v[1] as f32, v[2] as f32),
+            godot::builtin::Vector3::new(v[3] as f32, v[4] as f32, v[5] as f32),
+        )
+        .to_variant(),
+        V::Color(v) => godot::builtin::Color::from_rgba(v[0], v[1], v[2], v[3]).to_variant(),
+        V::Array(items) => {
+            let mut arr = VarArray::new();
+            for item in items {
+                arr.push(&variant_wire_to_godot(item));
+            }
+            arr.to_variant()
+        }
+        V::Dictionary(pairs) => {
+            let mut dict = VarDictionary::new();
+            for (key, value) in pairs {
+                let key = variant_wire_to_godot(key);
+                let value = variant_wire_to_godot(value);
+                dict.set(&key, &value);
+            }
+            dict.to_variant()
+        }
+        V::ByteArray(bytes) => PackedByteArray::from(bytes.as_slice()).to_variant(),
+        V::Int32Array(items) => PackedInt32Array::from(items.as_slice()).to_variant(),
+        V::Int64Array(items) => PackedInt64Array::from(items.as_slice()).to_variant(),
+        V::Float32Array(items) => PackedFloat32Array::from(items.as_slice()).to_variant(),
+        V::Float64Array(items) => PackedFloat64Array::from(items.as_slice()).to_variant(),
+        V::StringArray(items) => {
+            PackedStringArray::from_iter(items.iter().map(|s| GString::from(s.as_str())))
+                .to_variant()
+        }
+        V::Vector2Array(items) => PackedVector2Array::from_iter(
+            items
+                .iter()
+                .map(|v| godot::builtin::Vector2::new(v[0] as f32, v[1] as f32)),
+        )
+        .to_variant(),
+        V::Vector3Array(items) => PackedVector3Array::from_iter(
+            items
+                .iter()
+                .map(|v| godot::builtin::Vector3::new(v[0] as f32, v[1] as f32, v[2] as f32)),
+        )
+        .to_variant(),
+        V::ColorArray(items) => PackedColorArray::from_iter(
+            items
+                .iter()
+                .map(|c| godot::builtin::Color::from_rgba(c[0], c[1], c[2], c[3])),
+        )
+        .to_variant(),
+    }
+}
+
+/// Convert a Godot Variant into the wide wire representation. Returns None
+/// for types outside the supported metadata subset.
+fn variant_wire_from_godot(
+    value: &Variant,
+) -> Option<voxel_core::streams::variant_wire::VariantWireValue> {
+    use voxel_core::streams::variant_wire::VariantWireValue as V;
+    if let Ok(b) = value.try_to::<bool>() {
+        return Some(V::Bool(b));
+    }
+    if let Ok(v) = value.try_to::<godot::builtin::Vector2>() {
+        return Some(V::Vector2([v.x as f64, v.y as f64]));
+    }
+    if let Ok(v) = value.try_to::<godot::builtin::Vector2i>() {
+        return Some(V::Vector2i([v.x, v.y]));
+    }
+    if let Ok(v) = value.try_to::<godot::builtin::Rect2>() {
+        return Some(V::Rect2([
+            v.position.x as f64,
+            v.position.y as f64,
+            v.size.x as f64,
+            v.size.y as f64,
+        ]));
+    }
+    if let Ok(v) = value.try_to::<godot::builtin::Rect2i>() {
+        return Some(V::Rect2i([v.position.x, v.position.y, v.size.x, v.size.y]));
+    }
+    if let Ok(v) = value.try_to::<godot::builtin::Vector3>() {
+        return Some(V::Vector3([v.x as f64, v.y as f64, v.z as f64]));
+    }
+    if let Ok(v) = value.try_to::<godot::builtin::Vector3i>() {
+        return Some(V::Vector3i([v.x, v.y, v.z]));
+    }
+    if let Ok(v) = value.try_to::<godot::builtin::Vector4>() {
+        return Some(V::Vector4([v.x as f64, v.y as f64, v.z as f64, v.w as f64]));
+    }
+    if let Ok(v) = value.try_to::<godot::builtin::Vector4i>() {
+        return Some(V::Vector4i([v.x, v.y, v.z, v.w]));
+    }
+    if let Ok(v) = value.try_to::<godot::builtin::Plane>() {
+        return Some(V::Plane([
+            v.normal.x as f64,
+            v.normal.y as f64,
+            v.normal.z as f64,
+            v.d as f64,
+        ]));
+    }
+    if let Ok(v) = value.try_to::<godot::builtin::Quaternion>() {
+        return Some(V::Quaternion([
+            v.x as f64, v.y as f64, v.z as f64, v.w as f64,
+        ]));
+    }
+    if let Ok(v) = value.try_to::<godot::builtin::Aabb>() {
+        return Some(V::Aabb([
+            v.position.x as f64,
+            v.position.y as f64,
+            v.position.z as f64,
+            v.size.x as f64,
+            v.size.y as f64,
+            v.size.z as f64,
+        ]));
+    }
+    if let Ok(v) = value.try_to::<godot::builtin::Color>() {
+        return Some(V::Color([v.r, v.g, v.b, v.a]));
+    }
+    if let Ok(dict) = value.try_to::<VarDictionary>() {
+        let mut pairs = Vec::new();
+        for (key, value) in dict.iter_shared() {
+            // Nested keys: wide types only; unsupported key types reject the
+            // whole conversion (None) rather than half-converting.
+            let key = variant_wire_from_godot(&key)?;
+            let value = variant_wire_from_godot(&value)?;
+            pairs.push((key, value));
+        }
+        return Some(V::Dictionary(pairs));
+    }
+    if let Ok(arr) = value.try_to::<VarArray>() {
+        let mut items = Vec::new();
+        for item in arr.iter_shared() {
+            items.push(variant_wire_from_godot(&item)?);
+        }
+        return Some(V::Array(items));
+    }
+    if let Ok(v) = value.try_to::<PackedInt32Array>() {
+        return Some(V::Int32Array(v.as_slice().to_vec()));
+    }
+    if let Ok(v) = value.try_to::<PackedInt64Array>() {
+        return Some(V::Int64Array(v.as_slice().to_vec()));
+    }
+    if let Ok(v) = value.try_to::<PackedFloat32Array>() {
+        return Some(V::Float32Array(v.as_slice().to_vec()));
+    }
+    if let Ok(v) = value.try_to::<PackedFloat64Array>() {
+        return Some(V::Float64Array(v.as_slice().to_vec()));
+    }
+    if let Ok(v) = value.try_to::<PackedStringArray>() {
+        return Some(V::StringArray(
+            v.as_slice().iter().map(|s| s.to_string()).collect(),
+        ));
+    }
+    if let Ok(v) = value.try_to::<PackedVector2Array>() {
+        return Some(V::Vector2Array(
+            v.as_slice()
+                .iter()
+                .map(|v| [v.x as f64, v.y as f64])
+                .collect(),
+        ));
+    }
+    if let Ok(v) = value.try_to::<PackedVector3Array>() {
+        return Some(V::Vector3Array(
+            v.as_slice()
+                .iter()
+                .map(|v| [v.x as f64, v.y as f64, v.z as f64])
+                .collect(),
+        ));
+    }
+    if let Ok(v) = value.try_to::<PackedColorArray>() {
+        return Some(V::ColorArray(
+            v.as_slice().iter().map(|c| [c.r, c.g, c.b, c.a]).collect(),
+        ));
+    }
+    None
 }
 
 pub(crate) fn validate_finite_f64(value: f64) -> Result<f32, &'static str> {

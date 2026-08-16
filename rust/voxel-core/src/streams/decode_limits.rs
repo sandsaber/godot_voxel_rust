@@ -9,6 +9,9 @@ pub struct DecodeLimits {
     pub max_vox_total_voxels: u64,
     pub max_vox_nodes: usize,
     pub max_string_bytes: usize,
+    /// Maximum nesting depth of a decoded Godot Variant (R7 wide). Blocks
+    /// recursion bombs; 64 comfortably exceeds any real metadata payload.
+    pub max_variant_depth: u32,
 }
 
 impl Default for DecodeLimits {
@@ -21,6 +24,7 @@ impl Default for DecodeLimits {
             max_vox_total_voxels: 64 * 1024 * 1024,
             max_vox_nodes: 65_536,
             max_string_bytes: 4096,
+            max_variant_depth: 64,
         }
     }
 }
@@ -35,6 +39,7 @@ impl DecodeLimits {
             max_vox_total_voxels: u64::MAX,
             max_vox_nodes: usize::MAX,
             max_string_bytes: usize::MAX,
+            max_variant_depth: u32::MAX,
         }
     }
 

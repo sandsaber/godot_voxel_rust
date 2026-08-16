@@ -38,6 +38,7 @@ pub mod region;
 pub mod save_block_data_task;
 pub mod stream_cache;
 pub mod stream_memory;
+pub mod variant_wire;
 pub mod voxel_stream;
 
 pub use block_data_output::{BlockDataOutput, BlockDataOutputKind};
