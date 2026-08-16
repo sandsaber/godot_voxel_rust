@@ -23,6 +23,7 @@ That file is the product queue; this page is the parity matrix.
 | Graph generator | ✅ runtime | AST interpreter with Expression/Image2D. Range analysis still limited. |
 | Region files (`.vxr` + `meta.vxrm`) | ✅ | Channel depths locked on first save. `convert_files` rewrites region/sector/block size. LRU eviction and cross-process file locking remain open. |
 | Terrain paging (`VoxelTerrainCore`) | ✅ | Fixed-LOD and Variable-LOD clipbox planner, save-on-unload, viewer pairing, debug snapshot. |
+| Multiplayer replication (R3) | 🟡 | Boundary designed ([multiplayer.md](multiplayer.md)); interest index ported (`terrain::area_finder`, spatial hash + deterministic queries + `box_subtraction`). No transport. |
 | Edition (sphere/box/hemisphere/smooth/paste, DDA raycast, random-tick) | ✅ core | Tags-aware random-tick when a baked library is present. `MetadataValue` persists through save/load (narrow R7). |
 | Instancing | 🟡 | Scatter math + MultiMesh + per-mesh-block streaming. Scene-item instancer (real nodes) is still open. |
 | Modifiers | 🟡 | Sphere modifier real; mesh modifier is a box stand-in; not integrated into streaming. |
@@ -53,7 +54,7 @@ Tracked in ROADMAP; this is the honest size, not a new queue.
 | Item | Size | Notes |
 |---|---|---|
 | **R7 wide** — Godot Variant codec + v2/v3 migration | Separate project | Would pull Variant into core or need a thick gdext encoder. |
-| **R3** — `VoxelAreaFinder` + replication boundary | Design first, then several stages | Network product. Out of the current PR queue. |
+| **R3 transport** — interest protocol, peers, RPCs | Several stages | Boundary + `VoxelAreaFinder` done; needs an explicit go-ahead and a gdext/game-side owner. |
 | **R5 leftover** — scene-item instancer | Medium | MultiMesh path already streams. |
 | Graph editor polish, extra Image2D extras, `VoxelMeshSDF` bake | Small–medium each | Not blocking generate→mesh→page→save. |
 

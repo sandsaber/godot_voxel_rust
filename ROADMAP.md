@@ -6,7 +6,7 @@ agreed product slice. Detail and the parity matrix live in
 [doc/source/status.md](doc/source/status.md).
 
 GPU / SQLite / multipass / Rapier / full Godot Variant persistence / a
-multiplayer protocol are **not** next-PR work. They need an explicit go-ahead.
+multiplayer transport are **not** next-PR work. They need an explicit go-ahead.
 
 ## R1 — Blocky terrain end-to-end ✅
 
@@ -46,15 +46,21 @@ Production clipbox planner is live (`VoxelTerrainCore::new_variable_lod` +
 Leftover: GPU/normalmap inspector fields are stored stubs (deferred by
 design with the GPU path).
 
-## R3 — Multiplayer / areas ⬜
+## R3 — Multiplayer / areas 🟡
 
-**Needs a design pass before any code.** This is a network product, not a
-missing `#[func]`. Out of the current PR queue.
+The design pass is done: [doc/source/multiplayer.md](doc/source/multiplayer.md)
+is the replication-boundary decision record (server-authoritative; edits as
+deltas ordered by `block_revision`, edited blocks as v4 serializer bytes;
+LOD0 only; generator blocks never replicated). The interest index is ported
+as pure Rust. What remains is the network product itself.
 
-- [ ] Write the replication boundary: what is authoritative (edits vs whole
+- [x] Write the replication boundary: what is authoritative (edits vs whole
       blocks), how it meets `try_edit_*`, dirty flags, LOD, and stream save
-- [ ] Port `VoxelAreaFinder` (who cares about which box; what to load/send)
-- [ ] Only then implement a transport / interest protocol
+- [x] Port `VoxelAreaFinder` (who cares about which box; what to load/send) —
+      `voxel-core::terrain::area_finder` (spatial hash + deterministic
+      queries + `box_subtraction` for entered/exited interest boxes)
+- [ ] Only then implement a transport / interest protocol. Not started; needs
+      an explicit go-ahead and a peer/RPC owner (gdext or game-side crate).
 
 `VoxelAreaFinder` alone is a medium port. The boundary decision is the large
 part. Do not start this "on the side" of serializer work.
@@ -127,5 +133,6 @@ matching upstream.
 
 GPU compute path / detail rendering / shaders, SQLite streams, multipass
 generator, Rapier physics — intentionally out of scope to keep `voxel-core`
-pure-Rust and cross-compilable. Full Variant persistence and multiplayer
-(R3 / wide R7) sit next to these until designed.
+pure-Rust and cross-compilable. Full Variant persistence (wide R7) and the
+R3 transport sit next to these until given a go-ahead; the R3 design and
+interest index themselves are done.
