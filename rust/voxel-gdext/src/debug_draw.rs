@@ -252,6 +252,14 @@ fn build_line_mesh(boxes: &[DebugBox]) -> Option<Gd<ArrayMesh>> {
         true,
     );
     material.set_flag(godot::classes::base_material_3d::Flags::DISABLE_FOG, true);
+    // Overlay edges sit exactly on block-boundary planes where terrain
+    // triangles are coplanar — classic z-fighting. Debug wireframes draw
+    // through geometry instead.
+    material.set_flag(
+        godot::classes::base_material_3d::Flags::DISABLE_DEPTH_TEST,
+        true,
+    );
+    material.set_render_priority(1);
     mesh.surface_set_material(0, &material);
     Some(mesh)
 }

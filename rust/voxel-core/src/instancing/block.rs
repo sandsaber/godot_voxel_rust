@@ -95,7 +95,11 @@ fn block_key(position: Vector3i, lod_index: u8) -> (i32, i32, i32, u8) {
     (position.x, position.y, position.z, lod_index)
 }
 
-/// Surface voxels: solid with air immediately below, in world space.
+/// Surface points: air cells sitting directly on solid ground, in world
+/// space. The point lands exactly on the ground plane (the air cell's base)
+/// with a +Y normal. Cliffs (vertical faces) yield no points and slopes
+/// lose a cos(theta) factor versus true surface area — a known bias of the
+/// voxel-scan approach (upstream samples mesh triangles instead).
 pub fn extract_surface_points(
     buffer: &VoxelBuffer,
     origin: Vector3f,
@@ -115,9 +119,14 @@ pub fn extract_surface_points(
     for z in 0..size.z {
         for y in 1..size.y {
             for x in 0..size.x {
-                let solid = buffer.get_voxel(x, y, z, type_channel);
-                let below = buffer.get_voxel(x, y - 1, z, type_channel);
-                if solid == 0 || below != 0 {
+                let ground = buffer.get_voxel(x, y - 1, z, type_channel);
+                let here = buffer.get_voxel(x, y, z, type_channel);
+                // A surface cell is air resting ON solid ground. The old
+                // `solid-with-air-below` predicate matched floating-voxel
+                // undersides (cave ceilings) and never matched natural
+                // terrain. y starts at 1: a ground plane exactly on the
+                // block's bottom boundary belongs to the block below.
+                if here != 0 || ground == 0 {
                     continue;
                 }
                 positions.push(Vector3f::new(
@@ -166,15 +175,31 @@ mod tests {
     use crate::storage::VoxelBuffer;
 
     #[test]
-    fn extract_surface_points_finds_solid_above_air() {
-        let mut buffer = VoxelBuffer::with_size(Vector3i::new(2, 3, 1));
-        buffer.set_voxel(1, 0, 1, 0, ChannelId::Type.index());
-        buffer.set_voxel(1, 1, 1, 0, ChannelId::Type.index());
+    fn extract_surface_points_finds_air_resting_on_ground() {
+        // Ground column solid at y=0..2, air at y=3: one surface point on
+        // the ground plane (the air cell's base), +Y normal.
+        let mut buffer = VoxelBuffer::with_size(Vector3i::new(2, 4, 1));
+        for y in 0..3 {
+            buffer.set_voxel(1, 0, y, 0, ChannelId::Type.index());
+        }
         let (positions, normals) =
-            extract_surface_points(&buffer, Vector3f::new(16.0, 0.0, 0.0), 0);
+            extract_surface_points(&buffer, Vector3f::new(16.0, 10.0, 0.0), 0);
+        assert_eq!(positions.len(), 1);
+        assert_eq!(positions[0], Vector3f::new(16.5, 13.0, 0.5));
+        assert_eq!(normals, vec![Vector3f::new(0.0, 1.0, 0.0)]);
+
+        // Floating voxels scatter on their TOP (air resting on solid),
+        // never on their underside: a pair at y=2 yields points at y=3 only.
+        // The old, inverted predicate matched the undersides instead.
+        let mut floating = VoxelBuffer::with_size(Vector3i::new(2, 4, 1));
+        floating.set_voxel(1, 0, 2, 0, ChannelId::Type.index());
+        floating.set_voxel(1, 1, 2, 0, ChannelId::Type.index());
+        let (positions, _) = extract_surface_points(&floating, Vector3f::zero(), 0);
         assert_eq!(positions.len(), 2);
-        assert_eq!(positions[0].x, 16.5);
-        assert_eq!(normals.len(), 2);
+        assert!(
+            positions.iter().all(|p| p.y == 3.0),
+            "points must sit on top of the floating pair, got {positions:?}"
+        );
     }
 
     #[test]

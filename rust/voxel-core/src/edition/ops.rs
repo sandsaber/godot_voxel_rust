@@ -538,6 +538,7 @@ pub fn run_blocky_random_tick<F: FnMut(Vector3i)>(
     tickable_id: u64,
     channel: usize,
     batch_count: usize,
+    seed: u32,
     callback: F,
 ) {
     let mut callback = callback;
@@ -562,15 +563,14 @@ pub fn run_blocky_random_tick<F: FnMut(Vector3i)>(
         return;
     }
 
-    // Simple deterministic iteration (not truly random — mirrors the "tick"
-    // semantic without needing a PRNG dependency).
-    let step = (candidates.len() / batch_count.max(1)).max(1);
-    let mut invoked = 0usize;
-    for (i, &pos) in candidates.iter().enumerate() {
-        if i % step == 0 && invoked < batch_count {
-            callback(pos);
-            invoked += 1;
-        }
+    // Draw uniformly random candidates per call (upstream semantics: a
+    // fixed-stride subset would re-tick the same positions forever and
+    // permanently starve the rest). Deterministic under a fixed seed.
+    let mut rng = crate::instancing::scatter::SimpleRng::new(seed);
+    let draws = batch_count.min(candidates.len());
+    for _ in 0..draws {
+        let index = (rng.next_u32() as usize) % candidates.len();
+        callback(candidates[index]);
     }
 }
 

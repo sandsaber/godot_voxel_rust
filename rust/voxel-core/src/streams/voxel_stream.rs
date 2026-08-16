@@ -40,7 +40,7 @@ pub enum SaveMode {
 pub enum VoxelStreamError {
     InvalidLod { lod: u8, max_lod: u8 },
     InvalidBlockPosition { position: Vector3i },
-    BlockFormatMismatch,
+    BlockFormatMismatch(String),
     UnsupportedOperation { operation: &'static str },
     Io(String),
     CorruptData(String),
@@ -55,7 +55,7 @@ impl std::fmt::Display for VoxelStreamError {
             Self::InvalidBlockPosition { position } => {
                 write!(f, "invalid block position {position:?}")
             }
-            Self::BlockFormatMismatch => write!(f, "block format mismatch"),
+            Self::BlockFormatMismatch(detail) => write!(f, "block format mismatch: {detail}"),
             Self::UnsupportedOperation { operation } => {
                 write!(f, "unsupported stream operation: {operation}")
             }

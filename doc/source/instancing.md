@@ -15,10 +15,17 @@ The instancer scatters items (trees, rocks, grass) over voxel surfaces.
 
 A `Node3D` with its own internal item library and scatter configuration.
 
+!!! warning "State lifetime"
+    Items, meshes, scenes, and the seed are runtime-only: they do **not**
+    survive scene save/reload and have no inspector surface (only
+    `density_multiplier` is a serialized property). Build the library in
+    `_ready` from script. A serialized `VoxelInstanceLibrary` resource is the
+    planned upstream-parity path.
+
 | Member | Kind | Notes |
 |---|---|---|
 | `density_multiplier` | property | Global multiplier applied to every item's density. Default `1.0`. |
-| `add_item(name, density, min_scale, max_scale)` | method | Register a scatter item, returns its index. |
+| `add_item(name, density, min_scale, max_scale)` | method | Register a scatter item, returns its index. `density` is a probability per surface cell in `0..=1` — upstream's per-square-meter density is a different unit; values above `1` are clamped with a warning. |
 | `get_item_count()` | method | Number of registered items. |
 | `set_seed(seed)` | method | Seed for the scatter random generator. |
 | `scatter_from_buffer(buffer)` | method | Extracts surface points from a `VoxelBuffer`'s Type channel (channel 0) and runs every item's scatter generator over them. Returns the total instance count. |
@@ -30,8 +37,10 @@ A `Node3D` with its own internal item library and scatter configuration.
 | `get_streamed_block_count()` | method | Resident streamed instance blocks. |
 | `get_streamed_instance_count()` | method | Instances across streamed blocks. |
 
-Surface extraction reads the buffer's Type channel: a voxel is a surface point
-when it is solid (`!= 0`) and the voxel directly below it is air (`== 0`).
+Surface extraction reads the buffer's Type channel: a surface point is an
+air cell (`== 0`) resting directly on solid ground (`!= 0` below it) — the
+point lands on the ground plane with a +Y normal. Cliffs yield no points and
+slopes under-sample by cos(theta); upstream samples mesh triangles instead.
 This also applies to the streaming path: **SDF-only terrain (the default
 Waves/Transvoxel setup) and flat-filled slabs produce zero instances** —
 there is no Type-channel geometry with air underneath. Use a generator that

@@ -387,7 +387,9 @@ impl RegionFilesStream {
                 if state.meta.matches_buffer(buffer) {
                     return Ok(state.meta.clone());
                 }
-                return Err(VoxelStreamError::BlockFormatMismatch);
+                return Err(VoxelStreamError::BlockFormatMismatch(
+                    "locked forest meta does not match the buffer".to_string(),
+                ));
             }
             let mut candidate = state.meta.clone();
             candidate.block_size_po2 = self.block_size_po2;
@@ -395,7 +397,11 @@ impl RegionFilesStream {
             candidate.sector_size = self.sector_size;
             candidate.capture_channel_depths(buffer);
             if !candidate.matches_buffer(buffer) {
-                return Err(VoxelStreamError::BlockFormatMismatch);
+                return Err(VoxelStreamError::BlockFormatMismatch(format!(
+                    "stream block size {} does not match the buffer {:?}",
+                    1 << candidate.block_size_po2,
+                    buffer.size()
+                )));
             }
             candidate
         };
@@ -418,7 +424,9 @@ impl RegionFilesStream {
                 .meta
                 .save(&self.directory)
                 .map_err(|error| VoxelStreamError::Io(error.to_string()))?;
-            return Err(VoxelStreamError::BlockFormatMismatch);
+            return Err(VoxelStreamError::BlockFormatMismatch(
+                "lost the first-save race to a different format".to_string(),
+            ));
         }
         Ok(state.meta.clone())
     }
@@ -707,11 +715,13 @@ fn format_for_block(
         || size.x != size.z
         || !u32::try_from(size.x).is_ok_and(|axis_size| axis_size.is_power_of_two())
     {
-        return Err(VoxelStreamError::BlockFormatMismatch);
+        return Err(VoxelStreamError::BlockFormatMismatch(
+            "block size must be cubic and a power of two".to_string(),
+        ));
     }
 
-    let block_size_po2 =
-        u8::try_from(size.x.ilog2()).map_err(|_| VoxelStreamError::BlockFormatMismatch)?;
+    let block_size_po2 = u8::try_from(size.x.ilog2())
+        .map_err(|_| VoxelStreamError::BlockFormatMismatch("block size po2 over u8".to_string()))?;
     let mut format = RegionFormat {
         block_size_po2,
         region_size: Vector3i::splat(region_size),
@@ -721,15 +731,17 @@ fn format_for_block(
     for channel_index in 0..MAX_CHANNELS {
         format.channel_depths[channel_index] = block.channel_depth(channel_index);
     }
-    format
-        .validate_result()
-        .map_err(|_| VoxelStreamError::BlockFormatMismatch)?;
+    format.validate_result().map_err(|_| {
+        VoxelStreamError::BlockFormatMismatch("region format rejected the settings".to_string())
+    })?;
     Ok(format)
 }
 
 fn map_region_error(error: RegionError, path: &Path) -> VoxelStreamError {
     match error {
-        RegionError::BlockFormatMismatch => VoxelStreamError::BlockFormatMismatch,
+        RegionError::BlockFormatMismatch => VoxelStreamError::BlockFormatMismatch(
+            "region file header rejected the block".to_string(),
+        ),
         RegionError::InvalidBlockPosition => VoxelStreamError::InvalidBlockPosition {
             position: Vector3i::zero(),
         },
@@ -959,10 +971,10 @@ mod tests {
         let stream = RegionFilesStream::with_block_size(dir.path().to_path_buf(), 16, 256, 4);
         let wrong = VoxelBuffer::with_size(Vector3i::splat(32));
 
-        assert_eq!(
+        assert!(matches!(
             save(&stream, Vector3i::zero(), 0, &wrong),
-            Err(VoxelStreamError::BlockFormatMismatch)
-        );
+            Err(VoxelStreamError::BlockFormatMismatch(_))
+        ));
         assert!(
             !dir.path().join(META_FILE_NAME).is_file(),
             "a rejected first save must not lock the forest format"
@@ -1006,10 +1018,10 @@ mod tests {
 
         let mut other = sample_block(4);
         other.set_channel_depth(ChannelId::Sdf.index(), crate::storage::ChannelDepth::Bit8);
-        assert_eq!(
+        assert!(matches!(
             save(&reopened, Vector3i::new(1, 0, 0), 0, &other),
-            Err(VoxelStreamError::BlockFormatMismatch)
-        );
+            Err(VoxelStreamError::BlockFormatMismatch(_))
+        ));
     }
 
     #[test]

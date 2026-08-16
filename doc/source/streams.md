@@ -49,6 +49,15 @@ print(mem.get_block_count())
 Disk persistence using region files, one file per region of
 `(1 << region_size_po2)` blocks per axis.
 
+!!! warning "C++ interop"
+    This port writes `<dir>/lod{N}/r.*.vxr` while upstream godot_voxel writes
+    `<dir>/regions/lod{N}/...`; forests are not interchangeable. The terrain
+    also locks the SDF channel to 32-bit depth on first save, while upstream
+    defaults to 16-bit — extending a C++-written forest with this port fails
+    with a block format mismatch. Reading upstream saves needs an import
+    path (`convert_files` on a copied directory can rewrite sizes, not the
+    directory layout).
+
 | Property | Type | Default | Notes |
 |---|---|---|---|
 | `directory` | string | `"user://voxel_data"` | Folder where region files are stored. Created on first save. Use `user://` for runtime saves — `res://` is read-only in exported games. |

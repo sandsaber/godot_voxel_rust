@@ -1216,7 +1216,9 @@ fn try_clone_stream_error(
                 position: *position,
             })
         }
-        VoxelStreamError::BlockFormatMismatch => Ok(VoxelStreamError::BlockFormatMismatch),
+        VoxelStreamError::BlockFormatMismatch(detail) => {
+            Ok(VoxelStreamError::BlockFormatMismatch(detail.clone()))
+        }
         VoxelStreamError::UnsupportedOperation { operation } => {
             Ok(VoxelStreamError::UnsupportedOperation { operation })
         }

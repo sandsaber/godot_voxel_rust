@@ -39,6 +39,11 @@ Rolling wave terrain.
 
 ## VoxelGeneratorNoise
 
+!!! note
+    The `noise` resource property is stored but not consumed: generation is
+    driven by the class's own `seed` and `frequency` properties. Configure
+    those directly.
+
 3D noise terrain (caves and overhangs) over a vertical slab.
 
 | Property | Type | Default | Notes |

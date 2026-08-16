@@ -844,7 +844,7 @@ impl VoxelBufferGD {
     /// with `(position, metadata)`.
     #[func]
     fn for_each_voxel_metadata_in_area(
-        &mut self,
+        &self,
         min: godot::builtin::Vector3i,
         max: godot::builtin::Vector3i,
         callback: Callable,
@@ -865,7 +865,7 @@ impl VoxelBufferGD {
 
     /// Iterate every voxel metadata entry in the whole buffer.
     #[func]
-    fn for_each_voxel_metadata(&mut self, callback: Callable) {
+    fn for_each_voxel_metadata(&self, callback: Callable) {
         if !callback.is_valid() {
             godot_error!("VoxelBuffer.for_each_voxel_metadata: callback is invalid");
             return;
@@ -1160,6 +1160,11 @@ pub struct VoxelInstancerGD {
     density_multiplier: f32,
     /// Whether the no-surface-points warning has fired (one-shot).
     warned_no_surface: bool,
+    /// Last parent `mesh_revision` seen. When it advances, terrain edits
+    /// remeshed existing blocks (same keys), so every instance block is
+    /// dropped and rescattered — otherwise instances would float over dug
+    /// ground or stay buried under raised terrain.
+    mesh_revision_seen: i64,
 }
 
 /// A node spawned for one streamed instance block: one `MultiMeshInstance3D`
@@ -1185,6 +1190,7 @@ impl INode3D for VoxelInstancerGD {
             streamed_nodes: HashMap::new(),
             density_multiplier: 1.0,
             warned_no_surface: false,
+            mesh_revision_seen: -1,
         }
     }
 
@@ -1194,6 +1200,11 @@ impl INode3D for VoxelInstancerGD {
     }
 
     fn process(&mut self, _delta: f64) {
+        // Editor hint: no streaming work unless the scene is running (the
+        // parent terrain is likewise gated by `run_stream_in_editor`).
+        if godot::classes::Engine::singleton().is_editor_hint() {
+            return;
+        }
         let _ = self.sync_stream();
     }
 }
@@ -1219,9 +1230,14 @@ impl VoxelInstancerGD {
             );
             return -1;
         };
+        if density > 1.0 {
+            godot_warn!(
+                "VoxelInstancer.add_item: density is a probability per surface cell in 0..=1 (upstream uses per-square-meter density); clamping {density}"
+            );
+        }
         let item = voxel_core::instancing::InstanceLibraryItem {
             name: name.to_string(),
-            density,
+            density: density.min(1.0),
             min_scale,
             max_scale,
             ..Default::default()
@@ -1426,17 +1442,34 @@ impl VoxelInstancerGD {
         let Some(locations) = self.parent_mesh_locations() else {
             return i32::try_from(self.instance_blocks.instance_count()).unwrap_or(i32::MAX);
         };
+        // Rescatter on terrain edits: remeshes keep the same mesh-block
+        // keys, so the wanted-set diff below alone would never notice.
+        let revision = self.parent_mesh_revision();
+        if revision != self.mesh_revision_seen {
+            if self.mesh_revision_seen >= 0 && !self.instance_blocks.is_empty() {
+                let stale: Vec<(Vector3i, u8)> = self.instance_blocks.keys().collect();
+                for (pos, lod) in stale {
+                    self.unload_instance_block(pos, lod);
+                }
+            }
+            self.mesh_revision_seen = revision;
+        }
         let block_size = self.parent_block_size();
         let wanted: HashSet<(i32, i32, i32, u8)> = locations.iter().copied().collect();
-        let stale: Vec<(Vector3i, u8)> = self
+        // Deterministic order for both lists: HashMap iteration would leak
+        // random ordering into the scene-tree child order.
+        let mut stale: Vec<(Vector3i, u8)> = self
             .instance_blocks
             .keys()
             .filter(|(pos, lod)| !wanted.contains(&(pos.x, pos.y, pos.z, *lod)))
             .collect();
+        stale.sort_unstable_by_key(|(pos, lod)| (pos.x, pos.y, pos.z, *lod));
         for (pos, lod) in stale {
             self.unload_instance_block(pos, lod);
         }
-        for (x, y, z, lod) in wanted {
+        let mut ordered: Vec<(i32, i32, i32, u8)> = wanted.into_iter().collect();
+        ordered.sort_unstable();
+        for (x, y, z, lod) in ordered {
             if lod != 0 {
                 continue;
             }
@@ -1542,6 +1575,19 @@ impl VoxelInstancerGD {
         None
     }
 
+    fn parent_mesh_revision(&self) -> i64 {
+        let Some(parent) = self.base().get_parent() else {
+            return 0;
+        };
+        if let Ok(terrain) = parent.clone().try_cast::<crate::terrain::VoxelTerrain>() {
+            return terrain.bind().get_mesh_revision();
+        }
+        if let Ok(terrain) = parent.try_cast::<crate::resources2::VoxelLodTerrainGD>() {
+            return terrain.bind().get_mesh_revision();
+        }
+        0
+    }
+
     fn parent_block_size(&self) -> i32 {
         let Some(parent) = self.base().get_parent() else {
             return 16;
@@ -1582,8 +1628,8 @@ impl VoxelInstancerGD {
             self.warned_no_surface = true;
             godot_warn!(
                 "VoxelInstancer: a mesh block produced zero surface points. Surface extraction \
-                 reads the TYPE channel and looks for solid voxels with air immediately below; \
-                 SDF-only terrain and flat-filled slabs yield no instances."
+                 reads the TYPE channel and looks for air cells resting on solid ground; \
+                 SDF-only terrain (nothing in the TYPE channel) yields no instances."
             );
         }
         let instances = voxel_core::instancing::scatter_block_instances(
@@ -1807,6 +1853,8 @@ pub struct VoxelToolTerrainGD {
     lod_terrain: Option<Gd<crate::resources2::VoxelLodTerrainGD>>,
     channel: usize,
     value: u64,
+    /// Seed for random-tick draws (see `run_blocky_random_tick`).
+    random_seed: u32,
 }
 
 #[godot_api]
@@ -1819,6 +1867,7 @@ impl IRefCounted for VoxelToolTerrainGD {
             lod_terrain: None,
             channel: ChannelId::Sdf.index(),
             value: 1,
+            random_seed: 0,
         }
     }
 }
@@ -1847,6 +1896,35 @@ impl VoxelToolTerrainGD {
     #[func]
     fn get_channel(&self) -> i32 {
         i32::try_from(self.channel).unwrap_or(0)
+    }
+
+    /// Add mode for `do_sphere`/`do_box` (solidify in SDF terms).
+    #[constant]
+    const MODE_ADD: i64 = 0;
+    /// Remove mode for `do_sphere`/`do_box`.
+    #[constant]
+    const MODE_REMOVE: i64 = 1;
+
+    /// Value written by Set-mode operations (blocky-style channels).
+    #[func]
+    fn get_value(&self) -> i64 {
+        i64::try_from(self.value).unwrap_or(0)
+    }
+
+    /// Seed for `run_blocky_random_tick` draws. Same seed + same candidates
+    /// produce the same ticks; different seeds cover different subsets.
+    #[func]
+    fn set_seed(&mut self, seed: i64) {
+        let Ok(seed) = u32::try_from(seed) else {
+            godot_error!("VoxelToolTerrain.set_seed: seed must be between zero and u32::MAX");
+            return;
+        };
+        self.random_seed = seed;
+    }
+
+    #[func]
+    fn get_seed(&self) -> i64 {
+        i64::from(self.random_seed)
     }
 
     #[func]
@@ -2151,8 +2229,8 @@ impl VoxelToolTerrainGD {
     #[func]
     fn do_paste(
         &mut self,
-        source: Gd<RefCounted>,
         origin: godot::builtin::Vector3i,
+        source: Gd<RefCounted>,
         channel_mask: i64,
     ) {
         let Ok(buffer) = source.try_cast::<VoxelBufferGD>() else {
@@ -2267,19 +2345,21 @@ impl VoxelToolTerrainGD {
         if candidates.is_empty() {
             return;
         }
-        let step = (candidates.len() / batch).max(1);
-        let mut invoked = 0usize;
-        for (i, (pos, value)) in candidates.iter().enumerate() {
-            if i % step != 0 {
-                continue;
-            }
-            if invoked >= limit {
-                break;
-            }
+        // Draw uniformly random candidates per call (upstream semantics):
+        // a fixed stride would re-tick the same positions every call and
+        // permanently starve the rest. `batch` spreads the draws across
+        // invocations for statistical coverage; `voxel_count` caps total
+        // callbacks this call. Deterministic under a fixed seed.
+        let mut rng = voxel_core::instancing::scatter::SimpleRng::new(self.random_seed);
+        let draws = batch.min(limit).min(candidates.len());
+        let mut picked: Vec<usize> = (0..candidates.len()).collect();
+        for i in 0..draws {
+            let j = i + (rng.next_u32() as usize) % (picked.len() - i);
+            picked.swap(i, j);
+            let (pos, value) = &candidates[picked[i]];
             let gpos = godot::builtin::Vector3i::new(pos.x, pos.y, pos.z);
             let gval = i64::try_from(*value).unwrap_or(0);
             callback.call(&[gpos.to_variant(), gval.to_variant()]);
-            invoked += 1;
         }
     }
 }

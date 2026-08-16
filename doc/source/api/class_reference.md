@@ -51,12 +51,14 @@ A voxel editing tool over an owned `VoxelBuffer`, providing sphere, box and sing
 
 Returned by `VoxelTerrain.get_voxel_tool()` / `VoxelLodTerrain.get_voxel_tool()`. Live editing tool bound to the terrain core; edits are batched per overlapping data block.
 
-- `do_sphere(center: Vector3, radius: f32, mode: i32)` — 0 = Add, 1 = Remove
+- `do_sphere(center: Vector3, radius: f32, mode: i32)` — use `VoxelToolTerrain.MODE_ADD` / `MODE_REMOVE` constants (upstream is `do_sphere(position, radius)` with a `mode` property; ours takes the mode inline)
 - `do_box(min: Vector3i, max: Vector3i, mode: i32)`
-- `do_hemisphere(center: Vector3, radius: f32, height_ratio: f32, mode: i32)`
+- `do_hemisphere(center: Vector3, radius: f32, flat_direction: Vector3, smoothness: f32)` — always Add mode in this port
 - `do_smooth(center: Vector3, radius: f32, blur_radius: i32)`
-- `do_paste(position: Vector3i, buffer: VoxelBuffer, channel_mask: i32)` — pastes channels and per-voxel metadata
+- `do_paste(position: Vector3i, buffer: VoxelBuffer, channel_mask: i32)` — pastes channels and per-voxel metadata (upstream argument order)
 - `set_voxel(position: Vector3i, value: i64)`
+- `get_value() -> i64` — value used by Set-mode operations
+- `set_seed(seed: i64)` / `get_seed()` — random-tick draw seed
 - `set_voxel_metadata(position: Vector3i, value: Variant)` / `get_voxel_metadata(position: Vector3i) -> Variant`
 - `for_each_voxel_metadata_in_area(aabb: Aabb, callback: Callable)`
 - `run_blocky_random_tick(aabb: Aabb, count: i32, callback: Callable, batch_count: i32, tags_mask: i32)`
@@ -318,6 +320,11 @@ A flat terrain generator filling the SDF as a horizontal plane at a given height
 - `height: i64`
 
 ### VoxelGeneratorNoise
+
+- `seed: int` — generation seed
+- `set_frequency(f)` / `set_height_start(f)` / `set_height_range(f)`
+- `set_channel(i)` — 0 = TYPE, 1 = SDF (default)
+- `noise` — stored but not consumed; configure `seed`/`frequency` directly
 
 Inherits: `Resource`
 

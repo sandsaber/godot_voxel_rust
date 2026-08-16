@@ -114,9 +114,9 @@ impl RegionForestMeta {
     }
 
     pub fn from_json(src: &str) -> Result<Self, ForestMetaError> {
-        let version = json_u32(src, "version")? as u8;
-        let block_size_po2 = json_u32(src, "block_size_po2")? as u8;
-        let region_size_po2 = json_u32(src, "region_size_po2")? as u8;
+        let version = json_u8(src, "version")?;
+        let block_size_po2 = json_u8(src, "block_size_po2")?;
+        let region_size_po2 = json_u8(src, "region_size_po2")?;
         let sector_size = json_u32(src, "sector_size")?;
         let depths = json_u8_array(src, "channel_depths")?;
         if depths.len() != MAX_CHANNELS {
@@ -229,6 +229,12 @@ fn json_after_key<'a>(src: &'a str, key: &str) -> Result<&'a str, ForestMetaErro
     rest.strip_prefix(':')
         .map(str::trim_start)
         .ok_or_else(|| ForestMetaError::Invalid(format!("missing ':' after {key}")))
+}
+
+fn json_u8(src: &str, key: &str) -> Result<u8, ForestMetaError> {
+    let value = json_u32(src, key)?;
+    u8::try_from(value)
+        .map_err(|_| ForestMetaError::Invalid(format!("{key} {value} is out of the u8 range")))
 }
 
 fn json_u32(src: &str, key: &str) -> Result<u32, ForestMetaError> {

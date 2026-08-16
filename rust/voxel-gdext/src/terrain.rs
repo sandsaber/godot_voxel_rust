@@ -599,6 +599,10 @@ pub struct VoxelTerrain {
     core: Option<VoxelTerrainCore>,
     mesh_instances: HashMap<MeshBlockRenderId, RenderedMeshBlock>,
     render_state: RenderState,
+    /// Monotonic counter bumped whenever a mesh block is created, updated,
+    /// or removed. The instancer uses it to detect terrain edits (remeshes
+    /// reuse the same mesh-block keys) and rescatter its instances.
+    mesh_revision: u64,
     generator_resource: Option<Gd<Resource>>,
     mesher_resource: Option<Gd<Resource>>,
     #[export]
@@ -690,6 +694,7 @@ impl INode3D for VoxelTerrain {
             base,
             core: None,
             mesh_instances: HashMap::new(),
+            mesh_revision: 0,
             render_state: RenderState::default(),
             generator_resource: None,
             mesher_resource: None,
@@ -734,6 +739,12 @@ impl INode3D for VoxelTerrain {
     fn ready(&mut self) {
         if self.core.is_some() {
             godot_print!("VoxelTerrain ready — reusing retained terrain core");
+            return;
+        }
+        // Editor hint: the pinned `run_stream_in_editor` contract — without
+        // the opt-in, opening a scene in the editor must not page terrain
+        // or write stream files.
+        if godot::classes::Engine::singleton().is_editor_hint() && !self.run_stream_in_editor {
             return;
         }
 
@@ -788,6 +799,9 @@ impl INode3D for VoxelTerrain {
     }
 
     fn process(&mut self, _delta: f64) {
+        if self.core.is_none() {
+            return;
+        }
         let viewers = collect_child_viewers(
             self.base().get_children().iter_shared(),
             "VoxelTerrain",
@@ -795,6 +809,7 @@ impl INode3D for VoxelTerrain {
             self.generate_collision,
         );
 
+        let mut mesh_revision_delta = 0u64;
         let pending_ops = {
             let Some(core) = self.core.as_mut() else {
                 return;
@@ -810,6 +825,15 @@ impl INode3D for VoxelTerrain {
                     // `signals()` borrow, so re-acquire it per emit.
                     let data_block_size = core.data().block_size() as i32;
                     for event in &events {
+                        if matches!(
+                            event,
+                            voxel_core::terrain::voxel_terrain_core::VoxelTerrainEvent::MeshBlockEntered(_)
+                                | voxel_core::terrain::voxel_terrain_core::VoxelTerrainEvent::MeshBlockUpdated(_)
+                                | voxel_core::terrain::voxel_terrain_core::VoxelTerrainEvent::MeshBlockBecameEmpty(_)
+                                | voxel_core::terrain::voxel_terrain_core::VoxelTerrainEvent::MeshBlockExited(_)
+                        ) {
+                            mesh_revision_delta = mesh_revision_delta.wrapping_add(1);
+                        }
                         match event {
                             voxel_core::terrain::voxel_terrain_core::VoxelTerrainEvent::DataBlockLoaded(loc) => {
                                 let p = loc.position * data_block_size;
@@ -851,6 +875,7 @@ impl INode3D for VoxelTerrain {
             };
             reduce_render_events(&mut self.render_state, events)
         };
+        self.mesh_revision = self.mesh_revision.wrapping_add(mesh_revision_delta);
 
         // Godot nodes are mutated only after the terrain core borrow ends.
         for op in pending_ops {
@@ -2045,6 +2070,14 @@ impl VoxelTerrain {
 
     /// Packed `x,y,z,lod` for every resident mesh block. Used by the instancer
     /// to stream per-block MultiMeshes in lockstep with paging.
+    /// Monotonic counter that advances whenever any mesh block is created,
+    /// updated, or removed. The instancer uses it to detect edits and
+    /// rescatter instances; scripts can use it as a cheap change signal.
+    #[func]
+    pub(crate) fn get_mesh_revision(&self) -> i64 {
+        i64::try_from(self.mesh_revision).unwrap_or(i64::MAX)
+    }
+
     #[func]
     pub(crate) fn get_mesh_block_locations(&self) -> PackedInt32Array {
         pack_mesh_block_locations(self.mesh_instances.keys().copied())
@@ -2152,6 +2185,11 @@ impl VoxelTerrain {
 
     #[func]
     fn set_stream(&mut self, value: Option<Gd<Resource>>) {
+        if self.core.is_some() {
+            godot_error!(
+                "VoxelTerrain.stream: the stream is resolved once in _ready; assign it before adding the terrain to the tree"
+            );
+        }
         self.stream_resource = value;
     }
 

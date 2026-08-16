@@ -848,6 +848,8 @@ pub struct VoxelLodTerrainGD {
     core: Option<voxel_core::terrain::VoxelTerrainCore>,
     mesh_instances: HashMap<crate::terrain::MeshBlockRenderId, crate::terrain::RenderedMeshBlock>,
     render_state: crate::terrain::RenderState,
+    /// See `VoxelTerrain::mesh_revision` — same contract for the LOD node.
+    mesh_revision: u64,
     generator_resource: Option<Gd<Resource>>,
     mesher_resource: Option<Gd<Resource>>,
     #[export]
@@ -999,6 +1001,7 @@ impl INode3D for VoxelLodTerrainGD {
             base,
             core: None,
             mesh_instances: HashMap::new(),
+            mesh_revision: 0,
             render_state: crate::terrain::RenderState::default(),
             generator_resource: None,
             mesher_resource: None,
@@ -1077,6 +1080,12 @@ impl INode3D for VoxelLodTerrainGD {
     }
 
     fn ready(&mut self) {
+        // See VoxelTerrain: no paging or stream writes in the editor unless
+        // `run_stream_in_editor` opts in.
+        if godot::classes::Engine::singleton().is_editor_hint() && !self.run_stream_in_editor_value
+        {
+            return;
+        }
         if self.core.is_some() {
             godot_print!("VoxelLodTerrain ready — reusing retained terrain core");
             return;
@@ -1193,6 +1202,7 @@ impl INode3D for VoxelLodTerrainGD {
             self.generate_collision,
         );
 
+        let mut mesh_revision_delta = 0u64;
         let pending_ops = {
             let Some(core) = self.core.as_mut() else {
                 return;
@@ -1201,6 +1211,15 @@ impl INode3D for VoxelLodTerrainGD {
                 Ok(events) => {
                     let data_block_size = core.data().block_size() as i32;
                     for event in &events {
+                        if matches!(
+                            event,
+                            voxel_core::terrain::VoxelTerrainEvent::MeshBlockEntered(_)
+                                | voxel_core::terrain::VoxelTerrainEvent::MeshBlockUpdated(_)
+                                | voxel_core::terrain::VoxelTerrainEvent::MeshBlockBecameEmpty(_)
+                                | voxel_core::terrain::VoxelTerrainEvent::MeshBlockExited(_)
+                        ) {
+                            mesh_revision_delta = mesh_revision_delta.wrapping_add(1);
+                        }
                         match event {
                             voxel_core::terrain::VoxelTerrainEvent::DataBlockLoaded(loc) => {
                                 let p = loc.position * data_block_size;
@@ -1240,6 +1259,7 @@ impl INode3D for VoxelLodTerrainGD {
             };
             crate::terrain::reduce_render_events(&mut self.render_state, events)
         };
+        self.mesh_revision = self.mesh_revision.wrapping_add(mesh_revision_delta);
 
         // Godot nodes are mutated only after the terrain core borrow ends.
         for op in pending_ops {
@@ -1303,6 +1323,12 @@ impl VoxelLodTerrainGD {
     #[func]
     fn get_mesh_block_count(&self) -> i32 {
         i32::try_from(self.mesh_instances.len()).unwrap_or(i32::MAX)
+    }
+
+    /// See `VoxelTerrain.get_mesh_revision` — same contract.
+    #[func]
+    pub(crate) fn get_mesh_revision(&self) -> i64 {
+        i64::try_from(self.mesh_revision).unwrap_or(i64::MAX)
     }
 
     /// Packed `x,y,z,lod` for every resident mesh block.
@@ -2357,6 +2383,11 @@ impl VoxelLodTerrainGD {
     }
 
     fn refresh_debug_draw(&mut self) {
+        if !self.debug_draw_enabled_value {
+            // Building the snapshot walks every resident block; skip it
+            // entirely when the overlay is off (the default).
+            return;
+        }
         let snapshot = self.core.as_ref().map(|core| core.debug_snapshot());
         let flags = crate::debug_draw::DebugDrawFlags {
             octree_nodes: self.debug_draw_octree_nodes_value,
