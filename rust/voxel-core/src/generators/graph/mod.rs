@@ -28,6 +28,7 @@ pub mod runtime;
 
 pub use generator_graph::GraphGenerator;
 pub use runtime::{
-    node_kind_from_spec, optional_graph_port, CompiledGraph, CompiledScratch, Graph, GraphInputs,
-    GraphNode, GraphNodeId, GraphOutput, GraphParam, GraphPort, GraphScratch, NodeKind, TopoError,
+    graph_to_json, node_kind_from_spec, node_kind_to_spec, optional_graph_port, CompiledGraph,
+    CompiledScratch, Graph, GraphInputs, GraphNode, GraphNodeId, GraphOutput, GraphParam,
+    GraphPort, GraphScratch, NodeKind, NodeSpec, TopoError,
 };

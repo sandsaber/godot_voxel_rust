@@ -60,13 +60,13 @@ overlapping data block (not per voxel).
 - [x] MultiMesh upload from `scatter_from_buffer` / `scatter_test`
 - [ ] `VoxelInstanceBlock` + per-block instance streaming
 
-## R6 — Graph editor parity ⬜
+## R6 — Graph editor parity 🟡
 
 - [x] `add_node` / `clear_graph` / `compile_graph` programmatic API
 - [x] Assigning `VoxelGeneratorGraph` to terrain uses `GraphGenerator` (never silent Waves)
 - [x] Compact `set_graph_json` parse for the documented node list
 - [x] Wire `ExpressionNode` / `Image2D` into the graph runtime (`add_expression_node`, `add_image2d_node`)
-- [ ] Visual editor (GDScript GraphEdit addon or native)
+- [x] Visual GraphEdit addon: apply/compile against `add_node` / `compile_and_sample`
 
 ## R7 — Streams & metadata ⬜
 

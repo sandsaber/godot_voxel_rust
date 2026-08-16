@@ -862,6 +862,321 @@ pub fn node_kind_from_spec(
     })
 }
 
+/// Compact interchange fields for one graph node.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NodeSpec {
+    pub kind: String,
+    pub a: i64,
+    pub b: i64,
+    pub c: i64,
+    pub d: i64,
+    pub value: f32,
+    pub expr: Option<String>,
+}
+
+fn port_id(port: Option<GraphPort>) -> i64 {
+    port.map(|port| i64::from(port.node)).unwrap_or(-1)
+}
+
+/// Reverse of [`node_kind_from_spec`] for JSON / visual-editor interchange.
+pub fn node_kind_to_spec(kind: &NodeKind) -> NodeSpec {
+    let unset = NodeSpec {
+        kind: String::new(),
+        a: -1,
+        b: -1,
+        c: -1,
+        d: -1,
+        value: 0.0,
+        expr: None,
+    };
+    match kind {
+        NodeKind::InputX => NodeSpec {
+            kind: "InputX".into(),
+            ..unset
+        },
+        NodeKind::InputY => NodeSpec {
+            kind: "InputY".into(),
+            ..unset
+        },
+        NodeKind::InputZ => NodeSpec {
+            kind: "InputZ".into(),
+            ..unset
+        },
+        NodeKind::Constant(value) => NodeSpec {
+            kind: "Constant".into(),
+            value: *value,
+            ..unset
+        },
+        NodeKind::Add { a, b } => NodeSpec {
+            kind: "Add".into(),
+            a: port_id(*a),
+            b: port_id(*b),
+            ..unset
+        },
+        NodeKind::Subtract { a, b } => NodeSpec {
+            kind: "Subtract".into(),
+            a: port_id(*a),
+            b: port_id(*b),
+            ..unset
+        },
+        NodeKind::Multiply { a, b } => NodeSpec {
+            kind: "Multiply".into(),
+            a: port_id(*a),
+            b: port_id(*b),
+            ..unset
+        },
+        NodeKind::Divide { a, b } => NodeSpec {
+            kind: "Divide".into(),
+            a: port_id(*a),
+            b: port_id(*b),
+            ..unset
+        },
+        NodeKind::Min { a, b } => NodeSpec {
+            kind: "Min".into(),
+            a: port_id(*a),
+            b: port_id(*b),
+            ..unset
+        },
+        NodeKind::Max { a, b } => NodeSpec {
+            kind: "Max".into(),
+            a: port_id(*a),
+            b: port_id(*b),
+            ..unset
+        },
+        NodeKind::Sin { a } => NodeSpec {
+            kind: "Sin".into(),
+            a: port_id(*a),
+            ..unset
+        },
+        NodeKind::Cos { a } => NodeSpec {
+            kind: "Cos".into(),
+            a: port_id(*a),
+            ..unset
+        },
+        NodeKind::Abs { a } => NodeSpec {
+            kind: "Abs".into(),
+            a: port_id(*a),
+            ..unset
+        },
+        NodeKind::Sqrt { a } => NodeSpec {
+            kind: "Sqrt".into(),
+            a: port_id(*a),
+            ..unset
+        },
+        NodeKind::Floor { a } => NodeSpec {
+            kind: "Floor".into(),
+            a: port_id(*a),
+            ..unset
+        },
+        NodeKind::Fract { a } => NodeSpec {
+            kind: "Fract".into(),
+            a: port_id(*a),
+            ..unset
+        },
+        NodeKind::Pow { a, b } => NodeSpec {
+            kind: "Pow".into(),
+            a: port_id(*a),
+            b: port_id(*b),
+            ..unset
+        },
+        NodeKind::Mix { a, b, t } => NodeSpec {
+            kind: "Mix".into(),
+            a: port_id(*a),
+            b: port_id(*b),
+            c: port_id(*t),
+            ..unset
+        },
+        NodeKind::Clamp { a, min_v, max_v } => NodeSpec {
+            kind: "Clamp".into(),
+            a: port_id(*a),
+            b: port_id(*min_v),
+            c: port_id(*max_v),
+            ..unset
+        },
+        NodeKind::SdfPlane { y, height } => NodeSpec {
+            kind: "SdfPlane".into(),
+            a: port_id(*y),
+            b: port_id(*height),
+            ..unset
+        },
+        NodeKind::SdfSphere { x, y, z, radius } => NodeSpec {
+            kind: "SdfSphere".into(),
+            a: port_id(*x),
+            b: port_id(*y),
+            c: port_id(*z),
+            d: port_id(*radius),
+            ..unset
+        },
+        NodeKind::SdfBox {
+            x, y, z, size_x, ..
+        } => NodeSpec {
+            kind: "SdfBox".into(),
+            a: port_id(*x),
+            b: port_id(*y),
+            c: port_id(*z),
+            value: *size_x,
+            ..unset
+        },
+        NodeKind::SdfUnion { a, b } => NodeSpec {
+            kind: "SdfUnion".into(),
+            a: port_id(*a),
+            b: port_id(*b),
+            ..unset
+        },
+        NodeKind::SdfSubtract { a, b } => NodeSpec {
+            kind: "SdfSubtract".into(),
+            a: port_id(*a),
+            b: port_id(*b),
+            ..unset
+        },
+        NodeKind::SdfSmoothUnion { a, b, smoothness } => NodeSpec {
+            kind: "SdfSmoothUnion".into(),
+            a: port_id(*a),
+            b: port_id(*b),
+            value: *smoothness,
+            ..unset
+        },
+        NodeKind::SdfSmoothSubtract { a, b, smoothness } => NodeSpec {
+            kind: "SdfSmoothSubtract".into(),
+            a: port_id(*a),
+            b: port_id(*b),
+            value: *smoothness,
+            ..unset
+        },
+        NodeKind::Noise2D { x, y, .. } => NodeSpec {
+            kind: "Noise2D".into(),
+            a: port_id(*x),
+            b: port_id(*y),
+            ..unset
+        },
+        NodeKind::Noise3D { x, y, z, .. } => NodeSpec {
+            kind: "Noise3D".into(),
+            a: port_id(*x),
+            b: port_id(*y),
+            c: port_id(*z),
+            ..unset
+        },
+        NodeKind::OutputSdf { a } => NodeSpec {
+            kind: "OutputSdf".into(),
+            a: port_id(*a),
+            ..unset
+        },
+        NodeKind::Image2D { x, y, .. } => NodeSpec {
+            kind: "Image2D".into(),
+            a: port_id(*x),
+            b: port_id(*y),
+            ..unset
+        },
+        NodeKind::Expression { x, y, z, expr } => NodeSpec {
+            kind: "Expression".into(),
+            a: port_id(*x),
+            b: port_id(*y),
+            c: port_id(*z),
+            expr: Some(expr.expression_text().to_owned()),
+            ..unset
+        },
+        NodeKind::Remap { a, to_end, .. } => NodeSpec {
+            kind: "Remap".into(),
+            a: port_id(*a),
+            value: *to_end,
+            ..unset
+        },
+        NodeKind::Distance2D { x0, y0, x1, y1 } => NodeSpec {
+            kind: "Distance2D".into(),
+            a: port_id(*x0),
+            b: port_id(*y0),
+            c: port_id(*x1),
+            d: port_id(*y1),
+            ..unset
+        },
+        NodeKind::Distance3D { x0, y0, z0, .. } => NodeSpec {
+            kind: "Distance3D".into(),
+            a: port_id(*x0),
+            b: port_id(*y0),
+            c: port_id(*z0),
+            ..unset
+        },
+        NodeKind::Normalize3D { x, y, z } => NodeSpec {
+            kind: "Normalize3D".into(),
+            a: port_id(*x),
+            b: port_id(*y),
+            c: port_id(*z),
+            ..unset
+        },
+        NodeKind::SdfTorus { x, y, z, r1, .. } => NodeSpec {
+            kind: "SdfTorus".into(),
+            a: port_id(*x),
+            b: port_id(*y),
+            c: port_id(*z),
+            value: *r1,
+            ..unset
+        },
+        NodeKind::Curve { a, .. } => NodeSpec {
+            kind: "Curve".into(),
+            a: port_id(*a),
+            ..unset
+        },
+    }
+}
+
+fn json_escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Serialize a graph to the compact interchange consumed by `set_graph_json`.
+pub fn graph_to_json(graph: &Graph) -> String {
+    let mut out = String::from("{\"nodes\":[");
+    for (index, node) in graph.nodes().iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        let spec = node_kind_to_spec(&node.kind);
+        out.push_str("{\"id\":");
+        out.push_str(&node.id.to_string());
+        out.push_str(",\"kind\":\"");
+        out.push_str(&spec.kind);
+        out.push('"');
+        if spec.a >= 0 {
+            out.push_str(",\"a\":");
+            out.push_str(&spec.a.to_string());
+        }
+        if spec.b >= 0 {
+            out.push_str(",\"b\":");
+            out.push_str(&spec.b.to_string());
+        }
+        if spec.c >= 0 {
+            out.push_str(",\"c\":");
+            out.push_str(&spec.c.to_string());
+        }
+        if spec.d >= 0 {
+            out.push_str(",\"d\":");
+            out.push_str(&spec.d.to_string());
+        }
+        if spec.value != 0.0 {
+            out.push_str(",\"value\":");
+            out.push_str(&spec.value.to_string());
+        }
+        if let Some(expr) = spec.expr.as_ref() {
+            out.push_str(",\"expr\":\"");
+            out.push_str(&json_escape(expr));
+            out.push('"');
+        }
+        out.push('}');
+    }
+    out.push_str("]}");
+    out
+}
+
 /// Compiled, analysis-cached form of a [`Graph`] (audit §9.6-C1).
 ///
 /// `Graph` is a mutable, user-facing construction surface; `CompiledGraph` is
@@ -1694,6 +2009,22 @@ mod tests {
             a: Some(GraphPort::new(sample)),
         });
         assert!(CompiledGraph::compile(&g2).is_ok());
+    }
+
+    #[test]
+    fn graph_to_json_round_trips_through_from_spec() {
+        let mut graph = Graph::new();
+        let x = graph.push(NodeKind::InputX);
+        let c = graph.push(NodeKind::Constant(2.5));
+        graph.push(NodeKind::Add {
+            a: Some(GraphPort::new(x)),
+            b: Some(GraphPort::new(c)),
+        });
+        let json = graph_to_json(&graph);
+        assert!(json.contains("\"kind\":\"InputX\""));
+        assert!(json.contains("\"kind\":\"Constant\""));
+        assert!(json.contains("\"value\":2.5"));
+        assert!(json.contains("\"kind\":\"Add\""));
     }
 
     #[test]

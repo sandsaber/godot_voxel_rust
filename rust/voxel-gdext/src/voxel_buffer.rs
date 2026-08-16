@@ -2121,7 +2121,10 @@ impl VoxelGeneratorGraphGD {
 
     #[func]
     fn get_graph_json(&self) -> GString {
-        self.graph_json.clone()
+        if self.graph.nodes().is_empty() {
+            return self.graph_json.clone();
+        }
+        voxel_core::generators::graph::graph_to_json(&self.graph).to_godot()
     }
 
     /// Replace the graph JSON interchange string. A non-empty document that is
@@ -2238,6 +2241,35 @@ impl VoxelGeneratorGraphGD {
     fn get_node_count(&self) -> i32 {
         self.get_graph_node_count()
     }
+
+    /// Compile the current graph and sample the SDF at `(x, y, z)`.
+    /// Returns `NaN` if the graph is empty or does not compile.
+    #[func]
+    fn compile_and_sample(&self, x: f32, y: f32, z: f32) -> f32 {
+        if !x.is_finite() || !y.is_finite() || !z.is_finite() {
+            godot_error!("VoxelGeneratorGraph.compile_and_sample: coordinates must be finite");
+            return f32::NAN;
+        }
+        if self.graph.nodes().is_empty() {
+            return f32::NAN;
+        }
+        use voxel_core::generators::graph::{
+            CompiledGraph, CompiledScratch, GraphInputs, GraphOutput,
+        };
+        let Ok(compiled) = CompiledGraph::compile(&self.graph) else {
+            return f32::NAN;
+        };
+        let xs = [x];
+        let zs = [z];
+        let inputs = GraphInputs { x: &xs, y, z: &zs };
+        let mut scratch = CompiledScratch::new();
+        let mut out = Vec::new();
+        compiled.generate_slice(&inputs, 1, &mut scratch, &mut out, false);
+        out.into_iter()
+            .find(|(kind, _)| *kind == GraphOutput::Sdf)
+            .and_then(|(_, values)| values.into_iter().next())
+            .unwrap_or(f32::NAN)
+    }
 }
 
 impl VoxelGeneratorGraphGD {
@@ -2303,6 +2335,24 @@ fn parse_graph_json(text: &str) -> Result<voxel_core::generators::graph::Graph, 
         let c = json_i64_field(object, "c").unwrap_or(-1);
         let d = json_i64_field(object, "d").unwrap_or(-1);
         let value = json_f32_field(object, "value").unwrap_or(0.0);
+        if kind == "Expression" {
+            let expr = json_string_field(object, "expr").unwrap_or_default();
+            match voxel_core::generators::graph::expression_node::ExpressionNode::new(
+                &expr,
+                &[("x", 0), ("y", 1), ("z", 2)],
+            ) {
+                Ok(parsed) => {
+                    graph.push(voxel_core::generators::graph::NodeKind::Expression {
+                        x: voxel_core::generators::graph::optional_graph_port(a),
+                        y: voxel_core::generators::graph::optional_graph_port(b),
+                        z: voxel_core::generators::graph::optional_graph_port(c),
+                        expr: std::sync::Arc::new(parsed),
+                    });
+                    continue;
+                }
+                Err(message) => return Err(message),
+            }
+        }
         let Some(node_kind) = node_kind_from_spec(&kind, a, b, c, d, value) else {
             return Err(format!("unknown node kind '{kind}'"));
         };

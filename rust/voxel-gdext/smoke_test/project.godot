@@ -9,3 +9,7 @@ config/features=PackedStringArray("4.7", "Forward Plus")
 [editor]
 
 search_in_file_extensions=PackedStringArray("gd", "tscn", "tres", "md", "txt")
+
+[editor_plugins]
+
+enabled=PackedStringArray("res://addons/voxel_graph_editor/plugin.cfg")

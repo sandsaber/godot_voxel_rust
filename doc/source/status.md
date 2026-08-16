@@ -44,7 +44,7 @@ at the repository root — reference items as `R1`…`R8` in commits/PRs.
 | Raycast | ✅ | DDA voxel traversal over the SDF channel. |
 | `VoxelLodTerrain` | 🟡 | Production Variable-LOD runtime (`new_variable_lod` + `try_process`), 3-LOD smoke scene. Collision layer/mask/margin and lifecycle signals are live. GPU/normalmaps and most debug draws remain stored stubs. |
 | Instancer rendering | 🟡 | Scatter uploads `MultiMeshInstance3D` children (`set_item_mesh` optional). No per-block streaming yet. |
-| Editor plugins | 🟡 | `.vox` parsing real; the other plugins are bottom-panel prototypes. The upstream graph editor is replaced by a small GDScript prototype in the smoke-test project. |
+| Editor plugins | 🟡 | `.vox` parsing real. The Voxel Graph bottom panel is a working GraphEdit addon (`add_node` / compile / sample). Instancer plugin is still a stub host. |
 | `VoxelBoxMover` / `VoxelAStarGrid3D` | 🟡 | Registered, but semantics differ from upstream (no physics-aware movement / no pathfinding engine yet). |
 | `VoxelStreamSQLite`, `VoxelVoxLoader` | 🟡 | Placeholders (path/extension validation only). |
 

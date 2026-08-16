@@ -377,7 +377,8 @@ A graph-based terrain generator: build a node graph programmatically, compile it
 - `get_graph_node_count() -> i32`
 - `compile_graph() -> bool` — whether the graph compiles (no cycles / dangling ports)
 - `get_graph_json() -> GString`
-- `set_graph_json(json: GString)` — parses a compact `{"nodes":[...]}` list (`kind`/`a`/`b`/`c`/`d`/`value`); invalid JSON logs an error and keeps the previous graph
+- `set_graph_json(json: GString)` — parses a compact `{"nodes":[...]}` list (`kind`/`a`/`b`/`c`/`d`/`value`/`expr`); invalid JSON logs an error and keeps the previous graph
+- `compile_and_sample(x: f32, y: f32, z: f32) -> f32` — compile the current graph and sample SDF at a world point (`NaN` on failure)
 - `sample_sphere_sdf(cx: f32, cy: f32, cz: f32, r: f32, px: f32, py: f32, pz: f32) -> f32` — standalone helper; returns the signed distance (negative = inside), or `NaN` if the graph fails to compile
 - `get_node_count() -> i32`
 

@@ -78,12 +78,13 @@ the SDF channel. Graphs are built programmatically with `add_node()` and can
 drive `VoxelTerrain` like any other generator (the graph is compiled once,
 then evaluated per block on worker threads).
 
-!!! note "Status: partially implemented"
-    There is no visual graph editor yet (the editor plugin only hosts an
-    empty panel). Build graphs with `add_node()`. `set_graph_json` parses a
-    compact `{"nodes":[...]}` list (same fields as `add_node`). Assigning
-    the resource to `VoxelTerrain.generator` uses `GraphGenerator` — it does
-    not silently become Waves.
+!!! note "Status: editor is a GraphEdit addon"
+    Enable `addons/voxel_graph_editor` in the smoke-test project, select a
+    `VoxelGeneratorGraph`, and use the **Voxel Graph** bottom panel. Apply
+    writes the canvas through `add_node`; Compile samples SDF at a point.
+    `set_graph_json` / `get_graph_json` use the compact `{"nodes":[...]}`
+    list. Assigning the resource to `VoxelTerrain.generator` uses
+    `GraphGenerator` — it does not silently become Waves.
 
 | Method | Notes |
 |---|---|
