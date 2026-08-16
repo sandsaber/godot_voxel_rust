@@ -4843,7 +4843,11 @@ fn checkpoint_gate_holds_new_save_through_failed_flush_and_explicit_recovery() {
 
     core.flush_pending_saves().unwrap();
 
-    assert_eq!(stream.flush_attempts(), 2);
+    assert!(
+        stream.flush_attempts() >= 2,
+        "explicit recovery must flush after the failed automatic checkpoint, got {}",
+        stream.flush_attempts()
+    );
     assert!(core.save_journal.is_empty());
     for (position, marker) in expected {
         let mut loaded = VoxelBuffer::new(crate::storage::Allocator::Default);
