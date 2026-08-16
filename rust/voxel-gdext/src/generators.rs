@@ -382,6 +382,32 @@ impl IResource for VoxelGeneratorNoise {
     }
 }
 
+/// Build the core noise generator from the wrapper's parameters. Free
+/// function so the parameter wiring (especially `channel`, whose
+/// ignore-everything bug was fixed alongside this extraction) is pinnable in
+/// plain `cargo test` without a live engine.
+fn noise_generator_from_params(
+    seed: i64,
+    frequency: f32,
+    height_start: f32,
+    height_range: f32,
+    channel: i32,
+) -> Noise {
+    // Use NoiseConfig.build() to avoid direct fastnoise_lite dependency.
+    let config = NoiseConfig {
+        seed: Some(seed as i32),
+        frequency: Some(frequency),
+        ..NoiseConfig::default()
+    };
+    let channel = channel_id_from_index(channel as usize).unwrap_or(ChannelId::Sdf);
+    Noise {
+        noise: config.build(),
+        height_start,
+        height_range,
+        channel,
+    }
+}
+
 #[godot_api]
 impl VoxelGeneratorNoise {
     pub fn create_core_generator(&self) -> SharedVoxelGenerator {
@@ -394,20 +420,13 @@ impl VoxelGeneratorNoise {
             );
             return Arc::new(Noise::default());
         }
-        // Use NoiseConfig.build() to avoid direct fastnoise_lite dependency.
-        let config = NoiseConfig {
-            seed: Some(self.seed as i32),
-            frequency: Some(self.frequency_value),
-            ..NoiseConfig::default()
-        };
-        let channel = channel_id_from_index(self.channel_value as usize).unwrap_or(ChannelId::Sdf);
-        let noise = Noise {
-            noise: config.build(),
-            height_start: self.height_start_value,
-            height_range: self.height_range_value,
-            channel,
-        };
-        Arc::new(noise)
+        Arc::new(noise_generator_from_params(
+            self.seed,
+            self.frequency_value,
+            self.height_start_value,
+            self.height_range_value,
+            self.channel_value,
+        ))
     }
 
     /// Noise frequency (higher = more detail; strictly positive finite).
@@ -686,6 +705,19 @@ impl VoxelGeneratorHeightmap {
 #[cfg(test)]
 mod input_validation_tests {
     use super::*;
+    #[test]
+    fn noise_generator_from_params_wires_the_channel() {
+        // Regression: the wrapper used to ignore `channel` and always build
+        // an SDF noise generator, so Type-channel terrain never meshed under
+        // a blocky mesher.
+        let type_gen = noise_generator_from_params(7, 0.05, -8.0, 16.0, 0);
+        assert_eq!(type_gen.channel, ChannelId::Type);
+        let sdf_gen = noise_generator_from_params(7, 0.05, -8.0, 16.0, 1);
+        assert_eq!(sdf_gen.channel, ChannelId::Sdf);
+        // Out-of-range ids fall back to SDF like every other generator.
+        let bad = noise_generator_from_params(7, 0.05, -8.0, 16.0, 99);
+        assert_eq!(bad.channel, ChannelId::Sdf);
+    }
 
     #[test]
     fn generator_float_validation_rejects_every_nonfinite_value() {

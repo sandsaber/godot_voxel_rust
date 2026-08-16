@@ -2,10 +2,11 @@
 
 !!! note "Status: partially implemented"
     - **Works:** single-voxel SDF edits on `VoxelTerrain`
-      (`set_voxel_sdf` / `get_voxel_sdf`) with automatic re-meshing, and the
-      standalone `VoxelToolBuffer` (sphere/box/set/get on a buffer).
-    - **Stub:** `VoxelToolTerrain` holds only a node path — no terrain editing
-      methods.
+      (`set_voxel_sdf` / `get_voxel_sdf`) with automatic re-meshing; the
+      standalone `VoxelToolBuffer` (sphere/box/set/get on a buffer); and a
+      live `VoxelToolTerrain` (obtained via `get_voxel_tool()`) with
+      sphere/box/hemisphere/smooth/paste, per-voxel metadata, and tags-aware
+      blocky random-tick — all batched per overlapping data block.
     - Modifier nodes (`VoxelModifierSphere`, `VoxelModifierMesh`) work on
       buffers but are **not** automatically applied by `VoxelTerrain`.
 
@@ -53,19 +54,26 @@ tool.do_box(0, 0, 0, 31, 2, 31, 2, 0)            # set a slab
 print(tool.get_voxel(16, 16, 16))
 ```
 
-Use it for precomputing volumes or tests; there is currently no API to push a
-`VoxelBuffer` back into a live `VoxelTerrain` in bulk — use `set_voxel_sdf`
-per voxel for terrain edits.
+Use it for precomputing volumes or tests. To apply a prepared buffer to a
+live terrain, use `VoxelToolTerrain.do_paste` (below).
 
 ## VoxelToolTerrain
 
-!!! warning "Status: stub"
-    This class only stores a node path. It has no editing methods; use
-    `VoxelTerrain.set_voxel_sdf()` instead.
+Obtained from a terrain via `get_voxel_tool()`; edits the live terrain with
+the same semantics, batched into one storage transaction per overlapping data
+block.
 
 | Method | Notes |
 |---|---|
-| `set_terrain_path(path)` / `get_terrain_path()` | Stores/returns a path string. Nothing else. |
+| `do_sphere(center, radius, mode)` | Sphere edit. `mode`: `0` = Add, `1` = Remove. |
+| `do_box(min, max, mode)` | Axis-aligned box edit (inclusive bounds). |
+| `do_hemisphere(center, radius, height_ratio, mode)` | Hemisphere brush. |
+| `do_smooth(center, radius, blur_radius)` | Box-blur smoothing pass. |
+| `do_paste(position, buffer, channel_mask)` | Paste a `VoxelBuffer` (channels + per-voxel metadata) into the terrain. |
+| `set_voxel(position, value)` | Single-voxel write on the tool's channel. |
+| `set_voxel_metadata(position, value)` / `get_voxel_metadata(position)` | Per-voxel metadata (nil/int/float/String/PackedByteArray; nil clears). |
+| `for_each_voxel_metadata_in_area(aabb, callback)` | Visit metadata in a `[min, max)` box (inverted boxes are empty). |
+| `run_blocky_random_tick(aabb, count, callback, batch, tags_mask)` | Tick random-tickable blocky voxels matching `tags_mask`; the scan budget bounds candidates. |
 
 ## SDF modifier nodes
 

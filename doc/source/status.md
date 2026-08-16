@@ -75,5 +75,7 @@ Intentionally **not** next: GPU, SQLite, multipass, Rapier, full Variant, multip
   panicking — unwind across the Godot C ABI is undefined.
 - Fuzz targets exist for `.vox` parsing and block/region payloads, with
   committed seed corpora (`rust/fuzz/seed_corpus/`).
-- Godot smoke tests: a runnable 4.7 project verifying class registration,
-  runtime paging, blocky terrain, and 3-LOD `VoxelLodTerrain`.
+- Godot smoke tests: a runnable 4.7 project with seven checks — class
+  registration, runtime paging, scene loading, runtime correctness
+  (remesh/unload/safety/persistence), 3-LOD `VoxelLodTerrain`, blocky
+  terrain, and instancer streaming.

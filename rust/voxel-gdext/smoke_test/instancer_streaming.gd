@@ -84,6 +84,9 @@ func _process(_delta: float) -> void:
 
 	if phase == 1:
 		if int(terrain.get_mesh_block_count()) > 0:
+			# Mesh convergence and instance streaming get separate budgets:
+			# CI runners can be slower than the machine this was tuned on.
+			deadline_msec = Time.get_ticks_msec() + CONVERGENCE_TIMEOUT_MSEC
 			phase = 2
 	elif phase == 2:
 		var blocks := int(instancer.get_streamed_block_count())

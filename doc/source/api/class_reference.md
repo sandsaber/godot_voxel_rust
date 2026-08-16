@@ -49,16 +49,17 @@ A voxel editing tool over an owned `VoxelBuffer`, providing sphere, box and sing
 
 ### VoxelToolTerrain
 
-Inherits: `RefCounted`
+Returned by `VoxelTerrain.get_voxel_tool()` / `VoxelLodTerrain.get_voxel_tool()`. Live editing tool bound to the terrain core; edits are batched per overlapping data block.
 
-Terrain editing tool that holds a node-path reference to a `VoxelTerrain` for GDScript-callable editing.
-
-*Stub: not equivalent to the upstream C++ class.* Only stores a terrain path; no voxel editing is implemented.
-
-**Methods**
-
-- `set_terrain_path(path: GString)`
-- `get_terrain_path() -> GString`
+- `do_sphere(center: Vector3, radius: f32, mode: i32)` — 0 = Add, 1 = Remove
+- `do_box(min: Vector3i, max: Vector3i, mode: i32)`
+- `do_hemisphere(center: Vector3, radius: f32, height_ratio: f32, mode: i32)`
+- `do_smooth(center: Vector3, radius: f32, blur_radius: i32)`
+- `do_paste(position: Vector3i, buffer: VoxelBuffer, channel_mask: i32)` — pastes channels and per-voxel metadata
+- `set_voxel(position: Vector3i, value: i64)`
+- `set_voxel_metadata(position: Vector3i, value: Variant)` / `get_voxel_metadata(position: Vector3i) -> Variant`
+- `for_each_voxel_metadata_in_area(aabb: Aabb, callback: Callable)`
+- `run_blocky_random_tick(aabb: Aabb, count: i32, callback: Callable, batch_count: i32, tags_mask: i32)`
 
 ### VoxelBlockSerializer
 
@@ -824,14 +825,10 @@ A MultiMesh-based instance library item.
 
 ### VoxelInstanceLibrarySceneItem
 
-Inherits: `Resource`
+Holds a real `PackedScene` slot, paralleling the instancer's scene mode; not yet attachable to the node's internal library.
 
-A scene-based instance library item (places PackedScenes, not multimesh).
-
-*Stub: not equivalent to the upstream C++ class.* Only records a scene path; no scene instantiation.
-
-**Methods**
-
+- `get_scene() -> PackedScene?`
+- `set_scene(scene: PackedScene)`
 - `has_scene() -> bool`
 
 ### VoxelInstanceComponent

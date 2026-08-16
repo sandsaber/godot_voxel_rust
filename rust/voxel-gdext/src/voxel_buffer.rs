@@ -2225,6 +2225,19 @@ impl VoxelToolTerrainGD {
             godot_error!("VoxelToolTerrain.run_blocky_random_tick: area must be finite");
             return;
         }
+        // Bound the scan, not just the results: the box is iterated per
+        // voxel on the main thread, so a giant AABB must be rejected up
+        // front instead of hanging the frame.
+        let span = |lo: i64, hi: i64| (hi - lo + 1).max(0);
+        let volume = span(min.x as i64, max.x as i64)
+            .saturating_mul(span(min.y as i64, max.y as i64))
+            .saturating_mul(span(min.z as i64, max.z as i64));
+        if volume > MAX_SCRIPT_VOXELS as i64 {
+            godot_error!(
+                "VoxelToolTerrain.run_blocky_random_tick: area volume {volume} exceeds the scan budget {MAX_SCRIPT_VOXELS}"
+            );
+            return;
+        }
         let channel = self.channel;
         let mask = tags_mask as u32;
         // The candidate filter runs during the scan: collecting any non-zero

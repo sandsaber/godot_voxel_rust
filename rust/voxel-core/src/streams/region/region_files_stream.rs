@@ -409,10 +409,15 @@ impl RegionFilesStream {
             state.meta = candidate;
             state.saved = true;
             state.loaded = true;
-        }
-        // Another thread may have won the first-save race with a different
-        // (also valid-at-the-time) format; the locked format wins.
-        if !state.meta.matches_buffer(buffer) {
+        } else if !state.meta.matches_buffer(buffer) {
+            // Lost the first-save race: this thread's candidate bytes may be
+            // the ones on disk while the winner's format is authoritative.
+            // Restore the committed meta so the file cannot poison the next
+            // session with a format no block matches.
+            state
+                .meta
+                .save(&self.directory)
+                .map_err(|error| VoxelStreamError::Io(error.to_string()))?;
             return Err(VoxelStreamError::BlockFormatMismatch);
         }
         Ok(state.meta.clone())

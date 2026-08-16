@@ -43,7 +43,8 @@ print(mem.get_block_count())
     Reading and writing `.vxr` region files works. `region_size_po2` and
     `sector_size` are applied when the stream is assigned to terrain, and
     `convert_files` rewrites an existing directory under new region/sector/
-    block sizes (into a sibling directory, then atomically swapped in).
+    block sizes (converted into a sibling directory; on success the old
+    region trees are deleted and the converted trees are moved into place).
 
 Disk persistence using region files, one file per region of
 `(1 << region_size_po2)` blocks per axis.

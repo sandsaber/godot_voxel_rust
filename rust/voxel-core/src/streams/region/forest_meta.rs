@@ -178,8 +178,23 @@ impl RegionForestMeta {
             ForestMetaError::Io(format!("create {}: {error}", directory.display()))
         })?;
         let path = directory.join(META_FILE_NAME);
-        std::fs::write(&path, self.to_json())
-            .map_err(|error| ForestMetaError::Io(format!("write {}: {error}", path.display())))
+        // Write-through-rename so a concurrent reader (or a crash) can never
+        // observe a truncated file: readers treat an unparsable meta.vxrm as
+        // a sticky corrupt-forest error. Each writer uses its own temporary
+        // name — concurrent first-savers would otherwise race one tmp path
+        // (one renames it away, the rest fail with ENOENT).
+        static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let unique = TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = directory.join(format!("{META_FILE_NAME}.{unique}.tmp"));
+        std::fs::write(&tmp, self.to_json())
+            .map_err(|error| ForestMetaError::Io(format!("write {}: {error}", tmp.display())))?;
+        std::fs::rename(&tmp, &path).map_err(|error| {
+            ForestMetaError::Io(format!(
+                "rename {} -> {}: {error}",
+                tmp.display(),
+                path.display()
+            ))
+        })
     }
 }
 

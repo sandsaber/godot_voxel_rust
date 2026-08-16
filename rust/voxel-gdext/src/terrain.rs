@@ -1855,8 +1855,14 @@ pub(crate) fn collect_core_voxels(
     if block_size <= 0 {
         return Vec::new();
     }
-    let lo = Vector3i::new(min.x.min(max.x), min.y.min(max.y), min.z.min(max.z));
-    let hi = Vector3i::new(min.x.max(max.x), min.y.max(max.y), min.z.max(max.z));
+    // An inverted box is empty, not normalized — the same contract the
+    // metadata-area helpers pin. Normalizing would silently tick a swapped
+    // region for a caller that passed min/max in the wrong order.
+    if min.x > max.x || min.y > max.y || min.z > max.z {
+        return Vec::new();
+    }
+    let lo = min;
+    let hi = max;
     let mut out = Vec::new();
     let mut z = lo.z;
     while z <= hi.z && out.len() < max_items {

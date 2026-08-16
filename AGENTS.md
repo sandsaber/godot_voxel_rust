@@ -121,6 +121,8 @@ checkout build it first via the driver:
 ```sh
 cd rust
 ./voxel-gdext/smoke_test/run_smoke_test.sh          # builds library + runs all 7 checks
+# (api_test, runtime paging, smoke scene, runtime correctness,
+#  3-LOD variable LOD, blocky terrain, instancer streaming)
 ```
 
 It runs `api_test.gd` (class registration + `#[func]` surface),

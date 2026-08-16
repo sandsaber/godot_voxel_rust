@@ -83,7 +83,7 @@ cd rust
 It (1) `cargo build`s `voxel-gdext`, (2) copies the `.so`/`.dylib` next to the
 `.gdextension`, then runs:
 
-- **`api_test.gd`** (`godot --headless --script api_test.gd`) — class
+- **`api_test.tscn`** — class
   registration, `VoxelTerrain` instantiate, `set_generator`, property round-trip,
   `VoxelBuffer` voxel read/write. The SDF edit is asserted **honestly**: before
   `_ready()` runs it reports the not-ready state (set=false, sdf=0.0) rather than

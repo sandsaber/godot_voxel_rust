@@ -383,10 +383,14 @@ func _run_lifecycle_checks() -> void:
 	var tool = terrain.get_voxel_tool()
 	_ok(tool != null, "get_voxel_tool returns a live VoxelToolTerrain")
 	if tool != null:
-		var before := float(terrain.get_voxel_sdf(edit_voxel.x, edit_voxel.y, edit_voxel.z))
+		# Force the strong branch: an Add sphere centered on an air voxel
+		# (SDF +1) must solidify it, regardless of which mesh uploaded first
+		# (the old `after != before or after < 0.0` form passed vacuously
+		# whenever the pre-edit voxel was already solid).
+		assert(bool(terrain.set_voxel_sdf(edit_voxel.x, edit_voxel.y, edit_voxel.z, 1.0)))
 		tool.do_sphere(Vector3(edit_voxel.x, edit_voxel.y, edit_voxel.z), 1.5, 0)
 		var after := float(terrain.get_voxel_sdf(edit_voxel.x, edit_voxel.y, edit_voxel.z))
-		_ok(after != before or after < 0.0, "VoxelToolTerrain.do_sphere edits the bound terrain")
+		_ok(after < 0.0, "VoxelToolTerrain.do_sphere solidifies a +1 SDF voxel (after=%f)" % after)
 		edited_value = after
 	_ok(
 		bool(terrain.flush_pending_saves())
