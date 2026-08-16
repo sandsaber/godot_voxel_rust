@@ -205,10 +205,11 @@
       "status": "partial",
       "binding_state": "registered",
       "registered_name": "VoxelBlockyModelMesh",
-      "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
+      "evidence": "Mesh triangles bake into interior vs cube-side surfaces using side_vertex_tolerance. mesh_ortho_rotation_index rotates about the cube center (24 ortho bases). side_cutout_enabled is forwarded so bake_library can pre-cut neighbor faces.",
       "source_paths": [
         "upstream:doc/classes/VoxelBlockyModelMesh.xml",
-        "rust/voxel-gdext/src/resources3.rs"
+        "rust/voxel-gdext/src/resources3.rs",
+        "rust/voxel-core/src/meshers/blocky/mesh_geometry.rs"
       ],
       "behavioral_tests": []
     },

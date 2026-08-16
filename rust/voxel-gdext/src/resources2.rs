@@ -3996,12 +3996,16 @@ impl VoxelBlockyModelGD {
 impl VoxelBlockyModelGD {
     /// Bake inspector fields (color, tags, random-tick) into a core model.
     pub(crate) fn to_baked_model(&self) -> voxel_core::meshers::blocky::BakedModel {
-        let mut model =
+        let cube =
             voxel_core::meshers::blocky::solid_cube_model(voxel_core::math::Color::from_rgb(
                 self.color_value.r,
                 self.color_value.g,
                 self.color_value.b,
             ));
+        let mut model = voxel_core::meshers::blocky::apply_ortho_rotation(
+            cube,
+            usize::try_from(self.mesh_ortho_rotation_index_value.max(0)).unwrap_or(0),
+        );
         model.is_random_tickable = self.random_tickable_value;
         model.tags_mask = self.tags_mask_value as u32;
         model.culls_neighbors = self.culls_neighbors_value;

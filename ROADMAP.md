@@ -19,7 +19,7 @@ work is Godot model-resource peers (meshes/materials), not the paging path.
 - [x] `add_model` keeps Godot resources; cube/mesh/empty/fluid bake into the
       library (mesh items currently bake as colored cubes)
 - [x] Bake assigned Godot mesh triangles into the interior blocky surface
-- [ ] Side-cutout / ortho-rotation parity with upstream mesh bake
+- [x] Side-cutout / ortho-rotation parity with upstream mesh bake
 
 ## R2 — VoxelLodTerrain paging & rendering 🟡
 
