@@ -3364,19 +3364,290 @@ impl VoxelTerrainCore {
         self.commit_prepared_voxel_edit(publication).map(Some)
     }
 
+    /// Apply a shape edit to every LOD0 block overlapping the voxel AABB
+    /// `[min, max]` (inclusive). One storage transaction is published per
+    /// overlapping block instead of one per voxel.
+    pub fn try_edit_sphere(
+        &mut self,
+        center: crate::math::Vector3f,
+        radius: f32,
+        channel_index: usize,
+        mode: crate::edition::EditMode,
+        value: u64,
+    ) -> Result<u32, VoxelTerrainRuntimeError> {
+        if !center.x.is_finite()
+            || !center.y.is_finite()
+            || !center.z.is_finite()
+            || !radius.is_finite()
+            || radius < 0.0
+        {
+            return Ok(0);
+        }
+        if channel_index >= crate::storage::voxel_buffer::MAX_CHANNELS {
+            return Ok(0);
+        }
+        let min = Vector3i::new(
+            (center.x - radius).floor() as i32,
+            (center.y - radius).floor() as i32,
+            (center.z - radius).floor() as i32,
+        );
+        let max = Vector3i::new(
+            (center.x + radius).ceil() as i32,
+            (center.y + radius).ceil() as i32,
+            (center.z + radius).ceil() as i32,
+        );
+        self.try_edit_overlapping_blocks(min, max, |buffer, origin| {
+            let local_center = crate::math::Vector3f::new(
+                center.x - origin.x as f32,
+                center.y - origin.y as f32,
+                center.z - origin.z as f32,
+            );
+            crate::edition::do_sphere(buffer, channel_index, mode, value, local_center, radius);
+        })
+    }
+
+    /// Apply a box edit to every LOD0 block overlapping `[min, max]`
+    /// (inclusive). `do_box` uses an exclusive max, so this converts.
+    pub fn try_edit_box(
+        &mut self,
+        min: Vector3i,
+        max: Vector3i,
+        channel_index: usize,
+        mode: crate::edition::EditMode,
+        value: u64,
+    ) -> Result<u32, VoxelTerrainRuntimeError> {
+        if channel_index >= crate::storage::voxel_buffer::MAX_CHANNELS {
+            return Ok(0);
+        }
+        let lo = Vector3i::new(min.x.min(max.x), min.y.min(max.y), min.z.min(max.z));
+        let hi = Vector3i::new(min.x.max(max.x), min.y.max(max.y), min.z.max(max.z));
+        // Inclusive GDScript/tool contract → exclusive core `do_box`.
+        let exclusive = Vector3i::new(
+            hi.x.saturating_add(1),
+            hi.y.saturating_add(1),
+            hi.z.saturating_add(1),
+        );
+        self.try_edit_overlapping_blocks(lo, hi, |buffer, origin| {
+            let local_min = Vector3i::new(lo.x - origin.x, lo.y - origin.y, lo.z - origin.z);
+            let local_max = Vector3i::new(
+                exclusive.x - origin.x,
+                exclusive.y - origin.y,
+                exclusive.z - origin.z,
+            );
+            crate::edition::do_box(buffer, channel_index, mode, value, local_min, local_max);
+        })
+    }
+
+    /// Hemisphere brush: sphere cut by the plane whose outward normal is
+    /// `flat_direction`. `smoothness` rounds the crease.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_edit_hemisphere(
+        &mut self,
+        center: crate::math::Vector3f,
+        radius: f32,
+        flat_direction: crate::math::Vector3f,
+        smoothness: f32,
+        channel_index: usize,
+        mode: crate::edition::EditMode,
+        value: u64,
+    ) -> Result<u32, VoxelTerrainRuntimeError> {
+        if !center.x.is_finite()
+            || !center.y.is_finite()
+            || !center.z.is_finite()
+            || !radius.is_finite()
+            || radius < 0.0
+            || !flat_direction.x.is_finite()
+            || !flat_direction.y.is_finite()
+            || !flat_direction.z.is_finite()
+            || !smoothness.is_finite()
+            || smoothness < 0.0
+        {
+            return Ok(0);
+        }
+        if channel_index >= crate::storage::voxel_buffer::MAX_CHANNELS {
+            return Ok(0);
+        }
+        let pad = radius + smoothness;
+        let min = Vector3i::new(
+            (center.x - pad).floor() as i32,
+            (center.y - pad).floor() as i32,
+            (center.z - pad).floor() as i32,
+        );
+        let max = Vector3i::new(
+            (center.x + pad).ceil() as i32,
+            (center.y + pad).ceil() as i32,
+            (center.z + pad).ceil() as i32,
+        );
+        self.try_edit_overlapping_blocks(min, max, |buffer, origin| {
+            let local_center = crate::math::Vector3f::new(
+                center.x - origin.x as f32,
+                center.y - origin.y as f32,
+                center.z - origin.z as f32,
+            );
+            crate::edition::do_hemisphere(
+                buffer,
+                channel_index,
+                mode,
+                value,
+                local_center,
+                radius,
+                flat_direction,
+                smoothness,
+            );
+        })
+    }
+
+    /// Smooth the SDF channel inside a sphere of influence.
+    pub fn try_edit_smooth(
+        &mut self,
+        center: crate::math::Vector3f,
+        radius: f32,
+        blur_radius: i32,
+        channel_index: usize,
+    ) -> Result<u32, VoxelTerrainRuntimeError> {
+        if !center.x.is_finite()
+            || !center.y.is_finite()
+            || !center.z.is_finite()
+            || !radius.is_finite()
+            || radius < 0.0
+            || blur_radius < 0
+        {
+            return Ok(0);
+        }
+        if channel_index >= crate::storage::voxel_buffer::MAX_CHANNELS {
+            return Ok(0);
+        }
+        let min = Vector3i::new(
+            (center.x - radius).floor() as i32,
+            (center.y - radius).floor() as i32,
+            (center.z - radius).floor() as i32,
+        );
+        let max = Vector3i::new(
+            (center.x + radius).ceil() as i32,
+            (center.y + radius).ceil() as i32,
+            (center.z + radius).ceil() as i32,
+        );
+        self.try_edit_overlapping_blocks(min, max, |buffer, origin| {
+            let local_center = crate::math::Vector3f::new(
+                center.x - origin.x as f32,
+                center.y - origin.y as f32,
+                center.z - origin.z as f32,
+            );
+            crate::edition::do_smooth(buffer, channel_index, local_center, radius, blur_radius);
+        })
+    }
+
+    fn try_edit_overlapping_blocks(
+        &mut self,
+        min: Vector3i,
+        max: Vector3i,
+        mut apply: impl FnMut(&mut crate::storage::VoxelBuffer, Vector3i),
+    ) -> Result<u32, VoxelTerrainRuntimeError> {
+        if self.shutdown_epoch.is_some() {
+            return Err(VoxelTerrainRuntimeError::ShutdownRetryPending);
+        }
+        let block_size = self.data_block_size();
+        if block_size <= 0 {
+            return Ok(0);
+        }
+        let min_block = Vector3i::new(
+            min.x.div_euclid(block_size),
+            min.y.div_euclid(block_size),
+            min.z.div_euclid(block_size),
+        );
+        let max_block = Vector3i::new(
+            max.x.div_euclid(block_size),
+            max.y.div_euclid(block_size),
+            max.z.div_euclid(block_size),
+        );
+        let mut edited = 0u32;
+        let mut z = min_block.z;
+        while z <= max_block.z {
+            let mut y = min_block.y;
+            while y <= max_block.y {
+                let mut x = min_block.x;
+                while x <= max_block.x {
+                    let block_pos = Vector3i::new(x, y, z);
+                    if self
+                        .try_edit_lod0_block(block_pos, |buffer, origin| apply(buffer, origin))?
+                        .is_some()
+                    {
+                        edited = edited.saturating_add(1);
+                    }
+                    x = match x.checked_add(1) {
+                        Some(next) => next,
+                        None => break,
+                    };
+                }
+                y = match y.checked_add(1) {
+                    Some(next) => next,
+                    None => break,
+                };
+            }
+            z = match z.checked_add(1) {
+                Some(next) => next,
+                None => break,
+            };
+        }
+        Ok(edited)
+    }
+
+    fn try_edit_lod0_block(
+        &mut self,
+        block_position: Vector3i,
+        apply: impl FnOnce(&mut crate::storage::VoxelBuffer, Vector3i),
+    ) -> Result<Option<VoxelEditOutcome>, VoxelTerrainRuntimeError> {
+        if self.shutdown_epoch.is_some() {
+            return Err(VoxelTerrainRuntimeError::ShutdownRetryPending);
+        }
+        let Some(prepared_edit) = self
+            .data
+            .prepare_lod0_block_edit(block_position, apply)
+            .map_err(map_voxel_edit_storage_error)?
+        else {
+            return Ok(None);
+        };
+        let block_size = self.data_block_size();
+        let origin = Vector3i::new(
+            block_position.x.saturating_mul(block_size),
+            block_position.y.saturating_mul(block_size),
+            block_position.z.saturating_mul(block_size),
+        );
+        let far = Vector3i::new(
+            origin.x.saturating_add(block_size.saturating_sub(1)),
+            origin.y.saturating_add(block_size.saturating_sub(1)),
+            origin.z.saturating_add(block_size.saturating_sub(1)),
+        );
+        let Some(publication) =
+            self.finish_prepared_edit_publication(prepared_edit, origin, far)?
+        else {
+            return Ok(None);
+        };
+        self.commit_prepared_voxel_edit(publication).map(Some)
+    }
+
     fn prepare_voxel_edit_publication(
         &mut self,
         value: u64,
         position: Vector3i,
         channel_index: usize,
     ) -> Result<Option<PreparedVoxelEditPublication>, VoxelTerrainRuntimeError> {
-        let Some(mut prepared_edit) = self
+        let Some(prepared_edit) = self
             .data
             .prepare_voxel_edit(value, position, channel_index)
             .map_err(map_voxel_edit_storage_error)?
         else {
             return Ok(None);
         };
+        self.finish_prepared_edit_publication(prepared_edit, position, position)
+    }
+
+    fn finish_prepared_edit_publication(
+        &mut self,
+        mut prepared_edit: crate::storage::voxel_data::PreparedSharedVoxelDataEdit,
+        edit_min: Vector3i,
+        edit_max: Vector3i,
+    ) -> Result<Option<PreparedVoxelEditPublication>, VoxelTerrainRuntimeError> {
         let edited_block = prepared_edit.edited_block();
         let block_revision = prepared_edit.block_revision();
         let mut inserted_data_locations = Vec::new();
@@ -3483,8 +3754,9 @@ impl VoxelTerrainCore {
         let mut next_request_generation = self.next_request_generation;
         let mut next_mesh_revision = self.next_mesh_revision;
         for (lod_index, queue_additions) in queue_additions.iter_mut().enumerate() {
-            let (minimum, maximum, candidate_count) = checked_edit_mesh_block_bounds(
-                position,
+            let (minimum, maximum, candidate_count) = checked_edit_mesh_block_bounds_span(
+                edit_min,
+                edit_max,
                 mesher.minimum_padding(),
                 mesher.maximum_padding(),
                 self.data_block_size(),
@@ -15875,6 +16147,65 @@ fn compute_viewer_boxes_multi_lod(state: &mut ViewerState, data_block_size: i32,
 
 fn floor_div_vec(v: Vector3i, b: i32) -> Vector3i {
     Vector3i::new(v.x.div_euclid(b), v.y.div_euclid(b), v.z.div_euclid(b))
+}
+
+fn checked_edit_mesh_block_bounds_span(
+    edit_min: Vector3i,
+    edit_max: Vector3i,
+    minimum_padding: u32,
+    maximum_padding: u32,
+    data_block_size: i32,
+    lod_index: usize,
+) -> Result<(Vector3i, Vector3i, usize), VoxelTerrainRuntimeError> {
+    let (min_a, max_a, _) = checked_edit_mesh_block_bounds(
+        edit_min,
+        minimum_padding,
+        maximum_padding,
+        data_block_size,
+        lod_index,
+    )?;
+    if edit_min == edit_max {
+        let count = block_span_count(min_a, max_a)?;
+        return Ok((min_a, max_a, count));
+    }
+    let (min_b, max_b, _) = checked_edit_mesh_block_bounds(
+        edit_max,
+        minimum_padding,
+        maximum_padding,
+        data_block_size,
+        lod_index,
+    )?;
+    let minimum = Vector3i::new(
+        min_a.x.min(min_b.x),
+        min_a.y.min(min_b.y),
+        min_a.z.min(min_b.z),
+    );
+    let maximum = Vector3i::new(
+        max_a.x.max(max_b.x),
+        max_a.y.max(max_b.y),
+        max_a.z.max(max_b.z),
+    );
+    let count = block_span_count(minimum, maximum)?;
+    Ok((minimum, maximum, count))
+}
+
+fn block_span_count(
+    minimum: Vector3i,
+    maximum: Vector3i,
+) -> Result<usize, VoxelTerrainRuntimeError> {
+    let axis_count = |min: i32, max: i32| {
+        i64::from(max)
+            .checked_sub(i64::from(min))?
+            .checked_add(1)
+            .and_then(|count| usize::try_from(count).ok())
+    };
+    axis_count(minimum.x, maximum.x)
+        .and_then(|x| {
+            axis_count(minimum.y, maximum.y).and_then(|y| {
+                axis_count(minimum.z, maximum.z).and_then(|z| x.checked_mul(y)?.checked_mul(z))
+            })
+        })
+        .ok_or(VoxelTerrainRuntimeError::CoordinateOverflow)
 }
 
 fn checked_edit_mesh_block_bounds(

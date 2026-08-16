@@ -1092,6 +1092,78 @@ fn make_edit_core_with_mesher_and_lods(
     )
 }
 
+#[test]
+fn batch_sphere_edit_writes_one_block_instead_of_per_voxel() {
+    let mut core = make_edit_core_with_lods(1);
+    let edited = core
+        .try_edit_sphere(
+            crate::math::Vector3f::new(8.0, 8.0, 8.0),
+            3.0,
+            ChannelId::Type.index(),
+            crate::edition::EditMode::Set,
+            7,
+        )
+        .expect("sphere edit should publish");
+    assert_eq!(
+        edited, 1,
+        "a 3-radius sphere at block center spans one block"
+    );
+    let snapshot = core
+        .data()
+        .block_snapshot(Vector3i::zero(), 0)
+        .expect("edited block is resident");
+    assert!(snapshot.has_voxels());
+    assert_eq!(
+        snapshot
+            .voxels()
+            .get_voxel(8, 8, 8, ChannelId::Type.index()),
+        7
+    );
+    assert_eq!(
+        snapshot
+            .voxels()
+            .get_voxel(0, 0, 0, ChannelId::Type.index()),
+        0
+    );
+}
+
+#[test]
+fn batch_box_edit_fills_inclusive_bounds() {
+    let mut core = make_edit_core_with_lods(1);
+    let edited = core
+        .try_edit_box(
+            Vector3i::new(1, 1, 1),
+            Vector3i::new(2, 2, 2),
+            ChannelId::Type.index(),
+            crate::edition::EditMode::Set,
+            5,
+        )
+        .expect("box edit should publish");
+    assert_eq!(edited, 1);
+    let snapshot = core
+        .data()
+        .block_snapshot(Vector3i::zero(), 0)
+        .expect("edited block is resident");
+    assert_eq!(
+        snapshot
+            .voxels()
+            .get_voxel(1, 1, 1, ChannelId::Type.index()),
+        5
+    );
+    assert_eq!(
+        snapshot
+            .voxels()
+            .get_voxel(2, 2, 2, ChannelId::Type.index()),
+        5
+    );
+    assert_eq!(
+        snapshot
+            .voxels()
+            .get_voxel(3, 3, 3, ChannelId::Type.index()),
+        0
+    );
+}
+
 fn requested_mesh_locations(core: &VoxelTerrainCore) -> Vec<MeshBlockLocation> {
     let mut locations = core
         .mesh_maps

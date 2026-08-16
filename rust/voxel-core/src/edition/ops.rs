@@ -75,6 +75,31 @@ impl<'a> VoxelToolBuffer<'a> {
         do_box(self.buffer, self.channel, self.mode, self.value, min, max);
     }
 
+    /// Edit a hemisphere. `flat_direction` is the outward normal of the flat face.
+    pub fn do_hemisphere(
+        &mut self,
+        center: Vector3f,
+        radius: f32,
+        flat_direction: Vector3f,
+        smoothness: f32,
+    ) {
+        do_hemisphere(
+            self.buffer,
+            self.channel,
+            self.mode,
+            self.value,
+            center,
+            radius,
+            flat_direction,
+            smoothness,
+        );
+    }
+
+    /// Smooth the SDF channel inside a sphere of influence.
+    pub fn do_smooth(&mut self, center: Vector3f, radius: f32, blur_radius: i32) {
+        do_smooth(self.buffer, self.channel, center, radius, blur_radius);
+    }
+
     /// Set a single voxel at integer position.
     pub fn set_voxel(&mut self, pos: Vector3i, value: u64) {
         if pos.x < 0 || pos.y < 0 || pos.z < 0 {
@@ -225,6 +250,136 @@ pub fn do_box(
             }
         }
     }
+}
+
+/// Signed distance of a hemisphere: the intersection of a sphere and the
+/// half-space opposite `flat_direction` (the outward normal of the flat face).
+/// `smoothness` > 0 rounds the crease with a polynomial smooth intersection.
+pub fn hemisphere_sdf(
+    point: Vector3f,
+    center: Vector3f,
+    radius: f32,
+    flat_direction: Vector3f,
+    smoothness: f32,
+) -> f32 {
+    let dx = point.x - center.x;
+    let dy = point.y - center.y;
+    let dz = point.z - center.z;
+    let sphere = (dx * dx + dy * dy + dz * dz).sqrt() - radius;
+    let len_sq = flat_direction.x * flat_direction.x
+        + flat_direction.y * flat_direction.y
+        + flat_direction.z * flat_direction.z;
+    let (nx, ny, nz) = if len_sq > 1e-16 {
+        let inv = len_sq.sqrt().recip();
+        (
+            flat_direction.x * inv,
+            flat_direction.y * inv,
+            flat_direction.z * inv,
+        )
+    } else {
+        (0.0, 1.0, 0.0)
+    };
+    let plane = dx * nx + dy * ny + dz * nz;
+    smooth_intersection(sphere, plane, smoothness.max(0.0))
+}
+
+fn smooth_union(a: f32, b: f32, k: f32) -> f32 {
+    if k <= 0.0 {
+        return a.min(b);
+    }
+    let h = (0.5 + 0.5 * (b - a) / k).clamp(0.0, 1.0);
+    b * (1.0 - h) + a * h - k * h * (1.0 - h)
+}
+
+fn smooth_intersection(a: f32, b: f32, k: f32) -> f32 {
+    if k <= 0.0 {
+        return a.max(b);
+    }
+    -smooth_union(-a, -b, k)
+}
+
+/// Apply a hemisphere edit to a VoxelBuffer's channel.
+#[allow(clippy::too_many_arguments)]
+pub fn do_hemisphere(
+    buffer: &mut VoxelBuffer,
+    channel: usize,
+    mode: EditMode,
+    value: u64,
+    center: Vector3f,
+    radius: f32,
+    flat_direction: Vector3f,
+    smoothness: f32,
+) {
+    let depth = buffer.channel_depth(channel);
+    let is_sdf = channel == ChannelId::Sdf.index();
+    let size = buffer.size();
+    let pad = radius + smoothness.max(0.0);
+    let min = Vector3i::new(
+        (center.x - pad).floor() as i32,
+        (center.y - pad).floor() as i32,
+        (center.z - pad).floor() as i32,
+    )
+    .max_element(Vector3i::zero());
+    let max = Vector3i::new(
+        (center.x + pad).ceil() as i32,
+        (center.y + pad).ceil() as i32,
+        (center.z + pad).ceil() as i32,
+    )
+    .min_element(size);
+    if min.x >= max.x || min.y >= max.y || min.z >= max.z {
+        return;
+    }
+
+    buffer.decompress_channel(channel);
+
+    for z in min.z..max.z {
+        for y in min.y..max.y {
+            for x in min.x..max.x {
+                let point = Vector3f::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
+                let sdf = hemisphere_sdf(point, center, radius, flat_direction, smoothness);
+                if sdf > 0.0 {
+                    continue;
+                }
+                if is_sdf && depth != ChannelDepth::Bit8 {
+                    let existing = buffer.get_voxel_f(x, y, z, channel);
+                    let blended = blend_sdf(existing, sdf, mode);
+                    buffer.set_voxel_f(blended, x, y, z, channel);
+                } else {
+                    match mode {
+                        EditMode::Add => {
+                            let cur = buffer.get_voxel(x, y, z, channel);
+                            if cur == 0 {
+                                buffer.set_voxel(value, x, y, z, channel);
+                            }
+                        }
+                        EditMode::Remove => {
+                            buffer.set_voxel(0, x, y, z, channel);
+                        }
+                        EditMode::Set => {
+                            buffer.set_voxel(value, x, y, z, channel);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Smooth the SDF channel inside a sphere of influence using [`box_blur`].
+pub fn do_smooth(
+    buffer: &mut VoxelBuffer,
+    channel: usize,
+    center: Vector3f,
+    radius: f32,
+    blur_radius: i32,
+) {
+    if channel != ChannelId::Sdf.index() || !radius.is_finite() || radius < 0.0 {
+        return;
+    }
+    let mut src = VoxelBuffer::with_size(buffer.size());
+    src.set_channel_depth(channel, buffer.channel_depth(channel));
+    src.copy_channel_from(buffer, channel);
+    box_blur(&src, buffer, blur_radius.max(0), center, radius);
 }
 
 /// Blend the shape SDF with the existing voxel SDF value.
@@ -428,6 +583,49 @@ mod tests {
         // Corner should still be outside.
         let corner = buf.get_voxel_f(0, 0, 0, ch);
         assert!(corner > 0.0, "corner should remain air, got {corner}");
+    }
+
+    #[test]
+    fn do_hemisphere_is_half_of_a_sphere() {
+        let mut buf = make_buffer(16);
+        let ch = ChannelId::Sdf.index();
+        buf.clear_channel_f(ch, 100.0);
+        do_hemisphere(
+            &mut buf,
+            ch,
+            EditMode::Add,
+            1,
+            Vector3f::new(8.0, 8.0, 8.0),
+            4.0,
+            Vector3f::new(0.0, 1.0, 0.0),
+            0.0,
+        );
+        assert!(
+            buf.get_voxel_f(8, 6, 8, ch) < 0.0,
+            "below the equator should be solid"
+        );
+        assert!(
+            buf.get_voxel_f(8, 10, 8, ch) > 0.0,
+            "above the flat face should stay air"
+        );
+    }
+
+    #[test]
+    fn do_smooth_moves_a_sharp_sdf_boundary() {
+        let mut buf = make_buffer(8);
+        let ch = ChannelId::Sdf.index();
+        buf.clear_channel_f(ch, 1.0);
+        for z in 0..8 {
+            for y in 0..8 {
+                for x in 0..4 {
+                    buf.set_voxel_f(-1.0, x, y, z, ch);
+                }
+            }
+        }
+        let before = buf.get_voxel_f(3, 4, 4, ch);
+        do_smooth(&mut buf, ch, Vector3f::new(4.0, 4.0, 4.0), 8.0, 1);
+        let after = buf.get_voxel_f(3, 4, 4, ch);
+        assert!(after > before, "blur should pull the solid side toward air");
     }
 
     #[test]
