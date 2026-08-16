@@ -51,14 +51,17 @@ design with the GPU path).
 The design pass is done: [doc/source/multiplayer.md](doc/source/multiplayer.md)
 is the replication-boundary decision record (server-authoritative; edits as
 deltas ordered by `block_revision`, edited blocks as v4 serializer bytes;
-LOD0 only; generator blocks never replicated). The interest index is ported
-as pure Rust. What remains is the network product itself.
+LOD0 only; generator blocks never replicated; revisions valid per server
+process, dropped on rejoin). The interest index is reimplemented as pure
+Rust. What remains is the network product itself.
 
 - [x] Write the replication boundary: what is authoritative (edits vs whole
       blocks), how it meets `try_edit_*`, dirty flags, LOD, and stream save
 - [x] Port `VoxelAreaFinder` (who cares about which box; what to load/send) —
-      `voxel-core::terrain::area_finder` (spatial hash + deterministic
-      queries + `box_subtraction` for entered/exited interest boxes)
+      `voxel-core::terrain::area_finder` reimplements upstream's linear
+      `get_viewers_in_area` query with a spatial hash, deterministic results,
+      a hostile-box cell budget, and `box_subtraction` for entered/exited
+      interest boxes
 - [ ] Only then implement a transport / interest protocol. Not started; needs
       an explicit go-ahead and a peer/RPC owner (gdext or game-side crate).
 
