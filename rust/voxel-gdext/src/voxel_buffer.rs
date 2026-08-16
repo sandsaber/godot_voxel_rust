@@ -810,7 +810,12 @@ impl VoxelBufferGD {
     /// Clears the metadata entry for a single voxel.
     #[func]
     fn clear_voxel_metadata(&mut self, position: godot::builtin::Vector3i) {
+        let size = self.buffer.size();
         let pos = Vector3i::new(position.x, position.y, position.z);
+        if validate_position(pos, size).is_err() {
+            godot_error!("VoxelBuffer.clear_voxel_metadata: position is outside the buffer");
+            return;
+        }
         self.buffer.clear_voxel_metadata(pos);
     }
 
@@ -1153,6 +1158,8 @@ pub struct VoxelInstancerGD {
     /// Density multiplier.
     #[var]
     density_multiplier: f32,
+    /// Whether the no-surface-points warning has fired (one-shot).
+    warned_no_surface: bool,
 }
 
 /// A node spawned for one streamed instance block: one `MultiMeshInstance3D`
@@ -1186,6 +1193,7 @@ impl INode3D for VoxelInstancerGD {
             instance_blocks: voxel_core::instancing::InstanceBlockMap::new(),
             streamed_nodes: HashMap::new(),
             density_multiplier: 1.0,
+            warned_no_surface: false,
         }
     }
 
@@ -1291,9 +1299,14 @@ impl VoxelInstancerGD {
     #[func]
     fn get_item_scene(&self, index: i32) -> Option<Gd<PackedScene>> {
         let Ok(index) = usize::try_from(index) else {
+            godot_error!("VoxelInstancer.get_item_scene: index must be non-negative");
             return None;
         };
-        self.item_scenes.get(index).cloned().flatten()
+        let scene = self.item_scenes.get(index).cloned().flatten();
+        if scene.is_none() && index >= self.item_scenes.len() {
+            godot_error!("VoxelInstancer.get_item_scene: index is out of range");
+        }
+        scene
     }
 
     /// Get the number of items in the library.
@@ -1339,6 +1352,10 @@ impl VoxelInstancerGD {
             drop(buf_gd);
 
             if positions.is_empty() {
+                // The contract says the result replaces this node's children:
+                // an emptied surface must clear the previous scatter, not
+                // keep it rendering.
+                self.clear_uploads();
                 return 0;
             }
 
@@ -1373,6 +1390,7 @@ impl VoxelInstancerGD {
             self.upload_scatter_instances(&by_item);
             return i32::try_from(total).unwrap_or(i32::MAX);
         }
+        godot_error!("VoxelInstancer.scatter_from_buffer: argument must be a VoxelBuffer");
         0
     }
 
@@ -1454,13 +1472,25 @@ impl VoxelInstancerGD {
 }
 
 impl VoxelInstancerGD {
+    /// Free the children created by the last one-shot scatter. Nodes are
+    /// removed from the tree before `queue_free` so same-frame re-scatters
+    /// never present two generations as siblings (Godot would otherwise
+    /// auto-mangle the new children's names for the rest of the frame).
+    fn clear_uploads(&mut self) {
+        let mut instances = std::mem::take(&mut self.uploaded_instances);
+        let mut scenes = std::mem::take(&mut self.uploaded_scene_nodes);
+        for mut old in instances.drain(..) {
+            self.base_mut().remove_child(&old);
+            old.queue_free();
+        }
+        for mut old in scenes.drain(..) {
+            self.base_mut().remove_child(&old);
+            old.queue_free();
+        }
+    }
+
     fn upload_scatter_instances(&mut self, by_item: &[Vec<BlockInstanceData>]) {
-        for mut old in self.uploaded_instances.drain(..) {
-            old.queue_free();
-        }
-        for mut old in self.uploaded_scene_nodes.drain(..) {
-            old.queue_free();
-        }
+        self.clear_uploads();
         let default_mesh = BoxMesh::new_gd().upcast::<godot::classes::Mesh>();
         for (item_index, instances) in by_item.iter().enumerate() {
             if instances.is_empty() {
@@ -1557,6 +1587,14 @@ impl VoxelInstancerGD {
 
     fn load_instance_block(&mut self, position: Vector3i, lod_index: u8, block_size: i32) {
         let (positions, normals) = self.parent_surface_points(position, block_size);
+        if positions.is_empty() && !self.warned_no_surface {
+            self.warned_no_surface = true;
+            godot_warn!(
+                "VoxelInstancer: a mesh block produced zero surface points. Surface extraction \
+                 reads the TYPE channel and looks for solid voxels with air immediately below; \
+                 SDF-only terrain and flat-filled slabs yield no instances."
+            );
+        }
         let instances = voxel_core::instancing::scatter_block_instances(
             &self.library,
             &self.config,
@@ -1581,7 +1619,16 @@ impl VoxelInstancerGD {
             .remove(&(position.x, position.y, position.z, lod_index))
         {
             for node in nodes {
-                node.queue_free();
+                match node {
+                    StreamedInstanceNode::MultiMesh(mut old) => {
+                        self.base_mut().remove_child(&old);
+                        old.queue_free();
+                    }
+                    StreamedInstanceNode::Scene(mut old) => {
+                        self.base_mut().remove_child(&old);
+                        old.queue_free();
+                    }
+                }
             }
         }
     }
@@ -1612,7 +1659,7 @@ impl VoxelInstancerGD {
                     "scene_lod{lod_index}_{}_{}_{}_{item_index}",
                     position.x, position.y, position.z
                 );
-                for mut node in instantiate_scene_nodes(&scene, &prefix, instances) {
+                for node in instantiate_scene_nodes(&scene, &prefix, instances) {
                     self.base_mut().add_child(&node);
                     nodes.push(StreamedInstanceNode::Scene(node));
                 }
@@ -1681,11 +1728,11 @@ fn scene_root_is_node3d(scene: &Gd<PackedScene>) -> bool {
         return false;
     };
     match probe.try_cast::<Node3D>() {
-        Ok(mut root) => {
+        Ok(root) => {
             root.free();
             true
         }
-        Err(mut orphan) => {
+        Err(orphan) => {
             orphan.free();
             false
         }
@@ -1726,7 +1773,7 @@ fn instantiate_scene_nodes(
         // explicitly — dropping a manually-managed `Gd` alone would leak it.
         let mut node = match instantiated.try_cast::<Node3D>() {
             Ok(node) => node,
-            Err(mut orphan) => {
+            Err(orphan) => {
                 godot_error!(
                     "VoxelInstancer: scene root of item must be a Node3D; instance {i} skipped"
                 );

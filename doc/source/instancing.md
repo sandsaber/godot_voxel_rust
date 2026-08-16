@@ -32,6 +32,12 @@ A `Node3D` with its own internal item library and scatter configuration.
 
 Surface extraction reads the buffer's Type channel: a voxel is a surface point
 when it is solid (`!= 0`) and the voxel directly below it is air (`== 0`).
+This also applies to the streaming path: **SDF-only terrain (the default
+Waves/Transvoxel setup) and flat-filled slabs produce zero instances** —
+there is no Type-channel geometry with air underneath. Use a generator that
+writes overhangs into the Type channel (e.g. noise) until an SDF-aware
+extractor lands; the instancer prints a one-time warning the first time a
+mesh block yields no points.
 The buffer must contain blocky-style type data — an SDF-only buffer produces
 no points.
 

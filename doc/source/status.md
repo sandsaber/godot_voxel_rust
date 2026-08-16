@@ -42,7 +42,7 @@ That file is the product queue; this page is the parity matrix.
 | Editing terrain | ✅ tool | Live `VoxelToolTerrain` on both nodes: sphere/box/hemisphere/smooth/paste, batched per data block, tags-aware random-tick. Metadata persists through save/load (R7 narrow); C++ Dictionary/Object payloads stay unreadable until R7 wide. |
 | Raycast | ✅ | DDA voxel traversal over the SDF channel. |
 | `VoxelLodTerrain` | ✅ runtime | Production clipbox planner, 3-LOD smoke scene, collision settings, lifecycle signals, wireframe debug-draw. GPU/normalmap inspector fields remain stored stubs. |
-| Instancer rendering | ✅ | Scatter uploads MultiMeshes; as a terrain child it streams one instance block per paged LOD0 mesh block. Scene items (`set_item_scene`) spawn real `Node3D`s per instance, streamed and freed with paging. |
+| Instancer rendering | ✅ | Scatter uploads MultiMeshes; as a terrain child it streams one instance block per paged LOD0 mesh block. Scene items (`set_item_scene`) spawn real `Node3D`s per instance, streamed and freed with paging. Streaming extracts from the Type channel only (SDF-only terrain yields zero instances, warned once). |
 | Editor plugins | 🟡 | `.vox` parsing real. Voxel Graph bottom panel is a working GraphEdit addon. Instancer plugin is still a stub host. |
 | `VoxelBoxMover` / `VoxelAStarGrid3D` | 🟡 | Registered, but semantics differ from upstream (no physics-aware movement / no pathfinding engine yet). |
 | `VoxelStreamSQLite`, `VoxelVoxLoader` | 🟡 | Placeholders (path/extension validation only). SQLite is deferred by design. |
