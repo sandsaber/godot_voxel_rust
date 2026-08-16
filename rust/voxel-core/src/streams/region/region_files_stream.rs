@@ -134,6 +134,50 @@ impl RegionFilesStream {
         self.sector_size
     }
 
+    /// Rewrite every `.vxr` under `source` into `destination` using
+    /// `new_region_size` / `new_sector_size`. Returns the number of blocks
+    /// copied. Source files are left untouched.
+    pub fn convert_directory(
+        source: PathBuf,
+        destination: PathBuf,
+        new_region_size: i32,
+        new_sector_size: u32,
+    ) -> Result<u32, VoxelStreamError> {
+        let dest = RegionFilesStream::with_settings(destination, new_region_size, new_sector_size);
+        let mut copied = 0u32;
+        visit_region_files(&source, |path, lod_index, region_position| {
+            let mut file = RegionFile::open(&path, false).map_err(|error| {
+                VoxelStreamError::Io(format!("open {}: {error}", path.display()))
+            })?;
+            let region_size = file.format().region_size.x.max(1);
+            let count = file.header_block_count();
+            for index in 0..count {
+                let local = file.block_position_from_index(index as u32);
+                if !file.has_block(local) {
+                    continue;
+                }
+                let mut buffer = VoxelBuffer::with_size(Vector3i::splat(1));
+                match file.load_block(local, &mut buffer) {
+                    Ok(()) => {}
+                    Err(RegionError::BlockNotFound | RegionError::NotFound(_)) => continue,
+                    Err(error) => {
+                        return Err(map_region_error(error, &path));
+                    }
+                }
+                let world = Vector3i::new(
+                    region_position.x.saturating_mul(region_size) + local.x,
+                    region_position.y.saturating_mul(region_size) + local.y,
+                    region_position.z.saturating_mul(region_size) + local.z,
+                );
+                dest.save_voxel_block(VoxelSaveQuery::new(&buffer, world, lod_index))?;
+                copied = copied.saturating_add(1);
+            }
+            Ok(())
+        })?;
+        dest.flush()?;
+        Ok(copied)
+    }
+
     fn region_path(&self, key: RegionKey) -> PathBuf {
         let position = key.region_position;
         self.directory
@@ -412,6 +456,65 @@ where
     }
 }
 
+fn visit_region_files(
+    root: &Path,
+    mut visit: impl FnMut(PathBuf, u8, Vector3i) -> Result<(), VoxelStreamError>,
+) -> Result<(), VoxelStreamError> {
+    if !root.is_dir() {
+        return Ok(());
+    }
+    visit_region_dir(root, 0, &mut visit)?;
+    for lod in 0..=MAX_LOD as u8 {
+        let lod_dir = root.join(format!("lod{lod}"));
+        if lod_dir.is_dir() {
+            visit_region_dir(&lod_dir, lod, &mut visit)?;
+        }
+    }
+    Ok(())
+}
+
+fn visit_region_dir(
+    dir: &Path,
+    lod_index: u8,
+    visit: &mut impl FnMut(PathBuf, u8, Vector3i) -> Result<(), VoxelStreamError>,
+) -> Result<(), VoxelStreamError> {
+    let entries = std::fs::read_dir(dir).map_err(|error| {
+        VoxelStreamError::Io(format!("read region directory {}: {error}", dir.display()))
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            VoxelStreamError::Io(format!("read region entry {}: {error}", dir.display()))
+        })?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Some(position) = parse_region_file_name(name) else {
+            continue;
+        };
+        visit(path, lod_index, position)?;
+    }
+    Ok(())
+}
+
+fn parse_region_file_name(name: &str) -> Option<Vector3i> {
+    let name = name.strip_suffix(".vxr")?;
+    let mut parts = name.split('.');
+    if parts.next()? != "r" {
+        return None;
+    }
+    let x = parts.next()?.parse().ok()?;
+    let y = parts.next()?.parse().ok()?;
+    let z = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(Vector3i::new(x, y, z))
+}
+
 fn format_for_block(
     block: &VoxelBuffer,
     region_size: i32,
@@ -572,6 +675,30 @@ mod tests {
         assert_eq!(loaded.get_voxel(1, 2, 3, ChannelId::Type.index()), 9);
         // region_size 16 → block 17 maps to region x=1.
         assert!(dir.path().join("lod0/r.1.0.0.vxr").is_file());
+    }
+
+    #[test]
+    fn convert_directory_rewrites_blocks_under_new_region_size() {
+        let src = TestDir::new();
+        let stream = RegionFilesStream::with_settings(src.path().to_path_buf(), 32, 512);
+        save(&stream, Vector3i::new(17, 0, 0), 0, &sample_block(11)).unwrap();
+        stream.flush().unwrap();
+        drop(stream);
+
+        let dest = TestDir::new();
+        let copied = RegionFilesStream::convert_directory(
+            src.path().to_path_buf(),
+            dest.path().to_path_buf(),
+            16,
+            256,
+        )
+        .unwrap();
+        assert_eq!(copied, 1);
+        let reopened = RegionFilesStream::with_settings(dest.path().to_path_buf(), 16, 256);
+        let (result, loaded) = load(&reopened, Vector3i::new(17, 0, 0), 0).unwrap();
+        assert_eq!(result, LoadResult::Found);
+        assert_eq!(loaded.get_voxel(1, 2, 3, ChannelId::Type.index()), 11);
+        assert!(dest.path().join("lod0/r.1.0.0.vxr").is_file());
     }
 
     #[test]

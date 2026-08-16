@@ -72,7 +72,8 @@ overlapping data block (not per voxel).
 - [ ] Block metadata section (needs a Variant codec; also unblocks v2/v3
       legacy migration)
 - [x] `VoxelStreamRegionFiles` region/sector size wired into the stream
-- [ ] Channel depths, rotation, `convert_files` rewrite
+- [x] `convert_files` rewrites region/sector size on disk
+- [ ] Channel depths and rotation metadata
 
 ## R8 — CI rework 🟡
 

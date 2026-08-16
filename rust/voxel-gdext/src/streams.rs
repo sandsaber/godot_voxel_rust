@@ -191,14 +191,60 @@ impl VoxelStreamRegionFiles {
     // (upstream 5828cbeb: VoxelStreamRegionFiles.xml).
     // -----------------------------------------------------------------
 
-    /// Converts existing region files to a new settings profile
-    /// (canonical `convert_files`). `new_settings` carries the target
-    /// parameters. Faithful stub: the Rust binding does not yet rewrite on-disk
-    /// region files, so the call is a bounded no-op.
+    /// Rewrite on-disk `.vxr` files to a new region/sector size. Keys:
+    /// `region_size_po2`, `sector_size`. Writes into a sibling temp folder,
+    /// then replaces `lod*` trees on success.
     #[func]
-    fn convert_files(&self, _new_settings: VarDictionary) {
-        // TODO(port): implement region-file conversion when the disk format
-        // is fully wired.
+    fn convert_files(&mut self, new_settings: VarDictionary) {
+        let region_po2 = new_settings
+            .get("region_size_po2")
+            .and_then(|value| value.try_to::<i32>().ok())
+            .unwrap_or(self.region_size_po2_value)
+            .clamp(0, 8);
+        let sector_size = new_settings
+            .get("sector_size")
+            .and_then(|value| value.try_to::<i32>().ok())
+            .unwrap_or(self.sector_size_value)
+            .max(1);
+        let globalized = ProjectSettings::singleton().globalize_path(&self.directory);
+        let source = PathBuf::from(globalized.to_string());
+        if !source.is_dir() {
+            godot_error!(
+                "VoxelStreamRegionFiles.convert_files: directory {} does not exist",
+                source.display()
+            );
+            return;
+        }
+        let dest = source.with_file_name(format!(
+            "{}.convert-{}",
+            source
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("voxel_data"),
+            std::process::id()
+        ));
+        let region_blocks = 1i32 << region_po2;
+        match RegionFilesStream::convert_directory(
+            source.clone(),
+            dest.clone(),
+            region_blocks,
+            u32::try_from(sector_size).unwrap_or(512),
+        ) {
+            Ok(copied) => {
+                if let Err(error) = replace_region_directory(&source, &dest) {
+                    godot_error!("VoxelStreamRegionFiles.convert_files: {error}");
+                    let _ = std::fs::remove_dir_all(&dest);
+                    return;
+                }
+                self.region_size_po2_value = region_po2;
+                self.sector_size_value = sector_size;
+                godot_print!("VoxelStreamRegionFiles.convert_files: rewrote {copied} blocks");
+            }
+            Err(error) => {
+                godot_error!("VoxelStreamRegionFiles.convert_files: {error}");
+                let _ = std::fs::remove_dir_all(&dest);
+            }
+        }
     }
 
     /// Size of a region in blocks, as a `Vector3` (canonical `get_region_size`).
@@ -251,4 +297,39 @@ impl VoxelStreamRegionFiles {
     fn set_sector_size(&mut self, size: i32) {
         self.sector_size_value = size.max(1);
     }
+}
+
+fn replace_region_directory(
+    source: &std::path::Path,
+    converted: &std::path::Path,
+) -> Result<(), String> {
+    let entries =
+        std::fs::read_dir(source).map_err(|e| format!("read {}: {e}", source.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("read entry: {e}"))?;
+        let path = entry.path();
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let is_region =
+            name.starts_with("lod") || (name.starts_with("r.") && name.ends_with(".vxr"));
+        if is_region {
+            if path.is_dir() {
+                std::fs::remove_dir_all(&path)
+                    .map_err(|e| format!("remove {}: {e}", path.display()))?;
+            } else {
+                std::fs::remove_file(&path)
+                    .map_err(|e| format!("remove {}: {e}", path.display()))?;
+            }
+        }
+    }
+    let converted_entries =
+        std::fs::read_dir(converted).map_err(|e| format!("read {}: {e}", converted.display()))?;
+    for entry in converted_entries {
+        let entry = entry.map_err(|e| format!("read converted entry: {e}"))?;
+        let from = entry.path();
+        let to = source.join(entry.file_name());
+        std::fs::rename(&from, &to)
+            .map_err(|e| format!("move {} -> {}: {e}", from.display(), to.display()))?;
+    }
+    let _ = std::fs::remove_dir_all(converted);
+    Ok(())
 }
