@@ -5,8 +5,9 @@ in commits/PRs. Statuses: ⬜ not started · 🟡 in progress · ✅ done for th
 agreed product slice. Detail and the parity matrix live in
 [doc/source/status.md](doc/source/status.md).
 
-GPU / SQLite / multipass / Rapier / full Godot Variant persistence / a
-multiplayer transport are **not** next-PR work. They need an explicit go-ahead.
+GPU / SQLite / multipass / Rapier / v2/v3 region migration / the R3
+network product (sockets, RPCs, edit deltas) are **not** next-PR work.
+They need an explicit go-ahead.
 
 ## R1 — Blocky terrain end-to-end ✅
 
@@ -52,14 +53,13 @@ Production clipbox planner is live (`VoxelTerrainCore::new_variable_lod` +
 Leftover: GPU/normalmap inspector fields are stored stubs (deferred by
 design with the GPU path).
 
-## R3 — Multiplayer / areas 🟡
+## R3 — Multiplayer / areas ✅ (protocol slice)
 
-The design pass is done: [doc/source/multiplayer.md](doc/source/multiplayer.md)
-is the replication-boundary decision record (server-authoritative; edits as
-deltas ordered by `block_revision`, edited blocks as v4 serializer bytes;
-LOD0 only; generator blocks never replicated; revisions valid per server
-process, dropped on rejoin). The interest index is reimplemented as pure
-Rust. What remains is the network product itself.
+The boundary, interest index, and a transport-agnostic snapshot protocol
+are live in `voxel-core::terrain::replication`. The `VoxelTerrainReplicator`
+node bridges byte frames to any Godot transport (scripts own sockets/RPCs
+by design). See [multiplayer.md](doc/source/multiplayer.md) for the
+decision record and frame contract.
 
 - [x] Write the replication boundary: what is authoritative (edits vs whole
       blocks), how it meets `try_edit_*`, dirty flags, LOD, and stream save
@@ -68,11 +68,15 @@ Rust. What remains is the network product itself.
       `get_viewers_in_area` query with a spatial hash, deterministic results,
       a hostile-box cell budget, and `box_subtraction` for entered/exited
       interest boxes
-- [ ] Only then implement a transport / interest protocol. Not started; needs
-      an explicit go-ahead and a peer/RPC owner (gdext or game-side crate).
-
-`VoxelAreaFinder` alone is a medium port. The boundary decision is the large
-part. Do not start this "on the side" of serializer work.
+- [x] Transport-agnostic protocol + reference bridge: length-prefixed
+      snapshot frames (kind + version + block + revision + v4 serializer
+      payload), per-peer interest via `VoxelAreaFinder`, revision-ordered
+      client install, `VoxelTerrainReplicator` node bridging frames to any
+      Godot transport. Sockets, RPCs and reliability are game-owned by
+      design.
+- [ ] Network product: edit *deltas* (edits replicate as whole-block
+      snapshots today), rejoin/reconciliation beyond revision drop, LOD>0,
+      and actual socket/RPC wiring. Needs an explicit go-ahead.
 
 ## R4 — Terrain editing tools ✅
 
@@ -112,14 +116,15 @@ Persistence of that metadata is R7, not a hole in the tool.
 
 Leftover: editor polish, not a missing compile path.
 
-## R7 — Streams & metadata ✅ (narrow slice)
+## R7 — Streams & metadata ✅
 
-Forest format is locked on disk. `MetadataValue` now persists: the v4 block
-serializer writes/reads the metadata section (block entry + sorted per-voxel
-entries). `nil`/`int` entries are byte-identical to C++ `VoxelMetadata`
-(TYPE_EMPTY/TYPE_U64); `float`/`string`/`bytes` use app-specific tags (≥40).
-Foreign C++ custom/Variant entries are skipped without failing the voxel load,
-matching upstream.
+Forest format is locked on disk. `MetadataValue` persists through the v4
+block serializer metadata section — narrow types (nil/int/float/string/
+bytes) under app-specific tags; wide Godot Variants (Dictionary/Array/
+vectors/colors/packed arrays) under the C++ tag 32 with the exact upstream
+wire format. Engine-only Variant types (objects, callables, node paths,
+transforms) are skipped non-fatally, matching upstream's
+`allow_objects = false`.
 
 - [x] `VoxelStreamRegionFiles` region/sector size wired into the stream
 - [x] `convert_files` rewrites region/sector size on disk
@@ -129,11 +134,17 @@ matching upstream.
       `bytes`) in the v4 metadata section. Byte-compatible with C++ when the
       section is empty; `nil`/`int` round-trip both ways. Our worlds survive
       save/load, including `convert_files` rewrites and memory-stream paging.
-- [ ] **Wide (separate project, not the next commit):** full Godot Variant
-      codec + custom-metadata factory. That is what unblocks reading arbitrary
-      C++ metadata and v2/v3 region migration. It either pulls Variant into
-      `voxel-core` or needs a thick gdext-only encoder. Do not start without
-      an explicit decision.
+- [x] **Wide codec (landed):** `voxel-core::streams::variant_wire` — a
+      pure-Rust encoder/decoder for Godot's Variant binary wire format,
+      integrated into the v4 metadata section under tag 32. C++
+      custom-metadata entries with supported payloads (scalars, strings,
+      vectors/rects/plane/quaternion/AABB/color, Dictionary, Array, packed
+      arrays) now round-trip; engine-only payloads are skipped non-fatally.
+      `DecodeLimits`-guarded (depth + count budgets).
+- [ ] **v2/v3 region migration:** the Variant codec removed the recorded
+      blocker, but the migration itself is not started — the block
+      serializer still rejects v2/v3 payloads with `UnsupportedVersion`
+      and no rewrite path exists. Needs its own slice.
 
 ## R8 — CI rework ✅
 
@@ -148,6 +159,7 @@ matching upstream.
 
 GPU compute path / detail rendering / shaders, SQLite streams, multipass
 generator, Rapier physics — intentionally out of scope to keep `voxel-core`
-pure-Rust and cross-compilable. Full Variant persistence (wide R7) and the
-R3 transport sit next to these until given a go-ahead; the R3 design and
-interest index themselves are done.
+pure-Rust and cross-compilable. The R7-wide Variant *codec* and the R3
+transport-agnostic *protocol* have landed; what still sits here is the
+v2/v3 region migration and the R3 *network product* (sockets, RPCs,
+reliability, edit deltas), until given a go-ahead.
