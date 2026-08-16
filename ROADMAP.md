@@ -16,8 +16,9 @@ work is Godot model-resource peers (meshes/materials), not the paging path.
       pipeline
 - [x] Smoke test: type-channel generator + blocky mesher renders visible
       blocks
-- [ ] Real `VoxelBlockyModel` mesh/material peers instead of solid-cube
-      placeholders
+- [x] `add_model` keeps Godot resources; cube/mesh/empty/fluid bake into the
+      library (mesh items currently bake as colored cubes)
+- [ ] Per-triangle mesh geometry instead of the cube stand-in
 
 ## R2 — VoxelLodTerrain paging & rendering 🟡
 
@@ -29,8 +30,9 @@ renderer/API parity, not a missing runtime.
 - [x] Wire planner decisions to stream load/save in the node
 - [x] Render LOD blocks through the shared mesh-lifecycle path
 - [x] Viewer-driven split/join in `_process`
-- [ ] Consume `RenderTopologyChanged` / per-block transition masks in Godot
-- [ ] Collision surfaces on the Variable-LOD node
+- [x] Consume `RenderTopologyChanged` / per-block transition masks in Godot
+- [x] Collision surfaces + inspector layer/mask/margin on both terrain nodes
+- [x] `block_loaded` / `mesh_block_entered` signals on `VoxelLodTerrain`
 - [ ] Upstream octree debug-draw / visual parity
 
 ## R3 — Multiplayer / areas ⬜
@@ -40,30 +42,36 @@ renderer/API parity, not a missing runtime.
 
 ## R4 — Terrain editing tools 🟡
 
-`VoxelTerrain.get_voxel_tool()` returns a live `VoxelToolTerrain` that can
-sphere/box/set voxels through `try_edit_voxel`.
+`VoxelTerrain.get_voxel_tool()` and `VoxelLodTerrain.get_voxel_tool()` return
+a live `VoxelToolTerrain`. Sphere/box edits run as one storage transaction per
+overlapping data block (not per voxel).
 
 - [x] `VoxelToolTerrain` backed by `VoxelTerrainCore` edits (sphere/box)
-- [ ] Smooth and paste modes
-- [ ] Hemisphere / metadata / random-tick
+- [x] Batch sphere/box path in `voxel-core` (`try_edit_sphere` / `try_edit_box`)
+- [x] Tool bound to `VoxelLodTerrain`
+- [x] Hemisphere brush (`do_hemisphere`) in core and `VoxelToolTerrain`
+- [x] Smooth mode (`do_smooth` box-blur) in core and `VoxelToolTerrain`
+- [ ] Paste mode / metadata / random-tick
 
 ## R5 — Instancing rendering ⬜
 
+- [x] MultiMesh upload from `scatter_from_buffer` / `scatter_test`
 - [ ] `VoxelInstanceBlock` + per-block instance streaming
-- [ ] MultiMesh output from scatter results (currently counts only)
 
 ## R6 — Graph editor parity ⬜
 
-- [ ] Parse graph JSON back into nodes (`set_graph_json` round-trip)
-- [ ] Wire `ExpressionNode` / `Image2D` into the graph runtime
+- [x] `add_node` / `clear_graph` / `compile_graph` programmatic API
+- [x] Assigning `VoxelGeneratorGraph` to terrain uses `GraphGenerator` (never silent Waves)
+- [x] Compact `set_graph_json` parse for the documented node list
+- [x] Wire `ExpressionNode` / `Image2D` into the graph runtime (`add_expression_node`, `add_image2d_node`)
 - [ ] Visual editor (GDScript GraphEdit addon or native)
 
 ## R7 — Streams & metadata ⬜
 
 - [ ] Block metadata section (needs a Variant codec; also unblocks v2/v3
       legacy migration)
-- [ ] `VoxelStreamRegionFiles` settings surface (region/sector size, channel
-      depths, rotation, file conversion)
+- [x] `VoxelStreamRegionFiles` region/sector size wired into the stream
+- [ ] Channel depths, rotation, `convert_files` rewrite
 
 ## R8 — CI rework 🟡
 

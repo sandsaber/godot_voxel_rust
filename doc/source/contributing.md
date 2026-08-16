@@ -8,9 +8,10 @@
 2. **No `unsafe` in production code.** The convention is enforced by review;
    the only `unsafe` allowed is in test helpers.
 3. **Never panic across the FFI boundary.** The release profile uses
-   `panic = "abort"` — a panic kills the whole Godot process. Validate
-   GDScript-supplied indices/coordinates and return an error or a default;
-   use `debug_assert!` so misuse is caught in debug builds.
+   `panic = "unwind"` so unit tests can `catch_unwind`, but unwinding through
+   the Godot C ABI is undefined behaviour. Validate GDScript-supplied
+   indices/coordinates and return an error or a default; use `debug_assert!`
+   so misuse is caught in debug builds.
 4. Prefer `Result` / `Option` over `unwrap` / `expect` on paths reachable from
    user input.
 

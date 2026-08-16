@@ -377,7 +377,7 @@ A graph-based terrain generator: build a node graph programmatically, compile it
 - `get_graph_node_count() -> i32`
 - `compile_graph() -> bool` — whether the graph compiles (no cycles / dangling ports)
 - `get_graph_json() -> GString`
-- `set_graph_json(json: GString)` — stored as an interchange string (not parsed back)
+- `set_graph_json(json: GString)` — parses a compact `{"nodes":[...]}` list (`kind`/`a`/`b`/`c`/`d`/`value`); invalid JSON logs an error and keeps the previous graph
 - `sample_sphere_sdf(cx: f32, cy: f32, cz: f32, r: f32, px: f32, py: f32, pz: f32) -> f32` — standalone helper; returns the signed distance (negative = inside), or `NaN` if the graph fails to compile
 - `get_node_count() -> i32`
 
@@ -561,6 +561,8 @@ A library of baked blocky models, maintaining the real model table consumed by t
 **Methods**
 
 - `add_solid_model(r: f32, g: f32, b: f32) -> i32`
+- `add_model(model: Resource) -> i32` — stores the resource; `get_model` returns the same instance
+- `get_model(index: i32) -> Variant`
 - `get_model_count() -> i32`
 - `is_empty() -> bool`
 

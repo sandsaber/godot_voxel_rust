@@ -49,7 +49,7 @@ Then open the Godot project — the editor loads the library on startup, and the
 | Profile | Command | Size (Linux x86_64) | When to use |
 |---|---|---|---|
 | debug | `cargo build -p voxel-gdext` | ~225 MB | Development (fast compile, has debug symbols, asserts on) |
-| **release** | `cargo build -p voxel-gdext --release` | ~5.5 MB | **Production / actual use** (LTO=fat, opt-level 3, panic=abort) |
+| **release** | `cargo build -p voxel-gdext --release` | ~5.5 MB | **Production / actual use** (LTO=fat, opt-level 3, panic=unwind) |
 
 For distribution or real gameplay, **always use `--release`** — debug builds are
 huge and slow.
