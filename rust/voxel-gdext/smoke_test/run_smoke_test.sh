@@ -131,7 +131,7 @@ ls -l "$DST" "$SCRIPT_DIR/voxel_gdext.gdextension"
 echo
 echo ">> [1/5] API test (class registration + func surface)..."
 run_godot_check "API" \
-	"$GODOT" --headless --path "$SCRIPT_DIR" --script api_test.gd
+	"$GODOT" --headless --path "$SCRIPT_DIR" --verbose api_test.tscn
 
 echo
 echo ">> [2/5] runtime paging test (terrain + generator + viewer, real frames)..."

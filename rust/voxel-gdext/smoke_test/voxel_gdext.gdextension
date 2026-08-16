@@ -6,18 +6,26 @@ reloadable = true
 
 [libraries]
 
-# Godot 4.x matches the most specific key it has (os.feature.arch), then
-# falls back to os.arch. List both so Linux CI (debug editor) and a local
-# release editor load the copied artifact next to this file.
+# Official editor binaries have the `editor` feature (and usually `release`,
+# not `debug`). Match those first, then debug/release/os.arch fallbacks.
+linux.release.editor.x86_64 = "res://libvoxel_gdext.so"
+linux.debug.editor.x86_64 = "res://libvoxel_gdext.so"
+linux.editor.x86_64 = "res://libvoxel_gdext.so"
 linux.debug.x86_64 = "res://libvoxel_gdext.so"
 linux.release.x86_64 = "res://libvoxel_gdext.so"
 linux.x86_64 = "res://libvoxel_gdext.so"
 linux.debug.arm64 = "res://libvoxel_gdext.so"
 linux.release.arm64 = "res://libvoxel_gdext.so"
 linux.arm64 = "res://libvoxel_gdext.so"
+macos.release.editor = "res://libvoxel_gdext.dylib"
+macos.debug.editor = "res://libvoxel_gdext.dylib"
+macos.editor = "res://libvoxel_gdext.dylib"
 macos.debug = "res://libvoxel_gdext.dylib"
 macos.release = "res://libvoxel_gdext.dylib"
 macos = "res://libvoxel_gdext.dylib"
+windows.release.editor.x86_64 = "res://voxel_gdext.dll"
+windows.debug.editor.x86_64 = "res://voxel_gdext.dll"
+windows.editor.x86_64 = "res://voxel_gdext.dll"
 windows.debug.x86_64 = "res://voxel_gdext.dll"
 windows.release.x86_64 = "res://voxel_gdext.dll"
 windows.x86_64 = "res://voxel_gdext.dll"

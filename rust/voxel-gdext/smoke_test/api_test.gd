@@ -1,6 +1,6 @@
-extends SceneTree
-## Standalone API test: exercises the voxel-gdext #[func] surface from GDScript.
-## Runs headless:  godot --headless --script api_test.gd
+extends Node
+## API test: exercises the voxel-gdext #[func] surface from GDScript.
+## Run as a scene so Godot loads the project GDExtension first.
 ## Exits with code 0 on success, 1 on any failure.
 
 var failures := 0
@@ -12,7 +12,7 @@ func _ok(cond: bool, msg: String) -> void:
 		print("  FAIL: ", msg)
 		failures += 1
 
-func _init() -> void:
+func _ready() -> void:
 	print("=== voxel-gdext API test ===")
 
 	# 1. Classes are registered under canonical names (matching upstream
@@ -110,4 +110,4 @@ func _init() -> void:
 		_ok(blocky_type.get_type_name() == "smoke_type", "VoxelBlockyType.name round-trips")
 
 	print("=== result: %d failure(s) ===" % failures)
-	quit(1 if failures > 0 else 0)
+	get_tree().quit(1 if failures > 0 else 0)
