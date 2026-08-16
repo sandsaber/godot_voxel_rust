@@ -73,7 +73,7 @@ Leftover C++ scons workflows have been removed from the tree.
 - [x] Automatic Rust CI on push/PR (fmt + test + clippy + smoke + Android)
 - [x] Scheduled TSan, bounded fuzz, and `cargo audit`
 - [x] Delete leftover C++ scons workflows
-- [ ] Make `Rust` a required status check on `master`
+- [x] Make `verify` a required status check on `master`
 
 ## Deferred by design (no ETA)
 
