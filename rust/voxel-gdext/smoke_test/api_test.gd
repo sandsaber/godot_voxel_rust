@@ -94,14 +94,20 @@ func _init() -> void:
 	#    get_name/set_name methods shadow Resource methods and become errors in
 	#    godot-rust 0.6.
 	var graph_function: Resource = ClassDB.instantiate("VoxelGraphFunction")
-	graph_function.name = "smoke_function"
-	_ok(graph_function.get_function_name() == "smoke_function", "VoxelGraphFunction.name round-trips")
+	_ok(graph_function != null, "VoxelGraphFunction instantiated")
+	if graph_function:
+		graph_function.name = "smoke_function"
+		_ok(graph_function.get_function_name() == "smoke_function", "VoxelGraphFunction.name round-trips")
 	var instance_item: Resource = ClassDB.instantiate("VoxelInstanceLibraryItem")
-	instance_item.name = "smoke_item"
-	_ok(instance_item.get_item_name() == "smoke_item", "VoxelInstanceLibraryItem.name round-trips")
+	_ok(instance_item != null, "VoxelInstanceLibraryItem instantiated")
+	if instance_item:
+		instance_item.name = "smoke_item"
+		_ok(instance_item.get_item_name() == "smoke_item", "VoxelInstanceLibraryItem.name round-trips")
 	var blocky_type: Resource = ClassDB.instantiate("VoxelBlockyType")
-	blocky_type.name = "smoke_type"
-	_ok(blocky_type.get_type_name() == "smoke_type", "VoxelBlockyType.name round-trips")
+	_ok(blocky_type != null, "VoxelBlockyType instantiated")
+	if blocky_type:
+		blocky_type.name = "smoke_type"
+		_ok(blocky_type.get_type_name() == "smoke_type", "VoxelBlockyType.name round-trips")
 
 	print("=== result: %d failure(s) ===" % failures)
 	quit(1 if failures > 0 else 0)

@@ -125,7 +125,8 @@ EXT="so"; [[ "$(uname -s)" == "Darwin" ]] && EXT="dylib"
 SRC="$REPO_RUST/target/$PROFILE/libvoxel_gdext.$EXT"
 DST="$SCRIPT_DIR/libvoxel_gdext.$EXT"
 cp -f "$SRC" "$DST"
-echo ">> copied $SRC -> $DST"
+echo ">> copied $SRC -> $DST ($(wc -c < "$DST") bytes)"
+ls -l "$DST" "$SCRIPT_DIR/voxel_gdext.gdextension"
 
 echo
 echo ">> [1/5] API test (class registration + func surface)..."
@@ -148,9 +149,14 @@ run_godot_check "runtime correctness" \
 	"$GODOT" --headless --path "$SCRIPT_DIR" runtime_correctness.tscn
 
 echo
-echo ">> [5/5] 3-LOD Variable LOD integration (multi-LOD paging, split/join, negatives)..."
+echo ">> [5/6] 3-LOD Variable LOD integration (multi-LOD paging, split/join, negatives)..."
 run_godot_check "variable lod 3" \
 	"$GODOT" --headless --path "$SCRIPT_DIR" variable_lod_3.tscn
+
+echo
+echo ">> [6/6] blocky library on terrain (type channel + baked cube)..."
+run_godot_check "blocky terrain" \
+	"$GODOT" --headless --path "$SCRIPT_DIR" blocky_terrain.tscn
 
 echo
 echo ">> all smoke tests complete"
