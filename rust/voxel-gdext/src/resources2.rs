@@ -891,7 +891,7 @@ pub struct VoxelLodTerrainGD {
     process_callback_value: i32,
     normalmap_enabled_value: bool,
     normalmap_begin_lod_index_value: i32,
-    normalmax_deviation_degrees_value: i32,
+    normalmap_max_deviation_degrees_value: i32,
     normalmap_tile_resolution_min_value: i32,
     normalmap_tile_resolution_max_value: i32,
     normalmap_octahedral_encoding_enabled_value: bool,
@@ -1029,7 +1029,7 @@ impl INode3D for VoxelLodTerrainGD {
             process_callback_value: 0,
             normalmap_enabled_value: false,
             normalmap_begin_lod_index_value: 2,
-            normalmax_deviation_degrees_value: 60,
+            normalmap_max_deviation_degrees_value: 60,
             normalmap_tile_resolution_min_value: 4,
             normalmap_tile_resolution_max_value: 8,
             normalmap_octahedral_encoding_enabled_value: false,
@@ -2065,6 +2065,11 @@ impl VoxelLodTerrainGD {
 
     #[func]
     fn set_normalmap_enabled(&mut self, enabled: bool) {
+        if enabled {
+            godot_error!(
+                "VoxelLodTerrain.normalmap_enabled: detail rendering (normalmap baking pipeline) is deferred in this build; the value is stored faithfully"
+            );
+        }
         self.normalmap_enabled_value = enabled;
     }
 
@@ -2082,12 +2087,12 @@ impl VoxelLodTerrainGD {
     /// Maximum deviation (degrees) beyond which a normalmap is generated.
     #[func]
     fn get_normalmap_max_deviation_degrees(&self) -> i32 {
-        self.normalmax_deviation_degrees_value
+        self.normalmap_max_deviation_degrees_value
     }
 
     #[func]
     fn set_normalmap_max_deviation_degrees(&mut self, degrees: i32) {
-        self.normalmax_deviation_degrees_value = degrees.max(0);
+        self.normalmap_max_deviation_degrees_value = degrees.max(0);
     }
 
     /// Minimum resolution of tiles in distant normalmaps.
@@ -2132,6 +2137,11 @@ impl VoxelLodTerrainGD {
 
     #[func]
     fn set_normalmap_use_gpu(&mut self, enabled: bool) {
+        if enabled {
+            godot_error!(
+                "VoxelLodTerrain.normalmap_use_gpu: GPU generation is deferred in this build; the value is stored faithfully"
+            );
+        }
         self.normalmap_use_gpu_value = enabled;
     }
 

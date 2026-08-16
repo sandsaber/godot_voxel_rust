@@ -24,8 +24,14 @@ Baked cube/mesh library + `VoxelMesherBlocky` reach `VoxelTerrain`.
 - [x] Side-cutout / ortho-rotation on mesh bake (`side_vertex_tolerance`,
       24 ortho bases, `side_cutout_enabled` → `bake_library`)
 
-Leftover (not blocking the slice): per-surface Godot materials beyond the
-first baked surface, richer inspector peers.
+Leftover (deliberate skip, revisit with a material-library slice): the
+blocky mesher, surface buckets, and the ArrayMesh upload already carry a
+per-material index end-to-end (`material_{index}` surface names), but no bake
+assigns material_id > 0 today — everything renders under the single terrain
+`material_override`, which matches upstream's own VoxelLodTerrain ("No
+multi-material supported yet"). MAX_SURFACES = 2 truncates richer meshes
+anyway; a real slice needs the upstream material indexer + library resource
+surface. Richer inspector peers remain open with it.
 
 ## R2 — VoxelLodTerrain paging & rendering ✅
 
