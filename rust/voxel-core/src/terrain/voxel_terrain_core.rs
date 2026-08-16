@@ -3002,7 +3002,6 @@ impl VoxelTerrainDataView {
         lod_index: usize,
         mut visit: impl FnMut(Vector3i, u64, &crate::storage::VoxelBuffer),
     ) {
-        let block_size = self.data.block_size() as i32;
         self.data.with_lod_map(lod_index, |map| {
             for position in map.block_positions() {
                 let Some(block) = map.get_block(position) else {
@@ -3012,7 +3011,7 @@ impl VoxelTerrainDataView {
                     continue;
                 }
                 let revision = map.key_revision_public(position);
-                visit(position * block_size, revision, block.voxels());
+                visit(position, revision, block.voxels());
             }
         });
     }

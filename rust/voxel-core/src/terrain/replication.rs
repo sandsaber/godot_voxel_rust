@@ -247,6 +247,57 @@ impl ReplicationServer {
         out
     }
 
+    /// Like [`Self::poll_outbound`] but computes and marks exactly one
+    /// peer. The per-peer bridge API must use this: calling the all-peers
+    /// version and filtering the result marks every peer's frames as sent
+    /// on the first poll, starving everyone else.
+    pub fn poll_outbound_for_peer(
+        &mut self,
+        terrain: &VoxelTerrainCore,
+        peer: AreaId,
+    ) -> Vec<BlockSnapshot> {
+        let Some(area) = self.interests.area(peer) else {
+            return Vec::new();
+        };
+        let view = terrain.data();
+        let mut candidates: Vec<(Vector3i, u64)> = Vec::new();
+        view.for_each_edited_block(0, |position, revision, _voxels| {
+            if area.contains_point(position) {
+                candidates.push((position, revision));
+            }
+        });
+        let sent = self.sent.entry(peer).or_default();
+        let mut out = Vec::new();
+        for (position, revision) in candidates {
+            if sent
+                .get(&(position.x, position.y, position.z, 0))
+                .is_some_and(|&last| last >= revision)
+            {
+                continue;
+            }
+            let Some(block) = view.block_snapshot(position, 0) else {
+                continue;
+            };
+            let Some(voxels) = block.into_voxels() else {
+                continue;
+            };
+            let mut payload = Vec::new();
+            if block_serializer::serialize_and_compress(&voxels, &mut payload, Compression::Lz4)
+                .is_err()
+            {
+                continue;
+            }
+            sent.insert((position.x, position.y, position.z, 0), revision);
+            out.push(BlockSnapshot {
+                position_in_blocks: position,
+                lod_index: 0,
+                block_revision: revision,
+                payload,
+            });
+        }
+        out
+    }
+
     fn peer_areas_sorted(&self) -> Vec<AreaId> {
         let mut peers: Vec<AreaId> = self.sent.keys().copied().collect();
         // Include peers with areas but no traffic yet.
@@ -394,6 +445,104 @@ mod tests {
                 .unwrap();
         }
         core
+    }
+
+    #[test]
+    fn nonzero_block_replicates_to_same_position() {
+        // Regression: for_each_edited_block once yielded voxel origins —
+        // only block (0,0,0) ever matched its own snapshot lookup.
+        let mut server = make_terrain(true);
+        // A second viewer covering block (2,2,2) so the edit materializes
+        // there; paging needs several ticks (task schedule + install).
+        let viewer2 = ViewerUpdate {
+            id: 2,
+            world_position_voxels: Vector3i::splat(40),
+            horizontal_view_distance_voxels: 16,
+            vertical_view_distance_voxels: 16,
+            demand: crate::terrain::clipbox_coordinator::MeshDemand {
+                visuals: true,
+                collisions: true,
+            },
+        };
+        for _ in 0..20 {
+            let _ = server.try_process(&[viewer2]).unwrap();
+            if server
+                .data()
+                .block_snapshot(Vector3i::new(2, 2, 2), 0)
+                .is_some()
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(
+            server
+                .try_edit_voxel(5, Vector3i::new(33, 34, 35), ChannelId::Sdf.index())
+                .unwrap()
+                .is_some(),
+            "edit must materialize block (2,2,2)"
+        );
+        let mut client = make_terrain(false);
+        let mut protocol = ReplicationServer::new(8);
+        protocol
+            .set_peer_area(9, Box3i::new(Vector3i::splat(-4), Vector3i::splat(8)))
+            .unwrap();
+        eprintln!(
+            "DEBUG block_size={} resident={:?} edited(2,2,2)={:?} area_contains={}",
+            server.data().block_size(),
+            server.data().block_positions(0),
+            server
+                .data()
+                .block_snapshot(Vector3i::new(2, 2, 2), 0)
+                .map(|b| b.is_edited()),
+            Box3i::new(Vector3i::splat(-4), Vector3i::splat(8))
+                .contains_point(Vector3i::new(2, 2, 2)),
+        );
+        let frames = protocol.poll_outbound_for_peer(&server, 9);
+        assert!(
+            frames
+                .iter()
+                .any(|s| s.position_in_blocks == Vector3i::new(2, 2, 2)),
+            "block (2,2,2) must be captured, got {:?}",
+            frames
+                .iter()
+                .map(|f| f.position_in_blocks)
+                .collect::<Vec<_>>()
+        );
+        let mut rx = ReplicationClient::new();
+        let mut installed = 0;
+        for snapshot in frames {
+            if rx.apply_snapshot(&mut client, &snapshot) {
+                installed += 1;
+            }
+        }
+        assert!(installed >= 1);
+        assert_eq!(
+            client
+                .data()
+                .block_snapshot(Vector3i::new(2, 2, 2), 0)
+                .map(|b| b.is_edited()),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn per_peer_poll_does_not_starve_other_peers() {
+        // Regression: the all-peers poll marked every peer's frames sent on
+        // the first call, so the second peer's poll came back empty.
+        let server = make_terrain(true);
+        let mut protocol = ReplicationServer::new(8);
+        let area = Box3i::new(Vector3i::splat(-4), Vector3i::splat(8));
+        protocol.set_peer_area(1, area).unwrap();
+        protocol.set_peer_area(2, area).unwrap();
+        assert!(!protocol.poll_outbound_for_peer(&server, 1).is_empty());
+        assert!(
+            !protocol.poll_outbound_for_peer(&server, 2).is_empty(),
+            "peer 2 must not be starved by peer 1's poll"
+        );
+        // And both are quiet now.
+        assert!(protocol.poll_outbound_for_peer(&server, 1).is_empty());
+        assert!(protocol.poll_outbound_for_peer(&server, 2).is_empty());
     }
 
     #[test]

@@ -271,9 +271,11 @@ pub fn encode_variant(value: &VariantWireValue, dst: &mut Vec<u8>) {
         V::Float64Array(items) => {
             w.store_32(types::PACKED_FLOAT64_ARRAY);
             store_count(&mut w, items.len());
+            // PackedFloat64Array elements are unconditional doubles (the
+            // real_t f32 rule does not apply to this explicitly-64-bit
+            // type).
             for f in items {
-                // See store_f64s: single-precision wire.
-                w.store_32((*f as f32).to_bits());
+                w.store_64(f.to_bits());
             }
         }
         V::StringArray(items) => {
@@ -555,7 +557,11 @@ fn decode_at_depth(
             let count = read_count(r)?;
             let mut items = Vec::with_capacity(count.min(4096));
             for _ in 0..count {
-                items.push(read_real(r, wide)?);
+                // Unconditional f64 — the real_t f32 rule does not apply to
+                // this explicitly-64-bit type.
+                items.push(f64::from_bits(
+                    r.try_get_64().ok_or(VariantWireError::UnexpectedEof)?,
+                ));
             }
             Ok(VariantWireValue::Float64Array(items))
         }
@@ -740,6 +746,17 @@ mod tests {
             round_trip(VariantWireValue::StringArray(vec!["x".into(), "yy".into()])),
             VariantWireValue::StringArray(vec!["x".into(), "yy".into()])
         );
+    }
+
+    #[test]
+    fn float64_array_is_unconditional_double_width() {
+        // Regression: the f32 real_t rule was misapplied to this type.
+        let value = VariantWireValue::Float64Array(vec![std::f64::consts::PI, -0.1]);
+        let mut bytes = Vec::new();
+        encode_variant(&value, &mut bytes);
+        // header(4) + count(4) + 2 x 8 bytes.
+        assert_eq!(bytes.len(), 4 + 4 + 16);
+        assert_eq!(round_trip(value.clone()), value);
     }
 
     #[test]
