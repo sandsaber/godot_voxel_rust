@@ -52,7 +52,7 @@ func _ready() -> void:
 		#    false and get_voxel_sdf returns 0.0 until the terrain's _ready() has
 		#    run (which initialises the core). _ready() does NOT fire
 		#    synchronously from add_child in a SceneTree --script run (it runs on
-		#    the next idle frame, but this script exits in _init). So here we can
+		#    the next idle frame, but this script exits in _ready). So here we can
 		#    only assert the *honest* not-ready behaviour; the real edit path is
 		#    exercised in runtime_scene.tscn, which pumps real frames.
 		var set_ok = bool(terrain.set_voxel_sdf(0, 0, 0, -1.0))
