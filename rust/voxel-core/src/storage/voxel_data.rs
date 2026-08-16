@@ -1682,6 +1682,27 @@ impl SharedVoxelData {
         })
     }
 
+    /// Insert a remotely received block, replacing any resident copy at the
+    /// same position (replication client path; see multiplayer.md). Unlike
+    /// [`Self::try_set_block`] this does not require the key to be absent.
+    pub fn replace_or_insert_remote_block(
+        &self,
+        block_pos: Vector3i,
+        block: VoxelDataBlock,
+    ) -> Result<bool, SharedVoxelDataMutationError> {
+        let lod_index = usize::from(block.lod_index());
+        assert!(lod_index < self.lods.len(), "block LOD is not loaded");
+        if block.has_voxels() {
+            assert_eq!(
+                block.voxels().size(),
+                Vector3i::splat(self.block_size() as i32),
+                "block voxels must match VoxelData block size"
+            );
+        }
+        self.begin_mutation()?
+            .replace_or_insert_block(block_pos, block, lod_index)
+    }
+
     pub fn try_set_block(
         &self,
         block_pos: Vector3i,
@@ -4429,6 +4450,36 @@ impl VoxelDataMutation<'_> {
             out.extend(missing_local);
         }
         Ok(())
+    }
+
+    /// Insert or replace a block at a position (replication client). A
+    /// resident block is replaced in place and its key revision advanced, so
+    /// ordering with concurrent edits is preserved.
+    fn replace_or_insert_block(
+        &self,
+        block_pos: Vector3i,
+        block: VoxelDataBlock,
+        lod_index: usize,
+    ) -> Result<bool, SharedVoxelDataMutationError> {
+        let block_box = Box3i::new(block_pos, Vector3i::splat(1));
+        let bounds = checked_lod_block_bounds(block_box, self.data.block_size(), lod_index)
+            .ok_or(SharedVoxelDataMutationError::SpatialBoundsOverflow { lod_index })?;
+        let _spatial = self.data.spatial_lock(lod_index).write_many([bounds]);
+        let lod = self
+            .data
+            .lods
+            .get(lod_index)
+            .expect("LOD index is outside the loaded range");
+        let mut state = lod.state.write().unwrap_or_else(|e| e.into_inner());
+        let next_revision = state.map.key_revision(block_pos).checked_add(1).ok_or(
+            SharedVoxelDataMutationError::KeyRevisionOverflow {
+                position: block_pos,
+                lod_index,
+            },
+        )?;
+        state.map.set_block(block_pos, block, true);
+        state.map.commit_key_revision(block_pos, next_revision);
+        Ok(true)
     }
 
     fn try_insert_block(

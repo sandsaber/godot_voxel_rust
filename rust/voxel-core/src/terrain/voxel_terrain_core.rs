@@ -2975,6 +2975,25 @@ impl VoxelTerrainDataView {
     pub fn block_snapshot(&self, block_pos: Vector3i, lod_index: usize) -> Option<VoxelDataBlock> {
         self.data.block_snapshot(block_pos, lod_index)
     }
+
+    /// Per-block revision (monotonic, +1 per committed edit since the block
+    /// key first appeared; tombstones keep counting). Used by replication to
+    /// order snapshots and drop stale deltas (doc/source/multiplayer.md).
+    pub fn block_revision(&self, block_pos: Vector3i, lod_index: usize) -> Option<u64> {
+        if lod_index >= self.data.lod_count() {
+            return None;
+        }
+        Some(
+            self.data
+                .with_lod_map(lod_index, |map| map.key_revision_public(block_pos)),
+        )
+    }
+
+    /// Positions of every resident block in the given storage LOD.
+    pub fn block_positions(&self, lod_index: usize) -> Vec<Vector3i> {
+        self.data
+            .with_lod_map(lod_index, |map| map.block_positions().collect())
+    }
 }
 
 /// Engine-agnostic paging terrain core (single- or multi-LOD).
@@ -3568,6 +3587,37 @@ impl VoxelTerrainCore {
             );
             crate::edition::do_smooth(buffer, channel_index, local_center, radius, blur_radius);
         })
+    }
+
+    /// Install a block received over replication (doc/source/multiplayer.md,
+    /// client side). Mirrors the load-response insert: the block becomes
+    /// resident with `edited` set (never-generated state must survive
+    /// save-on-unload), replacing any resident copy. Returns `false` when
+    /// the core is shutting down or the storage rejects the insert.
+    pub fn try_install_remote_block(
+        &mut self,
+        position_in_blocks: Vector3i,
+        lod_index: u8,
+        voxels: VoxelBuffer,
+    ) -> bool {
+        if self.shutdown_epoch.is_some() {
+            return false;
+        }
+        let block_size = self.data().block_size() as i32;
+        if block_size <= 0 || voxels.size() != Vector3i::splat(block_size) {
+            return false;
+        }
+        let mut block = crate::storage::VoxelDataBlock::with_voxels(voxels, lod_index);
+        block.set_edited(true);
+        block.set_modified(true);
+        let replaced = self
+            .data
+            .replace_or_insert_remote_block(position_in_blocks, block)
+            .is_ok();
+        if replaced {
+            self.stats.blocks_loaded = self.stats.blocks_loaded.saturating_add(1);
+        }
+        replaced
     }
 
     /// Set or clear per-voxel metadata at a world-space position. The write

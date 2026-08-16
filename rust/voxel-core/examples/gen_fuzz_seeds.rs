@@ -172,15 +172,13 @@ fn main() {
     let mut variant_section = vec![0u8]; // TYPE_EMPTY block entry
     let mut variant_payload = Vec::new();
     voxel_core::streams::variant_wire::encode_variant(
-        &voxel_core::streams::variant_wire::VariantWireValue::Dictionary(vec![
-            (
-                voxel_core::streams::variant_wire::VariantWireValue::Text("k".into()),
-                voxel_core::streams::variant_wire::VariantWireValue::Array(vec![
-                    voxel_core::streams::variant_wire::VariantWireValue::Int(1),
-                    voxel_core::streams::variant_wire::VariantWireValue::Bool(true),
-                ]),
-            ),
-        ]),
+        &voxel_core::streams::variant_wire::VariantWireValue::Dictionary(vec![(
+            voxel_core::streams::variant_wire::VariantWireValue::Text("k".into()),
+            voxel_core::streams::variant_wire::VariantWireValue::Array(vec![
+                voxel_core::streams::variant_wire::VariantWireValue::Int(1),
+                voxel_core::streams::variant_wire::VariantWireValue::Bool(true),
+            ]),
+        )]),
         &mut variant_payload,
     );
     variant_section.push(32); // METADATA_TYPE_VARIANT voxel entry

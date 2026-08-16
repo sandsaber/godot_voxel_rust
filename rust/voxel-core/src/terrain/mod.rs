@@ -7,6 +7,7 @@
 //! the `voxel-gdext` crate.
 
 pub mod area_finder;
+pub mod replication;
 
 pub use area_finder::{box_subtraction, AreaError, AreaId, VoxelAreaFinder, MAX_CELLS_PER_AREA};
 pub mod clipbox_coordinator;

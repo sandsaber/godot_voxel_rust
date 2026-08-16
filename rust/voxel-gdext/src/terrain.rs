@@ -3113,6 +3113,13 @@ pub(crate) fn resolve_blocky_library(
 }
 
 impl VoxelTerrain {
+    pub(crate) fn core(&self) -> Option<&VoxelTerrainCore> {
+        self.core.as_ref()
+    }
+
+    pub(crate) fn core_mut(&mut self) -> Option<&mut VoxelTerrainCore> {
+        self.core.as_mut()
+    }
     fn apply_render_op(&mut self, op: PendingRenderOp) {
         let material_override = self.material_override.clone();
         let generate_collision = self.generate_collision;
@@ -3615,5 +3622,145 @@ impl VoxelViewer {
     /// The configured view distance in voxels (horizontal and vertical).
     pub(crate) fn view_distance_voxels(&self) -> i32 {
         self.view_distance
+    }
+}
+
+// ---------------------------------------------------------------------------
+// VoxelTerrainReplicatorGD — R3 transport-agnostic replication bridge
+// ---------------------------------------------------------------------------
+
+/// A `Node` bridging the voxel-core replication protocol (see
+/// `doc/source/multiplayer.md`) to any Godot transport. It owns **no
+/// sockets**: scripts move byte frames between peers using whatever they
+/// prefer (MultiplayerAPI RPCs, ENet, WebSocket, UDP…).
+///
+/// Server role (child of the authoritative `VoxelTerrain`):
+/// ```gdscript
+/// var replicator := VoxelTerrainReplicator.new()
+/// replicator.role = replicator.ROLE_SERVER
+/// terrain.add_child(replicator)
+/// replicator.set_peer_area(peer_id, center, radius_blocks)
+/// # every frame / tick:
+/// for frame in replicator.poll_outbound(peer_id):
+///     rpc_id(peer_id, receive_frame.bind(frame))
+/// ```
+///
+/// Client role (child of the local `VoxelTerrain`):
+/// ```gdscript
+/// func receive_frame(frame: PackedByteArray) -> void:
+///     replicator.receive_frame(frame)
+/// ```
+#[derive(GodotClass)]
+#[class(base = Node, tool, rename = VoxelTerrainReplicator)]
+pub struct VoxelTerrainReplicatorGD {
+    base: Base<Node>,
+    /// 0 = server, 1 = client.
+    #[var]
+    role: u32,
+    server: voxel_core::terrain::replication::ReplicationServer,
+    client: voxel_core::terrain::replication::ReplicationClient,
+}
+
+#[godot_api]
+impl INode for VoxelTerrainReplicatorGD {
+    fn init(base: Base<Node>) -> Self {
+        Self {
+            base,
+            role: Self::ROLE_SERVER,
+            server: voxel_core::terrain::replication::ReplicationServer::new(8),
+            client: voxel_core::terrain::replication::ReplicationClient::new(),
+        }
+    }
+}
+
+#[godot_api]
+impl VoxelTerrainReplicatorGD {
+    /// Server role: produce snapshots for the authoritative parent terrain.
+    pub const ROLE_SERVER: u32 = 0;
+    /// Client role: apply received snapshots to the local parent terrain.
+    pub const ROLE_CLIENT: u32 = 1;
+
+    /// Server: set (or move) a peer's interest box. `center` is in world
+    /// voxels; `radius_blocks` is half the box extent in data blocks.
+    #[func]
+    fn set_peer_area(&mut self, peer_id: i64, center: Vector3, radius_blocks: i32) {
+        let Ok(peer) = u32::try_from(peer_id.max(0)) else {
+            godot_error!("VoxelTerrainReplicator.set_peer_area: peer id must fit u32");
+            return;
+        };
+        let Some(terrain) = self.parent_terrain() else {
+            godot_error!("VoxelTerrainReplicator.set_peer_area: parent must be a VoxelTerrain");
+            return;
+        };
+        let bound = terrain.bind();
+        let block_size = bound.get_data_block_size().max(1);
+        drop(bound);
+        let center_blocks = Vector3i::new(
+            (center.x as i32).div_euclid(block_size),
+            (center.y as i32).div_euclid(block_size),
+            (center.z as i32).div_euclid(block_size),
+        );
+        let radius = radius_blocks.max(0);
+        let area = voxel_core::math::Box3i::new(
+            center_blocks - Vector3i::splat(radius),
+            Vector3i::splat(2 * radius + 1),
+        );
+        if let Err(error) = self.server.set_peer_area(peer, area) {
+            godot_error!("VoxelTerrainReplicator.set_peer_area: rejected ({error:?})");
+        }
+    }
+
+    /// Server: forget a peer (on disconnect).
+    #[func]
+    fn remove_peer(&mut self, peer_id: i64) {
+        let Ok(peer) = u32::try_from(peer_id.max(0)) else {
+            return;
+        };
+        self.server.remove_peer(peer);
+    }
+
+    /// Server: poll the parent terrain and return outbound frames for the
+    /// given peer as an array of byte arrays. Call periodically (e.g. every
+    /// `_process`); only newly-changed edited blocks are produced.
+    #[func]
+    fn poll_outbound(&mut self, peer_id: i64) -> Array<PackedByteArray> {
+        let mut out = Array::new();
+        let Ok(peer) = u32::try_from(peer_id.max(0)) else {
+            return out;
+        };
+        let Some(terrain) = self.parent_terrain() else {
+            return out;
+        };
+        let bound = terrain.bind();
+        let Some(core) = bound.core() else {
+            return out;
+        };
+        for (_, snapshot) in self.server.poll_outbound(core) {
+            let mut frame = Vec::new();
+            snapshot.encode(&mut frame);
+            let packed = PackedByteArray::from(frame.as_slice());
+            out.push(&packed);
+        }
+        out
+    }
+
+    /// Client: apply one received frame to the local parent terrain.
+    /// Returns `true` when the snapshot was installed (newer revision).
+    #[func]
+    fn receive_frame(&mut self, frame: PackedByteArray) -> bool {
+        let Some(mut terrain) = self.parent_terrain() else {
+            godot_error!("VoxelTerrainReplicator.receive_frame: parent must be a VoxelTerrain");
+            return false;
+        };
+        let mut bound = terrain.bind_mut();
+        let Some(core) = bound.core_mut() else {
+            return false;
+        };
+        self.client.apply_frame(core, frame.as_slice())
+    }
+
+    fn parent_terrain(&self) -> Option<Gd<VoxelTerrain>> {
+        let parent = self.base().get_parent()?;
+        parent.try_cast::<VoxelTerrain>().ok()
     }
 }

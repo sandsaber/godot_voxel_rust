@@ -1006,6 +1006,11 @@
       "name": "ZN_Curve",
       "source_path": "rust/voxel-gdext/src/resources3.rs",
       "reason": "Rust-port helper registered outside the pinned documented public API."
+    },
+    {
+      "name": "VoxelTerrainReplicator",
+      "reason": "Transport-agnostic replication bridge (R3): server role polls the authoritative terrain for edited-block snapshots per peer interest; client role applies received frames with server-revision ordering. No sockets by design — scripts bridge frames over any Godot transport.",
+      "source_path": "rust/voxel-gdext/src/terrain.rs"
     }
   ]
 }
