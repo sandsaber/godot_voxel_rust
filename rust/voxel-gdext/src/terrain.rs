@@ -1723,6 +1723,70 @@ pub(crate) const fn fixed_viewer_demand(generate_collision: bool) -> MeshDemand 
     viewer_mesh_demand(generate_collision, true, true)
 }
 
+/// Snapshot-read voxels in an inclusive world box. Used by paste/random-tick
+/// without taking a write transaction per cell.
+pub(crate) fn collect_core_voxels(
+    core: &VoxelTerrainCore,
+    min: Vector3i,
+    max: Vector3i,
+    channel: usize,
+    max_items: usize,
+) -> Vec<(Vector3i, u64)> {
+    if max_items == 0 || channel >= voxel_core::storage::voxel_buffer::MAX_CHANNELS {
+        return Vec::new();
+    }
+    let data = core.data();
+    let Ok(block_size) = i32::try_from(data.block_size()) else {
+        return Vec::new();
+    };
+    if block_size <= 0 {
+        return Vec::new();
+    }
+    let lo = Vector3i::new(min.x.min(max.x), min.y.min(max.y), min.z.min(max.z));
+    let hi = Vector3i::new(min.x.max(max.x), min.y.max(max.y), min.z.max(max.z));
+    let mut out = Vec::new();
+    let mut z = lo.z;
+    while z <= hi.z && out.len() < max_items {
+        let mut y = lo.y;
+        while y <= hi.y && out.len() < max_items {
+            let mut x = lo.x;
+            while x <= hi.x && out.len() < max_items {
+                let pos = Vector3i::new(x, y, z);
+                let block_pos = voxel_core::storage::voxel_data_map::VoxelDataMap::voxel_to_block_b(
+                    pos,
+                    data.block_size_po2(),
+                );
+                if let Some(block) = data.block_snapshot(block_pos, 0) {
+                    if block.has_voxels() {
+                        let raw = block.voxels().get_voxel(
+                            pos.x.rem_euclid(block_size),
+                            pos.y.rem_euclid(block_size),
+                            pos.z.rem_euclid(block_size),
+                            channel,
+                        );
+                        if raw != 0 {
+                            out.push((pos, raw));
+                        }
+                    }
+                }
+                x = match x.checked_add(1) {
+                    Some(next) => next,
+                    None => break,
+                };
+            }
+            y = match y.checked_add(1) {
+                Some(next) => next,
+                None => break,
+            };
+        }
+        z = match z.checked_add(1) {
+            Some(next) => next,
+            None => break,
+        };
+    }
+    out
+}
+
 /// Combine the terrain-wide collision toggle with the viewer's own demand
 /// flags. A collision-only viewer (`requires_visuals = false`) must not force
 /// visual meshes; a visual-only viewer must not force colliders.
@@ -2700,6 +2764,33 @@ impl VoxelTerrain {
         if let Err(error) = core.try_edit_smooth(center, radius, blur_radius, channel) {
             godot_error!("VoxelTerrain.edit_smooth failed: {error}");
         }
+    }
+
+    pub(crate) fn paste_buffer(
+        &mut self,
+        origin: Vector3i,
+        src: &voxel_core::storage::VoxelBuffer,
+        channel_mask: u8,
+    ) {
+        let Some(core) = self.core.as_mut() else {
+            return;
+        };
+        if let Err(error) = core.try_paste(origin, src, channel_mask) {
+            godot_error!("VoxelTerrain.paste failed: {error}");
+        }
+    }
+
+    pub(crate) fn collect_voxels_in_box(
+        &self,
+        min: Vector3i,
+        max: Vector3i,
+        channel: usize,
+        max_items: usize,
+    ) -> Vec<(Vector3i, u64)> {
+        let Some(core) = self.core.as_ref() else {
+            return Vec::new();
+        };
+        collect_core_voxels(core, min, max, channel, max_items)
     }
 
     fn collision_settings(&self) -> CollisionBodySettings {

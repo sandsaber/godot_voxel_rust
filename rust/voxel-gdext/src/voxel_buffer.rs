@@ -1533,22 +1533,112 @@ impl VoxelToolTerrainGD {
         // TODO(port): iterate the bound terrain's per-voxel metadata.
     }
 
-    /// Picks random voxels within `area` and executes a function on those
-    /// whose model is `random_tickable` and whose `tags_mask` matches. The
-    /// callback takes voxel position (`Vector3i`) and voxel value (`int`).
-    /// `batch_count` tunes the internal picking strategy; `tags_mask` filters
-    /// models. Matches upstream's pinned `run_blocky_random_tick`. Faithful
-    /// stub: no live terrain is bound, so no ticks are produced.
+    /// Paste a `VoxelBuffer` into the bound terrain so `src(0,0,0)` lands at
+    /// `origin`. `channel_mask` is a bitset of channels to copy.
+    #[func]
+    fn do_paste(
+        &mut self,
+        source: Gd<RefCounted>,
+        origin: godot::builtin::Vector3i,
+        channel_mask: i64,
+    ) {
+        let Ok(buffer) = source.try_cast::<VoxelBufferGD>() else {
+            godot_error!("VoxelToolTerrain.do_paste: source must be a VoxelBuffer");
+            return;
+        };
+        let mask = u8::try_from(channel_mask).unwrap_or(u8::MAX);
+        let pos = Vector3i::new(origin.x, origin.y, origin.z);
+        let bound = buffer.bind();
+        if let Some(mut terrain) = self.terrain.clone() {
+            terrain
+                .bind_mut()
+                .paste_buffer(pos, bound.core_buffer(), mask);
+            return;
+        }
+        if let Some(mut terrain) = self.lod_terrain.clone() {
+            terrain
+                .bind_mut()
+                .paste_buffer(pos, bound.core_buffer(), mask);
+            return;
+        }
+        godot_error!("VoxelToolTerrain.do_paste: no terrain is bound");
+    }
+
+    /// Picks voxels within `area` and calls `callback(position, value)` on a
+    /// strided subset. `voxel_count` is the maximum number of callbacks;
+    /// `batch_count` controls the stride. `tags_mask` is reserved until model
+    /// tags are wired; non-zero voxels on the tool channel are candidates.
     #[func]
     fn run_blocky_random_tick(
         &mut self,
-        _area: Aabb,
-        _voxel_count: i32,
-        _callback: Callable,
-        _batch_count: i32,
+        area: Aabb,
+        voxel_count: i32,
+        callback: Callable,
+        batch_count: i32,
         _tags_mask: i32,
     ) {
-        // TODO(port): drive the blocky random-tick loop against the terrain.
+        if !callback.is_valid() {
+            godot_error!("VoxelToolTerrain.run_blocky_random_tick: callback is invalid");
+            return;
+        }
+        let Ok(limit) = usize::try_from(voxel_count.max(0)) else {
+            return;
+        };
+        let limit = limit.min(MAX_SCRIPT_ITEMS);
+        if limit == 0 {
+            return;
+        }
+        let batch = usize::try_from(batch_count.max(1)).unwrap_or(1);
+        let min = Vector3i::new(
+            area.position.x.floor() as i32,
+            area.position.y.floor() as i32,
+            area.position.z.floor() as i32,
+        );
+        let max = Vector3i::new(
+            (area.position.x + area.size.x).ceil() as i32 - 1,
+            (area.position.y + area.size.y).ceil() as i32 - 1,
+            (area.position.z + area.size.z).ceil() as i32 - 1,
+        );
+        if !area.position.x.is_finite()
+            || !area.position.y.is_finite()
+            || !area.position.z.is_finite()
+            || !area.size.x.is_finite()
+            || !area.size.y.is_finite()
+            || !area.size.z.is_finite()
+        {
+            godot_error!("VoxelToolTerrain.run_blocky_random_tick: area must be finite");
+            return;
+        }
+        let channel = self.channel;
+        let candidates = if let Some(terrain) = self.terrain.as_ref() {
+            terrain
+                .bind()
+                .collect_voxels_in_box(min, max, channel, MAX_SCRIPT_ITEMS)
+        } else if let Some(terrain) = self.lod_terrain.as_ref() {
+            terrain
+                .bind()
+                .collect_voxels_in_box(min, max, channel, MAX_SCRIPT_ITEMS)
+        } else {
+            godot_error!("VoxelToolTerrain.run_blocky_random_tick: no terrain is bound");
+            return;
+        };
+        if candidates.is_empty() {
+            return;
+        }
+        let step = (candidates.len() / batch).max(1);
+        let mut invoked = 0usize;
+        for (i, (pos, value)) in candidates.iter().enumerate() {
+            if i % step != 0 {
+                continue;
+            }
+            if invoked >= limit {
+                break;
+            }
+            let gpos = godot::builtin::Vector3i::new(pos.x, pos.y, pos.z);
+            let gval = i64::try_from(*value).unwrap_or(0);
+            callback.call(&[gpos.to_variant(), gval.to_variant()]);
+            invoked += 1;
+        }
     }
 }
 

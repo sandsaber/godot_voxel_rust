@@ -51,7 +51,8 @@ overlapping data block (not per voxel).
 - [x] Tool bound to `VoxelLodTerrain`
 - [x] Hemisphere brush (`do_hemisphere`) in core and `VoxelToolTerrain`
 - [x] Smooth mode (`do_smooth` box-blur) in core and `VoxelToolTerrain`
-- [ ] Paste mode / metadata / random-tick
+- [x] Paste (`do_paste`) and blocky random-tick on `VoxelToolTerrain`
+- [ ] Per-voxel metadata store / `for_each_voxel_metadata_in_area`
 
 ## R5 — Instancing rendering ⬜
 

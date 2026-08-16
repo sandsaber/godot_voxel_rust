@@ -3537,6 +3537,31 @@ impl VoxelTerrainCore {
         })
     }
 
+    /// Paste `src` into the volume so `src(0,0,0)` lands at `origin`.
+    /// `channel_mask` is a bitset of channels to copy.
+    pub fn try_paste(
+        &mut self,
+        origin: Vector3i,
+        src: &crate::storage::VoxelBuffer,
+        channel_mask: u8,
+    ) -> Result<u32, VoxelTerrainRuntimeError> {
+        if channel_mask == 0 {
+            return Ok(0);
+        }
+        let size = src.size();
+        if size.x <= 0 || size.y <= 0 || size.z <= 0 {
+            return Ok(0);
+        }
+        let max = Vector3i::new(
+            origin.x.saturating_add(size.x.saturating_sub(1)),
+            origin.y.saturating_add(size.y.saturating_sub(1)),
+            origin.z.saturating_add(size.z.saturating_sub(1)),
+        );
+        self.try_edit_overlapping_blocks(origin, max, |buffer, block_origin| {
+            buffer.paste(src, Vector3i::zero(), origin - block_origin, channel_mask);
+        })
+    }
+
     fn try_edit_overlapping_blocks(
         &mut self,
         min: Vector3i,

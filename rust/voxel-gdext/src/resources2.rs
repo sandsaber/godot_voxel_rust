@@ -2264,6 +2264,33 @@ impl VoxelLodTerrainGD {
         }
     }
 
+    pub(crate) fn paste_buffer(
+        &mut self,
+        origin: voxel_core::math::Vector3i,
+        src: &voxel_core::storage::VoxelBuffer,
+        channel_mask: u8,
+    ) {
+        let Some(core) = self.core.as_mut() else {
+            return;
+        };
+        if let Err(error) = core.try_paste(origin, src, channel_mask) {
+            godot_error!("VoxelLodTerrain.paste failed: {error}");
+        }
+    }
+
+    pub(crate) fn collect_voxels_in_box(
+        &self,
+        min: voxel_core::math::Vector3i,
+        max: voxel_core::math::Vector3i,
+        channel: usize,
+        max_items: usize,
+    ) -> Vec<(voxel_core::math::Vector3i, u64)> {
+        let Some(core) = self.core.as_ref() else {
+            return Vec::new();
+        };
+        crate::terrain::collect_core_voxels(core, min, max, channel, max_items)
+    }
+
     pub(crate) fn edit_world_voxel(
         &mut self,
         pos: voxel_core::math::Vector3i,

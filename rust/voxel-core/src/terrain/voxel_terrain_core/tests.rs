@@ -1164,6 +1164,35 @@ fn batch_box_edit_fills_inclusive_bounds() {
     );
 }
 
+#[test]
+fn batch_paste_copies_source_buffer_into_lod0() {
+    use crate::storage::VoxelBuffer;
+    let mut core = make_edit_core_with_lods(1);
+    let mut src = VoxelBuffer::with_size(Vector3i::splat(2));
+    src.set_voxel(9, 0, 0, 0, ChannelId::Type.index());
+    src.set_voxel(8, 1, 1, 1, ChannelId::Type.index());
+    let edited = core
+        .try_paste(Vector3i::new(2, 2, 2), &src, 1 << ChannelId::Type.index())
+        .expect("paste should publish");
+    assert_eq!(edited, 1);
+    let snapshot = core
+        .data()
+        .block_snapshot(Vector3i::zero(), 0)
+        .expect("pasted block is resident");
+    assert_eq!(
+        snapshot
+            .voxels()
+            .get_voxel(2, 2, 2, ChannelId::Type.index()),
+        9
+    );
+    assert_eq!(
+        snapshot
+            .voxels()
+            .get_voxel(3, 3, 3, ChannelId::Type.index()),
+        8
+    );
+}
+
 fn requested_mesh_locations(core: &VoxelTerrainCore) -> Vec<MeshBlockLocation> {
     let mut locations = core
         .mesh_maps
