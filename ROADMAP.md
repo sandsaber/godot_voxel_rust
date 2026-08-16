@@ -1,14 +1,16 @@
 # Roadmap
 
-Big features that remain after the C++ → Rust migration. Each item is
-independently trackable — reference it in commits/PRs as `R1`, `R2`, …
-Statuses: ⬜ not started · 🟡 in progress · ✅ done. Detailed rationale and
-the full parity matrix live in [doc/source/status.md](doc/source/status.md).
+Big features after the C++ → Rust migration. Reference items as `R1`…`R8`
+in commits/PRs. Statuses: ⬜ not started · 🟡 in progress · ✅ done for the
+agreed product slice. Detail and the parity matrix live in
+[doc/source/status.md](doc/source/status.md).
 
-## R1 — Blocky terrain end-to-end 🟡
+GPU / SQLite / multipass / Rapier / full Godot Variant persistence / a
+multiplayer protocol are **not** next-PR work. They need an explicit go-ahead.
 
-Baked cube library + `VoxelMesherBlocky` now reach `VoxelTerrain`. Remaining
-work is Godot model-resource peers (meshes/materials), not the paging path.
+## R1 — Blocky terrain end-to-end ✅
+
+Baked cube/mesh library + `VoxelMesherBlocky` reach `VoxelTerrain`.
 
 - [x] Expose `VoxelBlockyLibrary` baking through the binding (models →
       `BakedLibrary` + `bake_library`)
@@ -17,16 +19,19 @@ work is Godot model-resource peers (meshes/materials), not the paging path.
 - [x] Smoke test: type-channel generator + blocky mesher renders visible
       blocks
 - [x] `add_model` keeps Godot resources; cube/mesh/empty/fluid bake into the
-      library (mesh items currently bake as colored cubes)
-- [x] Bake assigned Godot mesh triangles into the interior blocky surface
-- [x] Side-cutout / ortho-rotation parity with upstream mesh bake
+      library
+- [x] Bake assigned Godot mesh triangles (interior + cube-face split)
+- [x] Side-cutout / ortho-rotation on mesh bake (`side_vertex_tolerance`,
+      24 ortho bases, `side_cutout_enabled` → `bake_library`)
 
-## R2 — VoxelLodTerrain paging & rendering 🟡
+Leftover (not blocking the slice): per-surface Godot materials beyond the
+first baked surface, richer inspector peers.
+
+## R2 — VoxelLodTerrain paging & rendering ✅
 
 Production clipbox planner is live (`VoxelTerrainCore::new_variable_lod` +
 `try_process`). The Godot node pages, meshes, splits/joins and uploads
-`ArrayMesh`es; a 3-LOD smoke scene covers viewer movement. Remaining work is
-renderer/API parity, not a missing runtime.
+`ArrayMesh`es. A 3-LOD smoke scene covers viewer movement.
 
 - [x] Wire planner decisions to stream load/save in the node
 - [x] Render LOD blocks through the shared mesh-lifecycle path
@@ -34,35 +39,49 @@ renderer/API parity, not a missing runtime.
 - [x] Consume `RenderTopologyChanged` / per-block transition masks in Godot
 - [x] Collision surfaces + inspector layer/mask/margin on both terrain nodes
 - [x] `block_loaded` / `mesh_block_entered` signals on `VoxelLodTerrain`
-- [x] Upstream octree debug-draw / visual parity (clipbox leaves +
-      volume/viewer/edit wireframes on `VoxelLodTerrain`)
+- [x] Debug-draw overlay (clipbox leaves, volume bounds, viewer clipboxes,
+      edited/metadata boxes). There is no legacy octree; "octree nodes" are
+      resident mesh-block leaves.
+
+Leftover: GPU/normalmap inspector fields are stored stubs (deferred by
+design with the GPU path).
 
 ## R3 — Multiplayer / areas ⬜
 
-- [ ] Port `VoxelAreaFinder` (area sync primitives)
-- [ ] Define the replication boundary for voxel edits/block data
+**Needs a design pass before any code.** This is a network product, not a
+missing `#[func]`. Out of the current PR queue.
 
-## R4 — Terrain editing tools 🟡
+- [ ] Write the replication boundary: what is authoritative (edits vs whole
+      blocks), how it meets `try_edit_*`, dirty flags, LOD, and stream save
+- [ ] Port `VoxelAreaFinder` (who cares about which box; what to load/send)
+- [ ] Only then implement a transport / interest protocol
+
+`VoxelAreaFinder` alone is a medium port. The boundary decision is the large
+part. Do not start this "on the side" of serializer work.
+
+## R4 — Terrain editing tools ✅
 
 `VoxelTerrain.get_voxel_tool()` and `VoxelLodTerrain.get_voxel_tool()` return
-a live `VoxelToolTerrain`. Sphere/box edits run as one storage transaction per
-overlapping data block (not per voxel).
+a live `VoxelToolTerrain`. Sphere/box/hemisphere/smooth/paste run as one
+storage transaction per overlapping data block.
 
 - [x] `VoxelToolTerrain` backed by `VoxelTerrainCore` edits (sphere/box)
 - [x] Batch sphere/box path in `voxel-core` (`try_edit_sphere` / `try_edit_box`)
 - [x] Tool bound to `VoxelLodTerrain`
 - [x] Hemisphere brush (`do_hemisphere`) in core and `VoxelToolTerrain`
 - [x] Smooth mode (`do_smooth` box-blur) in core and `VoxelToolTerrain`
-- [x] Paste (`do_paste`) and blocky random-tick on `VoxelToolTerrain`
-- [x] Per-voxel metadata store / `for_each_voxel_metadata_in_area` (in-memory;
-      serializer Variant codec is still R7)
+- [x] Paste (`do_paste`) and tags-aware blocky random-tick
+- [x] In-memory per-voxel / block metadata + `for_each_voxel_metadata_in_area`
 
-## R5 — Instancing rendering ⬜
+Persistence of that metadata is R7, not a hole in the tool.
+
+## R5 — Instancing rendering 🟡
 
 - [x] MultiMesh upload from `scatter_from_buffer` / `scatter_test`
 - [x] `InstanceBlock` map + stream with terrain mesh-block paging
+- [ ] Scene-item instancer (spawn real nodes per instance, not only MultiMesh)
 
-## R6 — Graph editor parity 🟡
+## R6 — Graph editor parity ✅
 
 - [x] `add_node` / `clear_graph` / `compile_graph` programmatic API
 - [x] Assigning `VoxelGeneratorGraph` to terrain uses `GraphGenerator` (never silent Waves)
@@ -70,19 +89,30 @@ overlapping data block (not per voxel).
 - [x] Wire `ExpressionNode` / `Image2D` into the graph runtime (`add_expression_node`, `add_image2d_node`)
 - [x] Visual GraphEdit addon: apply/compile against `add_node` / `compile_and_sample`
 
-## R7 — Streams & metadata ⬜
+Leftover: editor polish, not a missing compile path.
 
-- [ ] Block metadata section (needs a Variant codec; also unblocks v2/v3
-      legacy migration)
+## R7 — Streams & metadata 🟡
+
+Forest format is locked on disk. Per-voxel metadata is live in memory only.
+
 - [x] `VoxelStreamRegionFiles` region/sector size wired into the stream
 - [x] `convert_files` rewrites region/sector size on disk
-- [x] Channel depths and rotation metadata (`meta.vxrm` locks forest
-      format: block/region/sector size + 8 channel depths)
+- [x] `meta.vxrm` locks forest format (block/region/sector size + 8 channel
+      depths)
+- [ ] **Narrow (next product slice, if we continue):** persist our
+      `MetadataValue` (`nil` / `int` / `float` / `string` / `bytes`) in the
+      v4 metadata section. Byte-compatible with C++ when the section is empty.
+      Enough for *our* worlds to survive save/load. Not enough to read a C++
+      save that stored Dictionary/Object Variants.
+- [ ] **Wide (separate project, not the next commit):** full Godot Variant
+      codec + custom-metadata factory. That is what unblocks reading arbitrary
+      C++ metadata and v2/v3 region migration. It either pulls Variant into
+      `voxel-core` or needs a thick gdext-only encoder.
 
-## R8 — CI rework 🟡
+Do the narrow slice if the goal is "metadata survives `.vxr`". Do not start
+the wide codec without an explicit decision.
 
-Rust jobs exist (`rust.yml` on push/PR, scheduled TSan / fuzz / audit).
-Leftover C++ scons workflows have been removed from the tree.
+## R8 — CI rework ✅
 
 - [x] Automatic Rust CI on PRs (`verify`: fmt + test + clippy). Godot
       smoke and Android are `workflow_dispatch` until the extension load
@@ -95,4 +125,5 @@ Leftover C++ scons workflows have been removed from the tree.
 
 GPU compute path / detail rendering / shaders, SQLite streams, multipass
 generator, Rapier physics — intentionally out of scope to keep `voxel-core`
-pure-Rust and cross-compilable.
+pure-Rust and cross-compilable. Full Variant persistence and multiplayer
+(R3 / wide R7) sit next to these until designed.

@@ -88,9 +88,10 @@ verified in Godot 4.7.1; the complete canonical upstream API is still partial:
 - Full paging + generation + meshing runs end-to-end in the headless Godot
   smoke suite, including a 3-LOD Variable-LOD scene.
 
-Remaining big features (blocky model library on terrain, multiplayer areas,
-full terrain tools, instancing rendering, graph editor) are tracked in
-**[ROADMAP.md](ROADMAP.md)**.
+What is still open (narrow metadata-on-disk, scene-item instancer,
+multiplayer/areas) is tracked in **[ROADMAP.md](ROADMAP.md)**. GPU, SQLite,
+multipass, Rapier, a full Variant codec, and a network protocol are deferred
+until explicitly designed.
 
 Class names follow upstream godot_voxel (`#[class(rename=…)]`); see
 [`AGENTS.md`](AGENTS.md) for the naming scheme.
