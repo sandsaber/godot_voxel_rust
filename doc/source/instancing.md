@@ -2,11 +2,11 @@
 
 The instancer scatters items (trees, rocks, grass) over voxel surfaces.
 
-!!! warning "Status: MVP — scatter counts only"
-    The scatter pipeline computes **how many instances would be placed and
-    where**, but there is **no rendering yet**: no `MultiMesh` output, no
-    scene instantiation, no attachment to live terrain blocks. Treat the
-    returned counts as the functional surface for now.
+!!! note "Status: MultiMesh + per-block streaming"
+    `scatter_from_buffer` / `scatter_test` upload `MultiMeshInstance3D`
+    children. As a child of `VoxelTerrain` / `VoxelLodTerrain`, the node
+    also streams one instance block per paged LOD0 mesh block
+    (`sync_stream`, `get_streamed_block_count`).
 
 ## VoxelInstancer
 
@@ -20,6 +20,10 @@ A `Node3D` with its own internal item library and scatter configuration.
 | `set_seed(seed)` | method | Seed for the scatter random generator. |
 | `scatter_from_buffer(buffer)` | method | Extracts surface points from a `VoxelBuffer`'s Type channel (channel 0) and runs every item's scatter generator over them. Returns the total instance count. |
 | `scatter_test(count)` | method | Debug helper: scatters over `count` dummy points using item 0. Returns the instance count. |
+| `set_item_mesh(index, mesh)` | method | Mesh used when uploading that item as a MultiMesh. |
+| `sync_stream()` | method | Diff parent terrain mesh blocks and load/unload instance blocks. Also runs from `_process`. |
+| `get_streamed_block_count()` | method | Resident streamed instance blocks. |
+| `get_streamed_instance_count()` | method | Instances across streamed blocks. |
 
 Surface extraction reads the buffer's Type channel: a voxel is a surface point
 when it is solid (`!= 0`) and the voxel directly below it is air (`== 0`).

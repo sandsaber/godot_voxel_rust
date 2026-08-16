@@ -1298,6 +1298,12 @@ impl VoxelLodTerrainGD {
         i32::try_from(self.mesh_instances.len()).unwrap_or(i32::MAX)
     }
 
+    /// Packed `x,y,z,lod` for every resident mesh block.
+    #[func]
+    pub(crate) fn get_mesh_block_locations(&self) -> PackedInt32Array {
+        crate::terrain::pack_mesh_block_locations(self.mesh_instances.keys().copied())
+    }
+
     /// Returns the voxel-core version string (diagnostic).
     #[func]
     fn get_version(&self) -> GString {
@@ -1734,7 +1740,7 @@ impl VoxelLodTerrainGD {
     /// Mesh block size in voxels (read-only). Matches the core's data block
     /// size when one exists, otherwise the inspector default of 16.
     #[func]
-    fn get_mesh_block_size(&self) -> i32 {
+    pub(crate) fn get_mesh_block_size(&self) -> i32 {
         self.mesh_block_size_value
     }
 
@@ -2289,6 +2295,20 @@ impl VoxelLodTerrainGD {
             return Vec::new();
         };
         crate::terrain::collect_core_voxels(core, min, max, channel, max_items)
+    }
+
+    pub(crate) fn surface_points_for_block(
+        &self,
+        position: voxel_core::math::Vector3i,
+        block_size: i32,
+    ) -> (
+        Vec<voxel_core::math::Vector3f>,
+        Vec<voxel_core::math::Vector3f>,
+    ) {
+        let Some(core) = self.core.as_ref() else {
+            return (Vec::new(), Vec::new());
+        };
+        crate::terrain::surface_points_from_core(core, position, block_size)
     }
 
     pub(crate) fn edit_world_voxel(

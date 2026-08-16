@@ -58,7 +58,7 @@ overlapping data block (not per voxel).
 ## R5 — Instancing rendering ⬜
 
 - [x] MultiMesh upload from `scatter_from_buffer` / `scatter_test`
-- [ ] `VoxelInstanceBlock` + per-block instance streaming
+- [x] `InstanceBlock` map + stream with terrain mesh-block paging
 
 ## R6 — Graph editor parity 🟡
 

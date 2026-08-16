@@ -1723,6 +1723,45 @@ pub(crate) const fn fixed_viewer_demand(generate_collision: bool) -> MeshDemand 
     viewer_mesh_demand(generate_collision, true, true)
 }
 
+pub(crate) fn pack_mesh_block_locations(
+    ids: impl IntoIterator<Item = MeshBlockRenderId>,
+) -> PackedInt32Array {
+    let mut packed = PackedInt32Array::new();
+    for id in ids {
+        packed.push(id.position_in_blocks.x);
+        packed.push(id.position_in_blocks.y);
+        packed.push(id.position_in_blocks.z);
+        packed.push(i32::from(id.lod_index));
+    }
+    packed
+}
+
+pub(crate) fn surface_points_from_core(
+    core: &VoxelTerrainCore,
+    position: Vector3i,
+    block_size: i32,
+) -> (
+    Vec<voxel_core::math::Vector3f>,
+    Vec<voxel_core::math::Vector3f>,
+) {
+    let Some(block) = core.data().block_snapshot(position, 0) else {
+        return (Vec::new(), Vec::new());
+    };
+    if !block.has_voxels() {
+        return (Vec::new(), Vec::new());
+    }
+    let origin = voxel_core::math::Vector3f::new(
+        (position.x * block_size) as f32,
+        (position.y * block_size) as f32,
+        (position.z * block_size) as f32,
+    );
+    voxel_core::instancing::extract_surface_points(
+        block.voxels(),
+        origin,
+        voxel_core::storage::ChannelId::Type.index(),
+    )
+}
+
 /// Snapshot-read voxels in an inclusive world box. Used by paste/random-tick
 /// without taking a write transaction per cell.
 pub(crate) fn collect_core_voxels(
@@ -1919,6 +1958,27 @@ impl VoxelTerrain {
     #[func]
     fn get_mesh_block_count(&self) -> i32 {
         i32::try_from(self.mesh_instances.len()).unwrap_or(i32::MAX)
+    }
+
+    /// Packed `x,y,z,lod` for every resident mesh block. Used by the instancer
+    /// to stream per-block MultiMeshes in lockstep with paging.
+    #[func]
+    pub(crate) fn get_mesh_block_locations(&self) -> PackedInt32Array {
+        pack_mesh_block_locations(self.mesh_instances.keys().copied())
+    }
+
+    pub(crate) fn surface_points_for_block(
+        &self,
+        position: Vector3i,
+        block_size: i32,
+    ) -> (
+        Vec<voxel_core::math::Vector3f>,
+        Vec<voxel_core::math::Vector3f>,
+    ) {
+        let Some(core) = self.core.as_ref() else {
+            return (Vec::new(), Vec::new());
+        };
+        surface_points_from_core(core, position, block_size)
     }
 
     /// Returns the voxel-core version string (diagnostic).
@@ -2526,7 +2586,7 @@ impl VoxelTerrain {
     /// Mesh block size in voxels (read-only). Reflects the live core's data
     /// block size when one exists, otherwise the inspector default of 16.
     #[func]
-    fn get_mesh_block_size(&self) -> i32 {
+    pub(crate) fn get_mesh_block_size(&self) -> i32 {
         match self.core.as_ref() {
             Some(core) => core.data().block_size() as i32,
             None => self.mesh_block_size_value,

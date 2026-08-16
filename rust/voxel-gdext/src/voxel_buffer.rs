@@ -3,6 +3,7 @@
 //! `VoxelBufferGD` exposes a VoxelBuffer as a Godot RefCounted.
 //! `VoxelInstancerGD` is a Node3D for scatter-based instance placement.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use godot::classes::multi_mesh::TransformFormat;
@@ -1010,8 +1011,12 @@ pub struct VoxelInstancerGD {
     config: ScatterConfig,
     /// Optional per-item mesh used when uploading MultiMeshes.
     item_meshes: Vec<Option<Gd<godot::classes::Mesh>>>,
-    /// Live MultiMeshInstance3D children created by the last scatter.
+    /// Live MultiMeshInstance3D children created by the last one-shot scatter.
     uploaded_instances: Vec<Gd<MultiMeshInstance3D>>,
+    /// Resident per-block instance data, streamed with terrain paging.
+    instance_blocks: voxel_core::instancing::InstanceBlockMap,
+    /// MultiMesh nodes keyed by streamed block `(x, y, z, lod)`.
+    streamed_nodes: HashMap<(i32, i32, i32, u8), Vec<Gd<MultiMeshInstance3D>>>,
     /// Density multiplier.
     #[var]
     density_multiplier: f32,
@@ -1026,12 +1031,19 @@ impl INode3D for VoxelInstancerGD {
             config: ScatterConfig::default(),
             item_meshes: Vec::new(),
             uploaded_instances: Vec::new(),
+            instance_blocks: voxel_core::instancing::InstanceBlockMap::new(),
+            streamed_nodes: HashMap::new(),
             density_multiplier: 1.0,
         }
     }
 
     fn ready(&mut self) {
         godot_print!("VoxelInstancerGD ready");
+        self.base_mut().set_process(true);
+    }
+
+    fn process(&mut self, _delta: f64) {
+        let _ = self.sync_stream();
     }
 }
 
@@ -1117,24 +1129,11 @@ impl VoxelInstancerGD {
         // Try to cast to VoxelBufferGD for direct field access.
         if let Ok(buf_gd) = buffer.clone().try_cast::<VoxelBufferGD>() {
             let bound = buf_gd.bind();
-            let sx = bound.get_size_x();
-            let sy = bound.get_size_y();
-            let sz = bound.get_size_z();
-
-            let mut positions = Vec::new();
-            let mut normals = Vec::new();
-            for z in 1..sz {
-                for y in 1..sy {
-                    for x in 1..sx {
-                        let vt = bound.get_voxel(x, y, z, 0);
-                        let vt_below = bound.get_voxel(x, y - 1, z, 0);
-                        if vt != 0 && vt_below == 0 {
-                            positions.push(Vector3f::new(x as f32, y as f32, z as f32));
-                            normals.push(Vector3f::new(0.0, 1.0, 0.0));
-                        }
-                    }
-                }
-            }
+            let (positions, normals) = voxel_core::instancing::extract_surface_points(
+                bound.core_buffer(),
+                Vector3f::zero(),
+                0,
+            );
             drop(bound);
             drop(buf_gd);
 
@@ -1205,6 +1204,52 @@ impl VoxelInstancerGD {
         self.upload_scatter_multimeshes(std::slice::from_ref(&result));
         i32::try_from(result.len()).unwrap_or(i32::MAX)
     }
+
+    /// Stream instances for every currently paged mesh block of a parent
+    /// `VoxelTerrain` / `VoxelLodTerrain`. Called from `_process`; also
+    /// available as a one-shot from GDScript.
+    #[func]
+    fn sync_stream(&mut self) -> i32 {
+        if self.library.is_empty() || !self.density_multiplier.is_finite() {
+            return i32::try_from(self.instance_blocks.instance_count()).unwrap_or(i32::MAX);
+        }
+        let Some(locations) = self.parent_mesh_locations() else {
+            return i32::try_from(self.instance_blocks.instance_count()).unwrap_or(i32::MAX);
+        };
+        let block_size = self.parent_block_size();
+        let wanted: HashSet<(i32, i32, i32, u8)> = locations.iter().copied().collect();
+        let stale: Vec<(Vector3i, u8)> = self
+            .instance_blocks
+            .keys()
+            .filter(|(pos, lod)| !wanted.contains(&(pos.x, pos.y, pos.z, *lod)))
+            .collect();
+        for (pos, lod) in stale {
+            self.unload_instance_block(pos, lod);
+        }
+        for (x, y, z, lod) in wanted {
+            if lod != 0 {
+                continue;
+            }
+            let pos = Vector3i::new(x, y, z);
+            if self.instance_blocks.contains(pos, lod) {
+                continue;
+            }
+            self.load_instance_block(pos, lod, block_size);
+        }
+        i32::try_from(self.instance_blocks.instance_count()).unwrap_or(i32::MAX)
+    }
+
+    /// Number of resident streamed instance blocks.
+    #[func]
+    fn get_streamed_block_count(&self) -> i32 {
+        i32::try_from(self.instance_blocks.len()).unwrap_or(i32::MAX)
+    }
+
+    /// Number of instances across all streamed blocks.
+    #[func]
+    fn get_streamed_instance_count(&self) -> i32 {
+        i32::try_from(self.instance_blocks.instance_count()).unwrap_or(i32::MAX)
+    }
 }
 
 impl VoxelInstancerGD {
@@ -1256,6 +1301,157 @@ impl VoxelInstancerGD {
             self.uploaded_instances.push(node);
         }
     }
+
+    fn parent_mesh_locations(&self) -> Option<Vec<(i32, i32, i32, u8)>> {
+        let parent = self.base().get_parent()?;
+        if let Ok(terrain) = parent.clone().try_cast::<crate::terrain::VoxelTerrain>() {
+            return Some(unpack_mesh_locations(
+                terrain.bind().get_mesh_block_locations(),
+            ));
+        }
+        if let Ok(terrain) = parent.try_cast::<crate::resources2::VoxelLodTerrainGD>() {
+            return Some(unpack_mesh_locations(
+                terrain.bind().get_mesh_block_locations(),
+            ));
+        }
+        None
+    }
+
+    fn parent_block_size(&self) -> i32 {
+        let Some(parent) = self.base().get_parent() else {
+            return 16;
+        };
+        if let Ok(terrain) = parent.clone().try_cast::<crate::terrain::VoxelTerrain>() {
+            return terrain.bind().get_mesh_block_size().max(1);
+        }
+        if let Ok(terrain) = parent.try_cast::<crate::resources2::VoxelLodTerrainGD>() {
+            return terrain.bind().get_mesh_block_size().max(1);
+        }
+        16
+    }
+
+    fn parent_surface_points(
+        &self,
+        position: Vector3i,
+        block_size: i32,
+    ) -> (Vec<Vector3f>, Vec<Vector3f>) {
+        let Some(parent) = self.base().get_parent() else {
+            return (Vec::new(), Vec::new());
+        };
+        if let Ok(terrain) = parent.clone().try_cast::<crate::terrain::VoxelTerrain>() {
+            return terrain
+                .bind()
+                .surface_points_for_block(position, block_size);
+        }
+        if let Ok(terrain) = parent.try_cast::<crate::resources2::VoxelLodTerrainGD>() {
+            return terrain
+                .bind()
+                .surface_points_for_block(position, block_size);
+        }
+        (Vec::new(), Vec::new())
+    }
+
+    fn load_instance_block(&mut self, position: Vector3i, lod_index: u8, block_size: i32) {
+        let (positions, normals) = self.parent_surface_points(position, block_size);
+        let instances = voxel_core::instancing::scatter_block_instances(
+            &self.library,
+            &self.config,
+            self.density_multiplier,
+            &positions,
+            &normals,
+        );
+        let mut by_item: Vec<Vec<voxel_core::instancing::BlockInstanceData>> =
+            vec![Vec::new(); self.library.len()];
+        for instance in &instances {
+            if let Some(slot) = by_item.get_mut(instance.item_index as usize) {
+                slot.push(*instance);
+            }
+        }
+        let nodes = self.upload_block_multimeshes(position, lod_index, &by_item);
+        self.streamed_nodes
+            .insert((position.x, position.y, position.z, lod_index), nodes);
+        self.instance_blocks
+            .upsert(voxel_core::instancing::InstanceBlock::new(
+                position, lod_index, instances,
+            ));
+    }
+
+    fn unload_instance_block(&mut self, position: Vector3i, lod_index: u8) {
+        self.instance_blocks.remove(position, lod_index);
+        if let Some(nodes) = self
+            .streamed_nodes
+            .remove(&(position.x, position.y, position.z, lod_index))
+        {
+            for mut node in nodes {
+                node.queue_free();
+            }
+        }
+    }
+
+    fn upload_block_multimeshes(
+        &mut self,
+        position: Vector3i,
+        lod_index: u8,
+        by_item: &[Vec<voxel_core::instancing::BlockInstanceData>],
+    ) -> Vec<Gd<MultiMeshInstance3D>> {
+        let default_mesh = BoxMesh::new_gd().upcast::<godot::classes::Mesh>();
+        let mut nodes = Vec::new();
+        for (item_index, instances) in by_item.iter().enumerate() {
+            if instances.is_empty() {
+                continue;
+            }
+            let mesh = self
+                .item_meshes
+                .get(item_index)
+                .and_then(|mesh| mesh.clone())
+                .unwrap_or_else(|| default_mesh.clone());
+            let mut multimesh = MultiMesh::new_gd();
+            multimesh.set_transform_format(TransformFormat::TRANSFORM_3D);
+            let Ok(count) = i32::try_from(instances.len()) else {
+                continue;
+            };
+            multimesh.set_mesh(&mesh);
+            multimesh.set_instance_count(count);
+            for (i, instance) in instances.iter().enumerate() {
+                let Ok(index) = i32::try_from(i) else {
+                    break;
+                };
+                let [qx, qy, qz, qw] = instance.rotation;
+                let quat = Quaternion::new(qx, qy, qz, qw);
+                let basis = Basis::from_quaternion(quat).scaled(Vector3::splat(instance.scale));
+                let transform = Transform3D::new(
+                    basis,
+                    Vector3::new(
+                        instance.position.x,
+                        instance.position.y,
+                        instance.position.z,
+                    ),
+                );
+                multimesh.set_instance_transform(index, transform);
+            }
+            let mut node = MultiMeshInstance3D::new_alloc();
+            node.set_multimesh(&multimesh);
+            node.set_name(&format!(
+                "inst_lod{lod_index}_{}_{}_{}_{item_index}",
+                position.x, position.y, position.z
+            ));
+            self.base_mut().add_child(&node);
+            nodes.push(node);
+        }
+        nodes
+    }
+}
+
+fn unpack_mesh_locations(packed: PackedInt32Array) -> Vec<(i32, i32, i32, u8)> {
+    let slice = packed.as_slice();
+    let mut out = Vec::new();
+    let mut index = 0;
+    while index + 3 < slice.len() {
+        let lod = u8::try_from(slice[index + 3].max(0)).unwrap_or(0);
+        out.push((slice[index], slice[index + 1], slice[index + 2], lod));
+        index += 4;
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------

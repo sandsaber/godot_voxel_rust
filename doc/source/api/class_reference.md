@@ -767,6 +767,10 @@ Scatters instances (trees, rocks, grass) on a parent `VoxelTerrain` using an ins
 - `set_seed(seed: i64)`
 - `scatter_from_buffer(buffer: Gd<RefCounted>) -> i32` — extracts surface points from a `VoxelBuffer` and returns the total instance count
 - `scatter_test(count: i32) -> i32`
+- `set_item_mesh(index: i32, mesh: Mesh)`
+- `sync_stream() -> i32` — load/unload instance blocks to match parent terrain mesh blocks
+- `get_streamed_block_count() -> i32`
+- `get_streamed_instance_count() -> i32`
 
 ### VoxelInstanceLibrary
 
