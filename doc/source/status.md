@@ -4,8 +4,8 @@ Honest, audited state of the C++ → Rust port. ✅ = works end-to-end,
 🟡 = partially implemented (details noted), ⬜ = intentionally deferred or not
 ported yet.
 
-The upcoming big features (blocky library, `VoxelLodTerrain` paging,
-multiplayer, editing tools, instancing rendering, graph editor, CI rework)
+The upcoming big features (blocky library, Variable-LOD renderer parity,
+multiplayer, editing tools, instancing rendering, graph editor, leftover CI)
 are tracked individually in
 [ROADMAP.md](https://github.com/sandsaber/godot_voxel_rust/blob/master/ROADMAP.md)
 at the repository root — reference items as `R1`…`R8` in commits/PRs.
@@ -24,7 +24,7 @@ at the repository root — reference items as `R1`…`R8` in commits/PRs.
 | Simple generators (flat/waves/noise/heightmap/image) | ✅ | |
 | Graph generator | 🟡 | AST interpreter with ~30 node kinds + compiled fast path; `ExpressionNode`/`Image2D` nodes exist but are not wired into the runtime; range analysis limited. |
 | Region files (.vxr) | ✅ format | Forest/LRU/`meta.vxrm`/file conversion not ported. |
-| Terrain paging (`VoxelTerrainCore`) | ✅ | Multi-LOD paging, save-on-unload, viewer pairing. |
+| Terrain paging (`VoxelTerrainCore`) | ✅ | Fixed-LOD and Variable-LOD clipbox planner, save-on-unload, viewer pairing. |
 | Edition (sphere/box/blur, DDA raycast) | ✅ core | Smooth/paste tool modes not ported. |
 | Instancing | 🟡 | Scatter math only (MVP); no instance-block streaming. |
 | Modifiers | 🟡 | Sphere modifier real; mesh modifier is a box stand-in; not integrated into streaming. |
@@ -42,7 +42,7 @@ at the repository root — reference items as `R1`…`R8` in commits/PRs.
 | Streams usable by terrain | ✅ | `VoxelStreamMemory`, `VoxelStreamRegionFiles` (region size hardcoded to 32, no settings surface yet). |
 | Editing terrain | 🟡 | `set_voxel_sdf` / `get_voxel_sdf` on `VoxelTerrain`; `VoxelToolTerrain` is a stub (path holder only). |
 | Raycast | ✅ | DDA voxel traversal over the SDF channel. |
-| `VoxelLodTerrain` | 🟡 | Facade: octree subdivision counts only — no paging/rendering of its own (use `VoxelTerrain.lod_count` for multi-LOD). |
+| `VoxelLodTerrain` | 🟡 | Production Variable-LOD runtime (`new_variable_lod` + `try_process`), 3-LOD smoke scene. Pinned API still partial: transition-mask consumption, collision surfaces, GPU/normalmaps and most debug draws are stored stubs. |
 | Instancer rendering | 🟡 | Scatter computes counts; no MultiMesh output yet. |
 | Editor plugins | 🟡 | `.vox` parsing real; the other plugins are bottom-panel prototypes. The upstream graph editor is replaced by a small GDScript prototype in the smoke-test project. |
 | `VoxelBoxMover` / `VoxelAStarGrid3D` | 🟡 | Registered, but semantics differ from upstream (no physics-aware movement / no pathfinding engine yet). |
@@ -63,9 +63,11 @@ These upstream areas are absent and were not explicitly listed as deferred:
 
 ## Test & verification status
 
-- **1494 tests** (0 failed): 800 unit + 674 parity-suite + integration +
-  transvoxel parity + stress + TSan (plain concurrency off-Linux) + binding
-  unit + doc-tests.
+- Workspace tests are the source of truth (the inventory grew with the
+  Variable-LOD planner; do not treat a copied count in this file as current).
+  Coverage: core unit tests, the parity suite, integration/stress, transvoxel
+  C++ goldens, TSan (plain concurrency off-Linux), binding unit +
+  `port_status` manifest, Godot smoke.
 - **C++-golden parity** covers the transvoxel regular mesher + tables: the
   goldens are produced by compiling the *actual upstream C++* in
   `cpp-baseline`, and the comparator enforces bit-exact structural data. The

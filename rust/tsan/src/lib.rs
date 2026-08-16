@@ -4,6 +4,11 @@
 //! they exercise `voxel-core` purely through its public API. Run them with:
 //!
 //! ```text
-//! RUSTFLAGS="-Zsanitizer=thread -Cunsafe-allow-abi-mismatch=sanitizer" \
-//!   cargo +nightly test -p tsan --test <name> -- --test-threads=1
+//! CARGO_INCREMENTAL=0 RUSTFLAGS="-Zsanitizer=thread" \
+//!   cargo +nightly test -Zbuild-std -p tsan --target x86_64-unknown-linux-gnu \
+//!   --tests -- --test-threads=1
 //! ```
+//!
+//! Use `--tests` (not a bare `cargo test`) so rustdoc doctests are skipped.
+//! With `-Zbuild-std` + `-Zsanitizer=thread`, doctest crates are compiled
+//! *without* the sanitizer flag and fail with an ABI-mismatch error.
