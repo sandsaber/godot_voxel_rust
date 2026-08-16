@@ -29,22 +29,24 @@ pub struct RegionKey {
 }
 
 impl RegionKey {
-    fn from_block_position(position: Vector3i, lod_index: u8) -> Self {
+    fn from_block_position(position: Vector3i, lod_index: u8, region_size: i32) -> Self {
+        let region_size = region_size.max(1);
         Self {
             lod_index,
             region_position: Vector3i::new(
-                position.x.div_euclid(REGION_SIZE),
-                position.y.div_euclid(REGION_SIZE),
-                position.z.div_euclid(REGION_SIZE),
+                position.x.div_euclid(region_size),
+                position.y.div_euclid(region_size),
+                position.z.div_euclid(region_size),
             ),
         }
     }
 
-    fn local_block_position(self, position: Vector3i) -> Vector3i {
+    fn local_block_position(self, position: Vector3i, region_size: i32) -> Vector3i {
+        let region_size = region_size.max(1);
         Vector3i::new(
-            position.x.rem_euclid(REGION_SIZE),
-            position.y.rem_euclid(REGION_SIZE),
-            position.z.rem_euclid(REGION_SIZE),
+            position.x.rem_euclid(region_size),
+            position.y.rem_euclid(region_size),
+            position.z.rem_euclid(region_size),
         )
     }
 }
@@ -102,15 +104,34 @@ impl SharedRegionFile {
 
 pub struct RegionFilesStream {
     directory: PathBuf,
+    region_size: i32,
+    sector_size: u32,
     regions: Mutex<HashMap<RegionKey, Arc<SharedRegionFile>>>,
 }
 
 impl RegionFilesStream {
     pub fn new(directory: PathBuf) -> Self {
+        Self::with_settings(directory, REGION_SIZE, 512)
+    }
+
+    /// Construct a stream with inspector-configured region/sector sizes.
+    /// `region_size` is blocks per axis (clamped to `1..=255` to match the
+    /// on-disk `RegionFormat` byte field). `sector_size` is bytes.
+    pub fn with_settings(directory: PathBuf, region_size: i32, sector_size: u32) -> Self {
         Self {
             directory: normalize_directory(directory),
+            region_size: region_size.clamp(1, 255),
+            sector_size: sector_size.max(1),
             regions: Mutex::new(HashMap::new()),
         }
+    }
+
+    pub fn region_size(&self) -> i32 {
+        self.region_size
+    }
+
+    pub fn sector_size(&self) -> u32 {
+        self.sector_size
     }
 
     fn region_path(&self, key: RegionKey) -> PathBuf {
@@ -191,8 +212,12 @@ impl RegionFilesStream {
 
 impl VoxelStream for RegionFilesStream {
     fn load_voxel_block(&self, query: VoxelLoadQuery<'_>) -> StreamResult<LoadResult> {
-        let key = RegionKey::from_block_position(query.position_in_blocks, query.lod_index);
-        let local_position = key.local_block_position(query.position_in_blocks);
+        let key = RegionKey::from_block_position(
+            query.position_in_blocks,
+            query.lod_index,
+            self.region_size,
+        );
+        let local_position = key.local_block_position(query.position_in_blocks, self.region_size);
         let region = if let Some(region) = self.get_cached_region(key) {
             region
         } else {
@@ -210,9 +235,13 @@ impl VoxelStream for RegionFilesStream {
     }
 
     fn save_voxel_block(&self, query: VoxelSaveQuery<'_>) -> StreamResult<()> {
-        let key = RegionKey::from_block_position(query.position_in_blocks, query.lod_index);
-        let local_position = key.local_block_position(query.position_in_blocks);
-        let format = format_for_block(query.voxel_buffer)?;
+        let key = RegionKey::from_block_position(
+            query.position_in_blocks,
+            query.lod_index,
+            self.region_size,
+        );
+        let local_position = key.local_block_position(query.position_in_blocks, self.region_size);
+        let format = format_for_block(query.voxel_buffer, self.region_size, self.sector_size)?;
         let region = self
             .get_or_open_region(key, true, format)?
             .expect("create_if_not_found always returns a region or an error");
@@ -383,7 +412,11 @@ where
     }
 }
 
-fn format_for_block(block: &VoxelBuffer) -> Result<RegionFormat, VoxelStreamError> {
+fn format_for_block(
+    block: &VoxelBuffer,
+    region_size: i32,
+    sector_size: u32,
+) -> Result<RegionFormat, VoxelStreamError> {
     let size = block.size();
     if size.x <= 0
         || size.x != size.y
@@ -397,7 +430,8 @@ fn format_for_block(block: &VoxelBuffer) -> Result<RegionFormat, VoxelStreamErro
         u8::try_from(size.x.ilog2()).map_err(|_| VoxelStreamError::BlockFormatMismatch)?;
     let mut format = RegionFormat {
         block_size_po2,
-        region_size: Vector3i::splat(REGION_SIZE),
+        region_size: Vector3i::splat(region_size),
+        sector_size,
         ..RegionFormat::default()
     };
     for channel_index in 0..MAX_CHANNELS {
@@ -439,7 +473,7 @@ fn map_region_error(error: RegionError, path: &Path) -> VoxelStreamError {
 mod tests {
     use super::{
         flush_all, format_for_block, open_shared_region, region_identity_path_with,
-        RegionFilesStream, RegionKey, REGION_REGISTRY,
+        RegionFilesStream, RegionKey, REGION_REGISTRY, REGION_SIZE,
     };
     use crate::math::Vector3i;
     use crate::storage::{Allocator, ChannelId, VoxelBuffer};
@@ -524,6 +558,23 @@ mod tests {
     }
 
     #[test]
+    fn with_settings_uses_configured_region_size() {
+        let dir = TestDir::new();
+        let stream = RegionFilesStream::with_settings(dir.path().to_path_buf(), 16, 256);
+        assert_eq!(stream.region_size(), 16);
+        assert_eq!(stream.sector_size(), 256);
+        save(&stream, Vector3i::new(17, 0, 0), 0, &sample_block(9)).unwrap();
+        stream.flush().unwrap();
+        drop(stream);
+        let reopened = RegionFilesStream::with_settings(dir.path().to_path_buf(), 16, 256);
+        let (result, loaded) = load(&reopened, Vector3i::new(17, 0, 0), 0).unwrap();
+        assert_eq!(result, LoadResult::Found);
+        assert_eq!(loaded.get_voxel(1, 2, 3, ChannelId::Type.index()), 9);
+        // region_size 16 → block 17 maps to region x=1.
+        assert!(dir.path().join("lod0/r.1.0.0.vxr").is_file());
+    }
+
+    #[test]
     fn keeps_same_position_separate_across_lods() {
         let dir = TestDir::new();
         let stream = RegionFilesStream::new(dir.path().to_path_buf());
@@ -586,7 +637,7 @@ mod tests {
         let region = open_shared_region(
             unresolved_path.clone(),
             false,
-            format_for_block(&sample_block(1)).unwrap(),
+            format_for_block(&sample_block(1), REGION_SIZE, 512).unwrap(),
         )
         .unwrap();
 
@@ -624,7 +675,7 @@ mod tests {
         let error = match open_shared_region(
             unresolved_path,
             true,
-            format_for_block(&sample_block(1)).unwrap(),
+            format_for_block(&sample_block(1), REGION_SIZE, 512).unwrap(),
         ) {
             Err(error) => error,
             Ok(_) => panic!("creation must not publish a region without a resolved parent"),
@@ -720,8 +771,8 @@ mod tests {
             .join("voxel-data");
         let first = Arc::new(RegionFilesStream::new(directory.clone()));
         let second = Arc::new(RegionFilesStream::new(alias));
-        let key = RegionKey::from_block_position(Vector3i::zero(), 0);
-        let format = format_for_block(&sample_block(1)).unwrap();
+        let key = RegionKey::from_block_position(Vector3i::zero(), 0, REGION_SIZE);
+        let format = format_for_block(&sample_block(1), REGION_SIZE, 512).unwrap();
 
         save(&first, Vector3i::zero(), 0, &sample_block(1)).unwrap();
         let first_region = first
@@ -784,7 +835,7 @@ mod tests {
         std::os::unix::fs::symlink(&physical_directory, dir.path().join("first-alias")).unwrap();
         std::os::unix::fs::symlink(&physical_directory, dir.path().join("second-alias")).unwrap();
 
-        let key = RegionKey::from_block_position(Vector3i::zero(), 0);
+        let key = RegionKey::from_block_position(Vector3i::zero(), 0, REGION_SIZE);
         let start = Arc::new(Barrier::new(2));
         let first_thread = {
             let stream = first.clone();
@@ -869,7 +920,7 @@ mod tests {
         let legacy_path = dir.path().join("r.0.0.0.vxr");
         let existing_position = Vector3i::new(3, 0, 0);
         let added_position = Vector3i::new(4, 0, 0);
-        let format = format_for_block(&sample_block(1)).unwrap();
+        let format = format_for_block(&sample_block(1), REGION_SIZE, 512).unwrap();
 
         let mut legacy = RegionFile::open_with_format(&legacy_path, true, format.clone()).unwrap();
         legacy
@@ -911,7 +962,7 @@ mod tests {
         let mut legacy = RegionFile::open_with_format(
             &legacy_path,
             true,
-            format_for_block(&original_block).unwrap(),
+            format_for_block(&original_block, REGION_SIZE, 512).unwrap(),
         )
         .unwrap();
         legacy
@@ -946,9 +997,13 @@ mod tests {
         let dir = TestDir::new();
         std::fs::create_dir_all(dir.path().join("lod0")).unwrap();
         let stream = Arc::new(RegionFilesStream::new(dir.path().to_path_buf()));
-        let first_key = RegionKey::from_block_position(Vector3i::zero(), 0);
+        let first_key = RegionKey::from_block_position(Vector3i::zero(), 0, REGION_SIZE);
         let first_region = stream
-            .get_or_open_region(first_key, true, format_for_block(&sample_block(1)).unwrap())
+            .get_or_open_region(
+                first_key,
+                true,
+                format_for_block(&sample_block(1), REGION_SIZE, 512).unwrap(),
+            )
             .unwrap()
             .unwrap();
         let first_guard = first_region.lock();

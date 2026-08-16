@@ -523,8 +523,8 @@ impl<F: VoxelFile> RegionFile<F> {
         out_block: &mut VoxelBuffer,
         limits: DecodeLimits,
     ) -> Result<(), RegionError> {
-        // A caller-ordering mistake must not abort the process (the workspace
-        // builds with `panic = "abort"`); surface it like any other failure.
+        // A caller-ordering mistake must not panic; surface it like any other
+        // failure so FFI callers never unwind across the Godot C ABI.
         if self.file.is_none() {
             return Err(RegionError::Io("load_block: file not open".into()));
         }
