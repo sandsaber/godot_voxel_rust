@@ -209,6 +209,17 @@ pub fn s16_to_snorm_noclamp(v: i16) -> f32 {
 
 /// float `[-1, 1]` → int16 (clamped). Matches `snorm_to_s16`.
 #[inline]
+/// Legacy v2 SDF unsigned encoding: `(u - 127) / 127`. Used only by the
+/// v2→v3 block migration.
+pub fn u8_to_snorm(u: u8) -> f32 {
+    (f32::from(u) - 127.0) * (1.0 / 127.0)
+}
+
+/// Legacy v2 SDF unsigned encoding: `(u - 32767) / 32767`.
+pub fn u16_to_snorm(u: u16) -> f32 {
+    (f32::from(u) - 32767.0) * (1.0 / 32767.0)
+}
+
 pub fn snorm_to_s16(v: f32) -> i16 {
     (funcs::clamp(v, -1.0, 1.0) * 32767.0) as i16
 }

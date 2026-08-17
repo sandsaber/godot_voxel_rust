@@ -141,10 +141,11 @@ transforms) are skipped non-fatally, matching upstream's
       vectors/rects/plane/quaternion/AABB/color, Dictionary, Array, packed
       arrays) now round-trip; engine-only payloads are skipped non-fatally.
       `DecodeLimits`-guarded (depth + count budgets).
-- [ ] **v2/v3 region migration:** the Variant codec removed the recorded
-      blocker, but the migration itself is not started — the block
-      serializer still rejects v2/v3 payloads with `UnsupportedVersion`
-      and no rewrite path exists. Needs its own slice.
+- [x] **v2/v3 block migration:** old-format block payloads (inside v3
+      region containers) load transparently — v2→v3 remaps the SDF channel
+      from legacy unsigned snorm; v3→v4 converts raw Variant metadata to
+      tagged VoxelMetadata entries. Both migrations run in-memory on
+      deserialization, no rewrite path needed.
 
 ## R8 — CI rework ✅
 

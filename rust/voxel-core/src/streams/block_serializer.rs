@@ -361,8 +361,23 @@ pub fn deserialize_with_limits(
     // still deserialize "successfully".
     let mut r = MemoryReader::little(&src[..tail_start]);
     let version = r.try_get_8().ok_or(Error::UnexpectedEof)?;
+    if version == 2 || version == 3 {
+        // Legacy migration (ROADMAP R7): v2 → v3 → v4, then re-parse the
+        // v4 payload. The migrations work on the full payload including
+        // the magic; we re-attach it here since our reader excluded it.
+        let mut full = src[..tail_start].to_vec();
+        full.extend_from_slice(&src[tail_start..]);
+        let migrated = if version == 2 {
+            let v3 = migrate_v2_to_v3(&full)?;
+            migrate_v3_to_v4(&v3, limits)?
+        } else {
+            migrate_v3_to_v4(&full, limits)?
+        };
+        // Recurse on the v4 payload (including the magic — the function
+        // checks and strips it itself when bounding the reader).
+        return deserialize_with_limits(&migrated, buffer, limits);
+    }
     if version != BLOCK_FORMAT_VERSION {
-        // v2/v3 migration needs the Godot Variant metadata codec — deferred.
         return Err(Error::UnsupportedVersion(version));
     }
 
@@ -616,6 +631,245 @@ pub fn decompress_and_deserialize_with_limits(
     }
 }
 
+// ---------------------------------------------------------------------------
+// v2 / v3 legacy migration
+// ---------------------------------------------------------------------------
+
+/// SDF channel index used by the v2→v3 migration. Upstream's code remaps
+/// index 2 (Color) — a bug: their own v3 spec and the entire v2-era enum
+/// (`TYPE=0, SDF=1, COLOR=2`) say SDF lives at index 1. We remap the actual
+/// SDF channel; files written by the buggy C++ migration had their color
+/// channel scrambled and SDF left in legacy encoding, so they are already
+/// corrupt in a way no migration here can fix.
+const LEGACY_SDF_CHANNEL_INDEX: usize = 1;
+
+/// Remap a v2 block payload to v3: identical structure, only the SDF
+/// channel's value encoding changes (legacy unsigned snorm → signed snorm).
+/// Operates on the full payload INCLUDING the trailing magic (it is
+/// never re-emitted — the caller must re-append it after migrate_v3_to_v4).
+pub fn migrate_v2_to_v3(src: &[u8]) -> Result<Vec<u8>, Error> {
+    let mut r = MemoryReader::little(src);
+    let version = r.try_get_8().ok_or(Error::UnexpectedEof)?;
+    if version != 2 {
+        return Err(Error::UnsupportedVersion(version));
+    }
+    let size_x = r.try_get_16().ok_or(Error::UnexpectedEof)? as i32;
+    let size_y = r.try_get_16().ok_or(Error::UnexpectedEof)? as i32;
+    let size_z = r.try_get_16().ok_or(Error::UnexpectedEof)? as i32;
+    let size = crate::math::Vector3i::new(size_x, size_y, size_z);
+    let volume = size.volume_u64();
+    if volume == 0 {
+        return Err(Error::EmptyBuffer);
+    }
+    limits_free_volume_check(volume)?;
+
+    // Locate the SDF channel's data range within the payload so the remap
+    // can run in place on a copy.
+    let mut channel_offsets = [(0usize, 0usize); MAX_CHANNELS];
+    let mut channel_fmt_positions = [0usize; MAX_CHANNELS];
+    for ci in 0..MAX_CHANNELS {
+        let fmt = r.try_get_8().ok_or(Error::UnexpectedEof)?;
+        channel_fmt_positions[ci] = r.position() - 1;
+        let (compression, depth) = unpack_format(fmt).map_err(|bad| {
+            Error::InvalidFormat(format!(
+                "channel {ci}: bad fmt byte {fmt:#x} (bad nibble {bad})"
+            ))
+        })?;
+        let start = r.position();
+        let element_count = match compression {
+            Compression::None => volume,
+            Compression::Uniform => 1,
+        };
+        let depth_width = match depth {
+            ChannelDepth::Bit8 => 1u64,
+            ChannelDepth::Bit16 => 2,
+            ChannelDepth::Bit32 => 4,
+            ChannelDepth::Bit64 => 8,
+        };
+        let bytes = element_count
+            .checked_mul(depth_width)
+            .ok_or_else(|| Error::InvalidFormat("channel byte count overflow".to_string()))?;
+        let bytes = usize::try_from(bytes)
+            .map_err(|_| Error::InvalidFormat("channel bytes over usize".to_string()))?;
+        r.try_take(bytes).ok_or(Error::UnexpectedEof)?;
+        channel_offsets[ci] = (start, bytes);
+    }
+
+    let mut dst = src.to_vec();
+    dst[0] = 3;
+
+    // Remap the SDF channel in place. Only depth 0 (8-bit) and 1 (16-bit)
+    // carry the legacy encoding; 32/64-bit floats are untouched.
+    let (sdf_start, sdf_bytes) = channel_offsets[LEGACY_SDF_CHANNEL_INDEX];
+    if LEGACY_SDF_CHANNEL_INDEX < MAX_CHANNELS && sdf_bytes > 0 {
+        // Re-read the fmt byte for the SDF channel from its recorded
+        // position (fmt bytes are interleaved with value bytes, not packed).
+        let fmt_pos = channel_fmt_positions[LEGACY_SDF_CHANNEL_INDEX];
+        let Some(&fmt) = dst.get(fmt_pos) else {
+            return Err(Error::UnexpectedEof);
+        };
+        let Ok((_compression, depth)) = unpack_format(fmt) else {
+            return Err(Error::InvalidFormat(format!(
+                "SDF channel fmt {fmt:#x} invalid"
+            )));
+        };
+        match depth {
+            ChannelDepth::Bit8 => {
+                for i in 0..sdf_bytes {
+                    let offset = sdf_start + i;
+                    let Some(&raw) = dst.get(offset) else {
+                        return Err(Error::UnexpectedEof);
+                    };
+                    let snorm = crate::storage::funcs::u8_to_snorm(raw);
+                    let signed = crate::storage::funcs::snorm_to_s8(snorm);
+                    dst[offset] = signed as u8;
+                }
+            }
+            ChannelDepth::Bit16 => {
+                for i in 0..(sdf_bytes / 2) {
+                    let offset = sdf_start + i * 2;
+                    let Some(chunk) = dst.get(offset..offset + 2) else {
+                        return Err(Error::UnexpectedEof);
+                    };
+                    let raw = u16::from_le_bytes([chunk[0], chunk[1]]);
+                    let snorm = crate::storage::funcs::u16_to_snorm(raw);
+                    let signed = crate::storage::funcs::snorm_to_s16(snorm);
+                    dst[offset..offset + 2].copy_from_slice(&signed.to_le_bytes());
+                }
+            }
+            _ => {} // 32/64-bit: no legacy encoding
+        }
+    }
+
+    Ok(dst)
+}
+
+/// Remap a v3 block payload to v4: identical structure except the metadata
+/// section. v3 metadata is raw Godot Variant wire values (block entry first,
+/// then per-voxel `{u16 x, u16 y, u16 z, Variant}` entries); v4 wraps each
+/// Variant in a tagged `VoxelMetadata` custom entry (tag 32 + wire bytes, no
+/// length prefix). The returned Vec includes the trailing magic.
+///
+/// Upstream's C++ implementation of this conversion has four bugs (never
+/// consumes the v3 size prefix, includes the magic in the metadata region,
+/// omits the v4 size prefix, never re-appends the magic). This port does the
+/// conversion correctly: the v3 `[u32 size][Variant...]` is parsed within
+/// its declared bounds, and a proper v4 section `[u32 size][entries...]` is
+/// emitted with the magic re-attached.
+pub fn migrate_v3_to_v4(src: &[u8], limits: DecodeLimits) -> Result<Vec<u8>, Error> {
+    let tail_start = src
+        .len()
+        .checked_sub(BLOCK_TRAILING_MAGIC_SIZE)
+        .ok_or(Error::UnexpectedEof)?;
+    let magic = src[tail_start..].to_vec();
+
+    let mut r = MemoryReader::little(&src[..tail_start]);
+    let version = r.try_get_8().ok_or(Error::UnexpectedEof)?;
+    if version != 3 {
+        return Err(Error::UnsupportedVersion(version));
+    }
+    let size_x = r.try_get_16().ok_or(Error::UnexpectedEof)? as i32;
+    let size_y = r.try_get_16().ok_or(Error::UnexpectedEof)? as i32;
+    let size_z = r.try_get_16().ok_or(Error::UnexpectedEof)? as i32;
+    let size = crate::math::Vector3i::new(size_x, size_y, size_z);
+    let volume = size.volume_u64();
+    if volume == 0 {
+        return Err(Error::EmptyBuffer);
+    }
+    limits_free_volume_check(volume)?;
+
+    // Skip channels, recording positions for the copy.
+    for ci in 0..MAX_CHANNELS {
+        let fmt = r.try_get_8().ok_or(Error::UnexpectedEof)?;
+        let (compression, depth) = unpack_format(fmt).map_err(|bad| {
+            Error::InvalidFormat(format!(
+                "channel {ci}: bad fmt byte {fmt:#x} (bad nibble {bad})"
+            ))
+        })?;
+        let element_count = match compression {
+            Compression::None => volume,
+            Compression::Uniform => 1,
+        };
+        let depth_width = match depth {
+            ChannelDepth::Bit8 => 1u64,
+            ChannelDepth::Bit16 => 2,
+            ChannelDepth::Bit32 => 4,
+            ChannelDepth::Bit64 => 8,
+        };
+        let bytes = usize::try_from(
+            element_count
+                .checked_mul(depth_width)
+                .ok_or_else(|| Error::InvalidFormat("channel bytes overflow".to_string()))?,
+        )
+        .map_err(|_| Error::InvalidFormat("channel bytes over usize".to_string()))?;
+        r.try_take(bytes).ok_or(Error::UnexpectedEof)?;
+    }
+    let channels_end = r.position();
+
+    // v3 metadata region: [u32 size][Variant...] — the size EXCLUDES itself
+    // and the magic. Variants that fail to decode (unsupported types)
+    // degrade to nil entries, matching the foreign-entry skip semantics.
+    let mut v4_section: Vec<u8> = Vec::new();
+    let remaining = tail_start - channels_end;
+    if remaining > 0 {
+        let v3_size = r.try_get_32().ok_or(Error::UnexpectedEof)? as usize;
+        if v3_size > remaining.saturating_sub(4) {
+            return Err(Error::InvalidFormat(format!(
+                "v3 metadata size {v3_size} exceeds remaining {}",
+                remaining - 4
+            )));
+        }
+        let metadata_slice = src
+            .get(channels_end + 4..channels_end + 4 + v3_size)
+            .ok_or(Error::UnexpectedEof)?;
+        let mut mr = MemoryReader::little(metadata_slice);
+        let mut converted = Vec::new();
+        // Block-level Variant first.
+        match crate::streams::variant_wire::decode_variant(&mut mr, limits.max_variant_depth) {
+            Ok(value) => {
+                converted.push(METADATA_TYPE_VARIANT);
+                crate::streams::variant_wire::encode_variant(&value, &mut converted);
+            }
+            Err(_) => converted.push(METADATA_TYPE_EMPTY),
+        }
+        // Per-voxel entries.
+        while mr.position() < metadata_slice.len() {
+            let x = mr.try_get_16().ok_or(Error::UnexpectedEof)?;
+            let y = mr.try_get_16().ok_or(Error::UnexpectedEof)?;
+            let z = mr.try_get_16().ok_or(Error::UnexpectedEof)?;
+            converted.extend_from_slice(&x.to_le_bytes());
+            converted.extend_from_slice(&y.to_le_bytes());
+            converted.extend_from_slice(&z.to_le_bytes());
+            match crate::streams::variant_wire::decode_variant(&mut mr, limits.max_variant_depth) {
+                Ok(value) => {
+                    converted.push(METADATA_TYPE_VARIANT);
+                    crate::streams::variant_wire::encode_variant(&value, &mut converted);
+                }
+                Err(_) => converted.push(METADATA_TYPE_EMPTY),
+            }
+        }
+        // Emit v4 envelope: [u32 size][entries...].
+        let section_len = u32::try_from(converted.len())
+            .map_err(|_| Error::InvalidFormat("v4 metadata section exceeds u32".to_string()))?;
+        v4_section.extend_from_slice(&section_len.to_le_bytes());
+        v4_section.extend_from_slice(&converted);
+    }
+
+    // Assemble the v4 payload: header + channels (unchanged) + metadata + magic.
+    let mut dst = src[..channels_end].to_vec();
+    dst[0] = 4;
+    dst.extend_from_slice(&v4_section);
+    dst.extend_from_slice(&magic);
+    Ok(dst)
+}
+
+fn limits_free_volume_check(volume: u64) -> Result<(), Error> {
+    // Volume must be representable and non-zero; no limits needed here
+    // because deserialize_with_limits re-checks with actual budgets.
+    usize::try_from(volume).map_err(|_| Error::InvalidFormat("volume over usize".to_string()))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -730,9 +984,9 @@ mod tests {
 
     #[test]
     fn deserialize_rejects_unsupported_version() {
-        // Build a stream that begins with version 2.
+        // Build a stream that begins with version 5 (v2/v3 now migrate).
         let mut bytes = Vec::new();
-        bytes.push(2u8);
+        bytes.push(5u8);
         // Pad to at least the trailing-magic length so the early magic check
         // passes; place a valid-looking magic at the end.
         bytes.extend_from_slice(&[0u8; 3]);
@@ -740,7 +994,7 @@ mod tests {
         let mut dst = VoxelBuffer::new(Allocator::Default);
         assert_eq!(
             deserialize(&bytes, &mut dst),
-            Err(Error::UnsupportedVersion(2))
+            Err(Error::UnsupportedVersion(5))
         );
     }
 
@@ -846,6 +1100,111 @@ mod tests {
         assert_eq!(deserialize(&bytes, &mut dst), Err(Error::MetadataSkipped));
         assert_eq!(dst.size(), src.size());
         assert_eq!(dst.get_voxel(3, 1, 2, 0), src.get_voxel(3, 1, 2, 0));
+    }
+
+    /// Build a v2/v3-shaped block: header + 8 uniform channels + optional
+    /// metadata section + magic. SDF channel (index 1) can have custom depth
+    /// and value for the remap test.
+    fn legacy_block(
+        version: u8,
+        sdf_depth_nibble: u8,
+        sdf_value_bytes: &[u8],
+        metadata: Option<&[u8]>,
+    ) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.push(version);
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        for ci in 0..8 {
+            let depth = if ci == 1 { sdf_depth_nibble } else { 0 };
+            bytes.push(0x01 | (depth << 4)); // Uniform + depth
+            let width = match depth {
+                0 => 1,
+                1 => 2,
+                2 => 4,
+                _ => 8,
+            };
+            if ci == 1 {
+                bytes.extend_from_slice(sdf_value_bytes);
+            } else {
+                bytes.resize(bytes.len() + width, 0);
+            }
+        }
+        if let Some(meta) = metadata {
+            bytes.extend_from_slice(&(meta.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(meta);
+        }
+        bytes.extend_from_slice(&BLOCK_TRAILING_MAGIC.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn v2_block_migrates_and_deserializes() {
+        // SDF 8-bit legacy value 200 (≈ +0.575 in old unsigned encoding).
+        // After v2→v3 remap, the signed value should be ≈ +0.575.
+        let bytes = legacy_block(2, 0, &[200], None);
+        let mut dst = VoxelBuffer::new(Allocator::Default);
+        deserialize(&bytes, &mut dst).unwrap();
+        assert_eq!(dst.size(), Vector3i::new(2, 2, 2));
+        let raw = dst.get_voxel(0, 0, 0, crate::storage::ChannelId::Sdf.index());
+        let legacy = crate::storage::funcs::u8_to_snorm(200);
+        let remapped = crate::storage::funcs::snorm_to_s8(legacy) as u8 as u64;
+        assert_eq!(
+            raw, remapped,
+            "SDF raw byte should be remapped from legacy unsigned to signed snorm"
+        );
+    }
+
+    #[test]
+    fn v3_block_migrates_with_variant_metadata() {
+        // Build a v3 metadata section: one Godot-wire Dictionary Variant
+        // as the block entry, then one per-voxel entry.
+        use crate::streams::variant_wire::{encode_variant, VariantWireValue as V};
+        let mut meta = Vec::new();
+        encode_variant(
+            &V::Dictionary(vec![(V::Text("hp".into()), V::Int(100))]),
+            &mut meta,
+        );
+        // Per-voxel: position (0,0,0) + int Variant 42.
+        meta.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
+        encode_variant(&V::Int(42), &mut meta);
+
+        let bytes = legacy_block(3, 0, &[128], Some(&meta));
+        let mut dst = VoxelBuffer::new(Allocator::Default);
+        deserialize(&bytes, &mut dst).unwrap();
+
+        assert_eq!(
+            *dst.block_metadata(),
+            MetadataValue::Variant(V::Dictionary(vec![(V::Text("hp".into()), V::Int(100))]))
+        );
+        assert_eq!(
+            dst.voxel_metadata(Vector3i::zero()),
+            Some(&MetadataValue::Variant(V::Int(42)))
+        );
+    }
+
+    #[test]
+    fn v3_block_without_metadata_migrates() {
+        let bytes = legacy_block(3, 0, &[100], None);
+        let mut dst = VoxelBuffer::new(Allocator::Default);
+        deserialize(&bytes, &mut dst).unwrap();
+        assert_eq!(dst.size(), Vector3i::new(2, 2, 2));
+        assert!(dst.block_metadata().is_nil());
+    }
+
+    #[test]
+    fn v2_sdf_16bit_migrates() {
+        let bytes = legacy_block(2, 1, &40000u16.to_le_bytes(), None);
+        let mut dst = VoxelBuffer::new(Allocator::Default);
+        deserialize(&bytes, &mut dst).unwrap();
+        let raw = dst.get_voxel(0, 0, 0, crate::storage::ChannelId::Sdf.index());
+        let legacy = crate::storage::funcs::u16_to_snorm(40000);
+        let remapped = crate::storage::funcs::snorm_to_s16(legacy) as u16 as u64;
+        assert_eq!(
+            raw, remapped,
+            "16-bit SDF raw value should be remapped from legacy unsigned to signed snorm"
+        );
     }
 
     #[test]

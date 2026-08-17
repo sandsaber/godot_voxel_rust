@@ -14,7 +14,7 @@ That file is the product queue; this page is the parity matrix.
 |---|---|---|
 | Math / containers / threading | ✅ | Direct ports, heavily tested. |
 | Voxel storage (`VoxelBuffer`, channels, compression, memory pool) | ✅ | In-memory block + per-voxel `MetadataValue` (int/float/string/bytes). Typed pool recycling deferred. |
-| Block serializer v4 | ✅ | Voxel channels, `meta.vxrm` forest format, and the v4 metadata section persist: narrow `MetadataValue` (nil/int/float/string/bytes) + wide Godot Variants (Dictionary/Array/vectors/colors/packed arrays) via `streams::variant_wire` (R7 wide). Engine-only Variant types still skipped non-fatally. v2/v3 region migration not started. |
+| Block serializer v4 | ✅ | Voxel channels, `meta.vxrm` forest format, and the v4 metadata section persist: narrow `MetadataValue` (nil/int/float/string/bytes) + wide Godot Variants (Dictionary/Array/vectors/colors/packed arrays) via `streams::variant_wire` (R7 wide). Engine-only Variant types still skipped non-fatally. v2/v3 block payloads migrate in-memory on load (SDF remap + Variant conversion). |
 | LZ4 / ZSTD compression | ✅ | LZ4 pure-Rust by default; ZSTD behind an optional feature (it bundles C). |
 | Transvoxel mesher | ✅ | Regular + transition cells, texturing modes; verified against C++ goldens (bit-exact indices/masks, 1e-5 floats). |
 | Cubes mesher | ✅ | Greedy + simple, palette; atlased mode deferred. |
@@ -53,7 +53,7 @@ Tracked in ROADMAP; this is the honest size, not a new queue.
 
 | Item | Size | Notes |
 |---|---|---|
-| v2/v3 region migration | Medium | Variant codec landed; the migration/rewrite path itself is not started. |
+
 | R3 network product — edit deltas, rejoin reconciliation, sockets/RPCs | Several stages | Transport-agnostic protocol + reference bridge done; the game owns the transport. |
 | Graph editor polish, extra Image2D extras, `VoxelMeshSDF` bake | Small–medium each | Not blocking generate→mesh→page→save. |
 
