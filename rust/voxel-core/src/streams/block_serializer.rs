@@ -365,13 +365,11 @@ pub fn deserialize_with_limits(
         // Legacy migration (ROADMAP R7): v2 → v3 → v4, then re-parse the
         // v4 payload. The migrations work on the full payload including
         // the magic; we re-attach it here since our reader excluded it.
-        let mut full = src[..tail_start].to_vec();
-        full.extend_from_slice(&src[tail_start..]);
         let migrated = if version == 2 {
-            let v3 = migrate_v2_to_v3(&full)?;
+            let v3 = migrate_v2_to_v3(src)?;
             migrate_v3_to_v4(&v3, limits)?
         } else {
-            migrate_v3_to_v4(&full, limits)?
+            migrate_v3_to_v4(src, limits)?
         };
         // Recurse on the v4 payload (including the magic — the function
         // checks and strips it itself when bounding the reader).
@@ -659,9 +657,8 @@ pub fn migrate_v2_to_v3(src: &[u8]) -> Result<Vec<u8>, Error> {
     let size = crate::math::Vector3i::new(size_x, size_y, size_z);
     let volume = size.volume_u64();
     if volume == 0 {
-        return Err(Error::EmptyBuffer);
+        return Err(Error::InvalidFormat("zero volume".to_string()));
     }
-    limits_free_volume_check(volume)?;
 
     // Locate the SDF channel's data range within the payload so the remap
     // can run in place on a copy.
@@ -774,9 +771,8 @@ pub fn migrate_v3_to_v4(src: &[u8], limits: DecodeLimits) -> Result<Vec<u8>, Err
     let size = crate::math::Vector3i::new(size_x, size_y, size_z);
     let volume = size.volume_u64();
     if volume == 0 {
-        return Err(Error::EmptyBuffer);
+        return Err(Error::InvalidFormat("zero volume".to_string()));
     }
-    limits_free_volume_check(volume)?;
 
     // Skip channels, recording positions for the copy.
     for ci in 0..MAX_CHANNELS {
@@ -824,19 +820,27 @@ pub fn migrate_v3_to_v4(src: &[u8], limits: DecodeLimits) -> Result<Vec<u8>, Err
             .ok_or(Error::UnexpectedEof)?;
         let mut mr = MemoryReader::little(metadata_slice);
         let mut converted = Vec::new();
-        // Block-level Variant first.
+        // Block-level Variant first. An undecodable Variant (unsupported
+        // engine type) consumes only its header — its payload length is
+        // unknowable, so the rest of the section cannot be resynchronized.
+        // Stop converting and keep whatever prefix decoded cleanly: voxel
+        // data must survive a metadata problem (same contract as the v4
+        // foreign-entry skip).
+        let mut foreign_hit = false;
         match crate::streams::variant_wire::decode_variant(&mut mr, limits.max_variant_depth) {
             Ok(value) => {
                 converted.push(METADATA_TYPE_VARIANT);
                 crate::streams::variant_wire::encode_variant(&value, &mut converted);
             }
-            Err(_) => converted.push(METADATA_TYPE_EMPTY),
+            Err(_) => {
+                foreign_hit = true;
+            }
         }
-        // Per-voxel entries.
-        while mr.position() < metadata_slice.len() {
-            let x = mr.try_get_16().ok_or(Error::UnexpectedEof)?;
-            let y = mr.try_get_16().ok_or(Error::UnexpectedEof)?;
-            let z = mr.try_get_16().ok_or(Error::UnexpectedEof)?;
+        // Per-voxel entries (skipped entirely if the block entry was foreign).
+        while !foreign_hit && mr.position() < metadata_slice.len() {
+            let Some(x) = mr.try_get_16() else { break };
+            let Some(y) = mr.try_get_16() else { break };
+            let Some(z) = mr.try_get_16() else { break };
             converted.extend_from_slice(&x.to_le_bytes());
             converted.extend_from_slice(&y.to_le_bytes());
             converted.extend_from_slice(&z.to_le_bytes());
@@ -845,14 +849,20 @@ pub fn migrate_v3_to_v4(src: &[u8], limits: DecodeLimits) -> Result<Vec<u8>, Err
                     converted.push(METADATA_TYPE_VARIANT);
                     crate::streams::variant_wire::encode_variant(&value, &mut converted);
                 }
-                Err(_) => converted.push(METADATA_TYPE_EMPTY),
+                Err(_) => {
+                    // Foreign per-voxel entry: drop the partial position and
+                    // stop (the next entry's bytes are unreadable).
+                    converted.truncate(converted.len() - 6);
+                    foreign_hit = true;
+                }
             }
         }
-        // Emit v4 envelope: [u32 size][entries...].
-        let section_len = u32::try_from(converted.len())
-            .map_err(|_| Error::InvalidFormat("v4 metadata section exceeds u32".to_string()))?;
-        v4_section.extend_from_slice(&section_len.to_le_bytes());
-        v4_section.extend_from_slice(&converted);
+        if !converted.is_empty() {
+            let section_len = u32::try_from(converted.len())
+                .map_err(|_| Error::InvalidFormat("v4 metadata section exceeds u32".to_string()))?;
+            v4_section.extend_from_slice(&section_len.to_le_bytes());
+            v4_section.extend_from_slice(&converted);
+        }
     }
 
     // Assemble the v4 payload: header + channels (unchanged) + metadata + magic.
@@ -861,13 +871,6 @@ pub fn migrate_v3_to_v4(src: &[u8], limits: DecodeLimits) -> Result<Vec<u8>, Err
     dst.extend_from_slice(&v4_section);
     dst.extend_from_slice(&magic);
     Ok(dst)
-}
-
-fn limits_free_volume_check(volume: u64) -> Result<(), Error> {
-    // Volume must be representable and non-zero; no limits needed here
-    // because deserialize_with_limits re-checks with actual budgets.
-    usize::try_from(volume).map_err(|_| Error::InvalidFormat("volume over usize".to_string()))?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1205,6 +1208,34 @@ mod tests {
             raw, remapped,
             "16-bit SDF raw value should be remapped from legacy unsigned to signed snorm"
         );
+    }
+
+    #[test]
+    fn v3_foreign_variant_metadata_does_not_kill_the_block() {
+        // A Transform3D Variant in the v3 block metadata: our codec can't
+        // decode it (payload length is unknowable), but the VOXEL data
+        // must still load — foreign metadata degrades to a partial/empty
+        // section, matching the v4 foreign-entry skip semantics.
+        use crate::streams::variant_wire::VariantWireValue as V;
+        let mut meta = Vec::new();
+        // First entry: a valid int Variant so the prefix converts cleanly.
+        meta.extend_from_slice(&[0, 0, 0, 0, 0, 0]); // position (0,0,0)
+        crate::streams::variant_wire::encode_variant(&V::Int(1), &mut meta);
+        // Block-level entry is a Transform3D (type 18) — undecodable.
+        // Build the metadata with the foreign type first.
+        let mut hostile = Vec::new();
+        hostile.extend_from_slice(&(18u32).to_le_bytes()); // Transform3D header
+        hostile.extend_from_slice(&[0u8; 48]); // 12 f32 payload (6× f64 in Godot4)
+                                               // Actually just make a small arbitrary payload — the exact content
+                                               // doesn't matter since our codec rejects at the header.
+        let mut full_meta = hostile;
+        full_meta.extend_from_slice(&meta);
+        let bytes = legacy_block(3, 0, &[128], Some(&full_meta));
+        let mut dst = VoxelBuffer::new(Allocator::Default);
+        // Must succeed — voxel data loads, metadata is partial/empty.
+        deserialize(&bytes, &mut dst)
+            .unwrap_or_else(|e| panic!("voxel data must survive foreign v3 metadata: {e:?}"));
+        assert_eq!(dst.size(), Vector3i::new(2, 2, 2));
     }
 
     #[test]
