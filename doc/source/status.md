@@ -16,8 +16,8 @@ That file is the product queue; this page is the parity matrix.
 | Voxel storage (`VoxelBuffer`, channels, compression, memory pool) | ✅ | In-memory block + per-voxel `MetadataValue` (int/float/string/bytes). Typed pool recycling deferred. |
 | Block serializer v4 | ✅ | Voxel channels, `meta.vxrm` forest format, and the v4 metadata section persist: narrow `MetadataValue` (nil/int/float/string/bytes) + wide Godot Variants (Dictionary/Array/vectors/colors/packed arrays) via `streams::variant_wire` (R7 wide). Engine-only Variant types still skipped non-fatally. v2/v3 block payloads migrate in-memory on load (SDF remap + Variant conversion). |
 | LZ4 / ZSTD compression | ✅ | LZ4 pure-Rust by default; ZSTD behind an optional feature (it bundles C). |
-| Transvoxel mesher | ✅ | Regular + transition cells, texturing modes; verified against C++ goldens (bit-exact indices/masks, 1e-5 floats). |
-| Cubes mesher | ✅ | Greedy + simple, palette; atlased mode deferred. |
+| Transvoxel mesher | ✅ | Regular + transition cells, texturing modes; verified against C++ goldens (bit-exact indices/masks, 1e-5 floats). Typed zero-copy SDF input (Wave 3 B1): monomorphized `build_regular_mesh` per channel depth, dyn-dispatch adapter only as fallback and for transition passes. |
+| Cubes mesher | ✅ | Greedy + simple, palette; atlased mode deferred. Zero-copy typed-channel slice (`Cow<[u32]>` via `channel_typed_slice`) with per-voxel fallback (Wave 3 B5). |
 | Blocky mesher | ✅ | Bake + AO + skirts + shadow occluders + mesh-face split + ortho-rotation + cutout sides. Inner-part AO is still a TODO. |
 | Simple generators (flat/waves/noise/heightmap/image) | ✅ | |
 | Graph generator | ✅ runtime | AST interpreter with Expression/Image2D. Range analysis still limited. |
@@ -58,6 +58,29 @@ Tracked in ROADMAP; this is the honest size, not a new queue.
 | Graph editor polish, extra Image2D extras, `VoxelMeshSDF` bake | Small–medium each | Not blocking generate→mesh→page→save. |
 
 Intentionally **not** next: GPU, SQLite, multipass, Rapier, v2/v3 region migration, the R3 network product (sockets/RPCs/edit deltas).
+
+## Performance & scaling
+
+Wave 3 perf work (originally on the `rust/pilot` branch) lives here after an
+explicit port; the pilot branch is retired.
+
+- **`block_task_bench`** measures the pipeline the terrain actually drives
+  (`MeshBlockTask::run_meshing` = 3×3×3 gather + mesher build, shared
+  `MeshArraysPool`): a 16³ SDF sphere block meshes in **~53 µs**
+  (~76 Melem/s) single-threaded on macOS arm64. The MT group scales
+  **1.95× / 3.88× / 7.79×** on 2/4/8 scoped threads with flat wall-time —
+  the pipeline genuinely uses many cores.
+- **`transvoxel_bench`** (kernel only): sphere_16 ~25 µs (~162 Melem/s),
+  sphere_32 ~147 µs, sphere_64 ~891 µs — unchanged by the Wave 3 port
+  (the kernel bench bypasses the adapter where B1 lands).
+- Port decisions: **B1** typed SDF input kept (hybrid: typed fast path for
+  the regular mesh, adapter fallback + transition meshes); **B3** TLS
+  free-list dropped as superseded — master's `MeshArraysPool` recycles via
+  `Drop` on both `BlockMeshOutput` and `MeshUploadSnapshot`, which a
+  thread-local cannot do once buffers cross threads; **B4** scratch-hoist
+  was already on master, its regression test ported; **B5** kept for the
+  cubes path (blocky half superseded by master's all-depths
+  `ChannelData` dispatch).
 
 ## Test & verification status
 
