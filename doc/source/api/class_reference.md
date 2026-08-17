@@ -53,7 +53,7 @@ Returned by `VoxelTerrain.get_voxel_tool()` / `VoxelLodTerrain.get_voxel_tool()`
 
 - `do_sphere(center: Vector3, radius: f32, mode: i32)` — use `VoxelToolTerrain.MODE_ADD` / `MODE_REMOVE` constants (upstream is `do_sphere(position, radius)` with a `mode` property; ours takes the mode inline)
 - `do_box(min: Vector3i, max: Vector3i, mode: i32)`
-- `do_hemisphere(center: Vector3, radius: f32, flat_direction: Vector3, smoothness: f32)` — always Add mode in this port
+- `do_hemisphere(center: Vector3, radius: f32, flat_direction: Vector3, smoothness: f32, mode: i32)`
 - `do_smooth(center: Vector3, radius: f32, blur_radius: i32)`
 - `do_paste(position: Vector3i, buffer: VoxelBuffer, channel_mask: i32)` — pastes channels and per-voxel metadata (upstream argument order)
 - `set_voxel(position: Vector3i, value: i64)`

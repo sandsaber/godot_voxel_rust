@@ -2297,6 +2297,7 @@ impl VoxelToolTerrainGD {
         radius: f32,
         flat_direction: Vector3,
         smoothness: f32,
+        mode: i32,
     ) {
         if !center.x.is_finite()
             || !center.y.is_finite()
@@ -2319,7 +2320,10 @@ impl VoxelToolTerrainGD {
             voxel_core::math::Vector3f::new(flat_direction.x, flat_direction.y, flat_direction.z);
         let channel = self.channel;
         let value = self.value;
-        let mode = voxel_core::edition::EditMode::Add;
+        let edit_mode = match mode {
+            1 => voxel_core::edition::EditMode::Remove,
+            _ => voxel_core::edition::EditMode::Add,
+        };
         if let Some(mut terrain) = self.terrain.clone() {
             terrain.bind_mut().edit_hemisphere(
                 core_center,
@@ -2327,7 +2331,7 @@ impl VoxelToolTerrainGD {
                 core_dir,
                 smoothness,
                 channel,
-                mode,
+                edit_mode,
                 value,
             );
             return;
@@ -2339,7 +2343,7 @@ impl VoxelToolTerrainGD {
                 core_dir,
                 smoothness,
                 channel,
-                mode,
+                edit_mode,
                 value,
             );
             return;

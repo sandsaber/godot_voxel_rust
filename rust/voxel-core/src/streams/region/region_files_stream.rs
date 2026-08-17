@@ -651,7 +651,13 @@ fn visit_region_files(
     if !root.is_dir() {
         return Ok(());
     }
-    visit_region_dir(root, 0, &mut visit)?;
+    // Root-level r.*.vxr is the legacy LOD0 layout. When lod0/ also exists,
+    // the current layout is authoritative (same precedence as loads) —
+    // walking both copies the same world positions twice.
+    let has_lod0_dir = root.join("lod0").is_dir();
+    if !has_lod0_dir {
+        visit_region_dir(root, 0, &mut visit)?;
+    }
     for lod in 0..=MAX_LOD as u8 {
         let lod_dir = root.join(format!("lod{lod}"));
         if lod_dir.is_dir() {

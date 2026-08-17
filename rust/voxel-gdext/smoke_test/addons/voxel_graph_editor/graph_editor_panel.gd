@@ -233,7 +233,9 @@ func _apply_to_resource() -> bool:
 	if order.is_empty() and not visual.is_empty():
 		_status_label.text = "Cycle in connections — cannot apply"
 		return false
-	_current_graph.clear_graph()
+	# Build the full node list BEFORE clearing — a failure mid-way must
+	# leave the previous compiled graph intact.
+	var prepared: Array = []
 	var rust_ids: Dictionary = {}
 	for gn in order:
 		var kind := str(gn.get_meta("kind"))
@@ -250,18 +252,27 @@ func _apply_to_resource() -> bool:
 		var value := 0.0
 		if gn.has_meta("value_spin"):
 			value = float((gn.get_meta("value_spin") as SpinBox).value)
-		var new_id := -1
 		if kind == "Expression":
 			var expr := "x"
 			if gn.has_meta("expr_edit"):
 				expr = (gn.get_meta("expr_edit") as LineEdit).text
-			new_id = _current_graph.add_expression_node(expr, ports[0], ports[1], ports[2])
+			prepared.append(["expr", expr, ports])
 		else:
-			new_id = _current_graph.add_node(kind, ports[0], ports[1], ports[2], ports[3], value)
-		if new_id < 0:
-			_status_label.text = "Failed to add %s" % kind
-			return false
-		rust_ids[gn.name] = new_id
+			prepared.append(["node", kind, ports, value])
+		rust_ids[gn.name] = 0 # placeholder, real id assigned on commit
+	# All nodes validated — now commit atomically.
+	_current_graph.clear_graph()
+	for item in prepared:
+		if item[0] == "expr":
+			var new_id := _current_graph.add_expression_node(item[1], item[2][0], item[2][1], item[2][2])
+			if new_id < 0:
+				_status_label.text = "Failed to add Expression"
+				return false
+		else:
+			var new_id := _current_graph.add_node(item[1], item[2][0], item[2][1], item[2][2], item[2][3], item[3])
+			if new_id < 0:
+				_status_label.text = "Failed to add %s" % item[1]
+				return false
 	return true
 
 

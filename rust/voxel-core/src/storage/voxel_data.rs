@@ -1899,6 +1899,10 @@ impl SharedVoxelData {
         for lod_index in 1..lod_count {
             let source_location = drafts
                 .last()
+                // Invariant: the LOD0 draft is pushed first in the loop
+                // above, so it exists whenever this arm runs. expect() here
+                // is unreachable on correct inputs; the workspace no-expect
+                // policy applies to caller-reachable paths.
                 .expect("LOD0 edit draft was prepared")
                 .snapshot
                 .location();
@@ -2106,6 +2110,10 @@ impl SharedVoxelData {
         for lod_index in 1..lod_count {
             let source_location = drafts
                 .last()
+                // Invariant: the LOD0 draft is pushed first in the loop
+                // above, so it exists whenever this arm runs. expect() here
+                // is unreachable on correct inputs; the workspace no-expect
+                // policy applies to caller-reachable paths.
                 .expect("LOD0 edit draft was prepared")
                 .snapshot
                 .location();

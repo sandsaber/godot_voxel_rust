@@ -67,7 +67,7 @@ block.
 |---|---|
 | `do_sphere(center, radius, mode)` | Sphere edit. `mode`: `0` = Add, `1` = Remove. |
 | `do_box(min, max, mode)` | Axis-aligned box edit (inclusive bounds). |
-| `do_hemisphere(center, radius, flat_direction, smoothness)` | Hemisphere brush (always Add mode in this port; `flat_direction` picks the flat side). |
+| `do_hemisphere(center, radius, flat_direction, smoothness, mode)` | Hemisphere brush; `mode`: 0 = Add, 1 = Remove. |
 | `do_smooth(center, radius, blur_radius)` | Box-blur smoothing pass. |
 | `do_paste(position, buffer, channel_mask)` | Paste a `VoxelBuffer` (channels + per-voxel metadata) into the terrain; argument order matches upstream `paste`. |
 | `set_voxel(position, value)` | Single-voxel write on the tool's channel. |

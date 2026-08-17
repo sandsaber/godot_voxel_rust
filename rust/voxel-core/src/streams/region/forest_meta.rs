@@ -205,7 +205,7 @@ pub fn region_size_po2(region_size: i32) -> u8 {
     } else {
         region_size.next_power_of_two().ilog2() as u8
     }
-    .clamp(1, 8)
+    .clamp(0, 8)
 }
 
 fn depth_from_u8(raw: u8) -> Result<ChannelDepth, ForestMetaError> {
