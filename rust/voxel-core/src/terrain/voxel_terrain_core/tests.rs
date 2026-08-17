@@ -1092,6 +1092,168 @@ fn make_edit_core_with_mesher_and_lods(
     )
 }
 
+#[test]
+fn batch_sphere_edit_writes_one_block_instead_of_per_voxel() {
+    let mut core = make_edit_core_with_lods(1);
+    let edited = core
+        .try_edit_sphere(
+            crate::math::Vector3f::new(8.0, 8.0, 8.0),
+            3.0,
+            ChannelId::Type.index(),
+            crate::edition::EditMode::Set,
+            7,
+        )
+        .expect("sphere edit should publish");
+    assert_eq!(
+        edited, 1,
+        "a 3-radius sphere at block center spans one block"
+    );
+    let snapshot = core
+        .data()
+        .block_snapshot(Vector3i::zero(), 0)
+        .expect("edited block is resident");
+    assert!(snapshot.has_voxels());
+    assert_eq!(
+        snapshot
+            .voxels()
+            .get_voxel(8, 8, 8, ChannelId::Type.index()),
+        7
+    );
+    assert_eq!(
+        snapshot
+            .voxels()
+            .get_voxel(0, 0, 0, ChannelId::Type.index()),
+        0
+    );
+}
+
+#[test]
+fn batch_box_edit_fills_inclusive_bounds() {
+    let mut core = make_edit_core_with_lods(1);
+    let edited = core
+        .try_edit_box(
+            Vector3i::new(1, 1, 1),
+            Vector3i::new(2, 2, 2),
+            ChannelId::Type.index(),
+            crate::edition::EditMode::Set,
+            5,
+        )
+        .expect("box edit should publish");
+    assert_eq!(edited, 1);
+    let snapshot = core
+        .data()
+        .block_snapshot(Vector3i::zero(), 0)
+        .expect("edited block is resident");
+    assert_eq!(
+        snapshot
+            .voxels()
+            .get_voxel(1, 1, 1, ChannelId::Type.index()),
+        5
+    );
+    assert_eq!(
+        snapshot
+            .voxels()
+            .get_voxel(2, 2, 2, ChannelId::Type.index()),
+        5
+    );
+    assert_eq!(
+        snapshot
+            .voxels()
+            .get_voxel(3, 3, 3, ChannelId::Type.index()),
+        0
+    );
+}
+
+#[test]
+fn batch_paste_copies_source_buffer_into_lod0() {
+    use crate::storage::VoxelBuffer;
+    let mut core = make_edit_core_with_lods(1);
+    let mut src = VoxelBuffer::with_size(Vector3i::splat(2));
+    src.set_voxel(9, 0, 0, 0, ChannelId::Type.index());
+    src.set_voxel(8, 1, 1, 1, ChannelId::Type.index());
+    let edited = core
+        .try_paste(Vector3i::new(2, 2, 2), &src, 1 << ChannelId::Type.index())
+        .expect("paste should publish");
+    assert_eq!(edited, 1);
+    let snapshot = core
+        .data()
+        .block_snapshot(Vector3i::zero(), 0)
+        .expect("pasted block is resident");
+    assert_eq!(
+        snapshot
+            .voxels()
+            .get_voxel(2, 2, 2, ChannelId::Type.index()),
+        9
+    );
+    assert_eq!(
+        snapshot
+            .voxels()
+            .get_voxel(3, 3, 3, ChannelId::Type.index()),
+        8
+    );
+}
+
+#[test]
+fn voxel_metadata_survives_block_edit_and_paste() {
+    use crate::storage::{MetadataValue, VoxelBuffer};
+    let mut core = make_edit_core_with_lods(1);
+    assert!(core
+        .try_edit_voxel_metadata(Vector3i::new(3, 4, 5), Some(MetadataValue::Int(99)))
+        .expect("metadata edit should publish")
+        .is_some());
+    assert_eq!(
+        core.voxel_metadata(Vector3i::new(3, 4, 5)),
+        Some(MetadataValue::Int(99))
+    );
+
+    let mut visited = Vec::new();
+    core.for_each_voxel_metadata_in_area(
+        Vector3i::new(3, 4, 5),
+        Vector3i::new(4, 5, 6),
+        |pos, value| {
+            visited.push((pos, value.clone()));
+        },
+    );
+    assert_eq!(
+        visited,
+        vec![(Vector3i::new(3, 4, 5), MetadataValue::Int(99))]
+    );
+
+    let mut src = VoxelBuffer::with_size(Vector3i::splat(1));
+    src.set_voxel(4, 0, 0, 0, ChannelId::Type.index());
+    src.set_voxel_metadata(Vector3i::zero(), MetadataValue::Text("pasted".into()));
+    core.try_paste(Vector3i::new(1, 1, 1), &src, 1 << ChannelId::Type.index())
+        .expect("paste should publish");
+    assert_eq!(
+        core.voxel_metadata(Vector3i::new(1, 1, 1)),
+        Some(MetadataValue::Text("pasted".into()))
+    );
+
+    assert!(core
+        .try_edit_voxel_metadata(Vector3i::new(3, 4, 5), None)
+        .expect("clear should publish")
+        .is_some());
+    assert!(core.voxel_metadata(Vector3i::new(3, 4, 5)).is_none());
+}
+
+#[test]
+fn debug_snapshot_reports_volume_and_edited_block() {
+    let mut core = make_edit_core_with_lods(1);
+    let snapshot = core.debug_snapshot();
+    assert!(snapshot.volume_bounds.size.x > 0);
+    assert_eq!(snapshot.lod_count, 1);
+    assert!(core
+        .try_edit_voxel(7, Vector3i::new(1, 1, 1), ChannelId::Type.index())
+        .expect("edit")
+        .is_some());
+    let snapshot = core.debug_snapshot();
+    assert!(snapshot.data_block_count > 0);
+    assert!(snapshot
+        .edited_blocks
+        .iter()
+        .any(|block| block.position == Vector3i::zero() && block.modified));
+}
+
 fn requested_mesh_locations(core: &VoxelTerrainCore) -> Vec<MeshBlockLocation> {
     let mut locations = core
         .mesh_maps
@@ -4371,6 +4533,159 @@ fn terrain_try_edit_voxel_materializes_marks_and_persists_on_unload() {
         LoadResult::Found
     );
     assert_eq!(loaded.get_voxel(1, 1, 1, channel), 77);
+}
+
+#[test]
+fn terrain_voxel_metadata_persists_on_unload_and_reloads() {
+    use crate::storage::{MetadataValue, VoxelBuffer};
+    let stream = Arc::new(MemoryStream::new());
+    let mut core = build_core_with_materializable_data(stream.clone());
+    let bs = core.data_block_size();
+    let meta_position = Vector3i::new(1, 1, 1);
+
+    assert!(core
+        .data
+        .try_set_block(Vector3i::zero(), VoxelDataBlock::empty(0))
+        .unwrap());
+    core.loaded_data_residency[0].insert(
+        Vector3i::zero(),
+        DataResidencyRefs::with_resident_viewers(0),
+    );
+
+    let viewer = vec![ViewerUpdate {
+        id: 1,
+        world_position_voxels: Vector3i::zero(),
+        horizontal_view_distance_voxels: bs,
+        vertical_view_distance_voxels: bs,
+        demand: MeshDemand {
+            visuals: true,
+            collisions: true,
+        },
+    }];
+    core.try_process(&viewer).unwrap();
+
+    assert!(core
+        .try_edit_voxel_metadata(meta_position, Some(MetadataValue::Text("gold".into())))
+        .unwrap()
+        .is_some());
+    assert_eq!(
+        core.voxel_metadata(meta_position),
+        Some(MetadataValue::Text("gold".into()))
+    );
+
+    // Walk the viewer away: the edited block must flush to the stream with
+    // its metadata, then reload intact when the viewer returns.
+    let empty_viewers = Vec::new();
+    process_until(&mut core, &empty_viewers, |_core, _events| {
+        let mut loaded = VoxelBuffer::new(crate::storage::Allocator::Default);
+        stream.load_block(Vector3i::zero(), 0, &mut loaded) == LoadResult::Found
+            && loaded.voxel_metadata(meta_position) == Some(&MetadataValue::Text("gold".into()))
+    });
+
+    process_until(&mut core, &viewer, |core, _events| {
+        core.data()
+            .block_snapshot(Vector3i::zero(), 0)
+            .is_some_and(|block| block.has_voxels())
+    });
+    assert_eq!(
+        core.voxel_metadata(meta_position),
+        Some(MetadataValue::Text("gold".into()))
+    );
+}
+
+#[test]
+fn terrain_voxel_metadata_survives_region_files_reload() {
+    // End-to-end for the R7 narrow claim: edit metadata, flush through a real
+    // RegionFilesStream on disk, rebuild a core over the same directory, and
+    // read the metadata back from the reloaded block.
+    use crate::storage::{MetadataValue, VoxelBuffer};
+    use crate::streams::region::RegionFilesStream;
+    use crate::streams::VoxelLoadQuery;
+
+    struct TempDir(std::path::PathBuf);
+    impl TempDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "godot-voxel-metadata-e2e-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn viewer_over_block_zero(bs: i32) -> Vec<ViewerUpdate> {
+        vec![ViewerUpdate {
+            id: 1,
+            world_position_voxels: Vector3i::zero(),
+            horizontal_view_distance_voxels: bs,
+            vertical_view_distance_voxels: bs,
+            demand: MeshDemand {
+                visuals: true,
+                collisions: true,
+            },
+        }]
+    }
+
+    let dir = TempDir::new();
+    let meta_position = Vector3i::new(1, 1, 1);
+    let expected = MetadataValue::Bytes(vec![7, 7, 7]);
+    {
+        let stream = Arc::new(RegionFilesStream::new(dir.0.clone()));
+        let mut core = build_core_with_materializable_data(stream.clone());
+        let bs = core.data_block_size();
+
+        assert!(core
+            .data
+            .try_set_block(Vector3i::zero(), VoxelDataBlock::empty(0))
+            .unwrap());
+        core.loaded_data_residency[0].insert(
+            Vector3i::zero(),
+            DataResidencyRefs::with_resident_viewers(0),
+        );
+        let viewer = viewer_over_block_zero(bs);
+        core.try_process(&viewer).unwrap();
+
+        assert!(core
+            .try_edit_voxel_metadata(meta_position, Some(expected.clone()))
+            .unwrap()
+            .is_some());
+
+        // Walk the viewer away so the block flushes to the region stream.
+        let empty_viewers = Vec::new();
+        process_until(&mut core, &empty_viewers, |_core, _events| {
+            let mut loaded = VoxelBuffer::new(crate::storage::Allocator::Default);
+            matches!(
+                stream.load_voxel_block(VoxelLoadQuery::new(&mut loaded, Vector3i::zero(), 0)),
+                Ok(LoadResult::Found)
+            ) && loaded.voxel_metadata(meta_position) == Some(&expected)
+        });
+        stream.flush().unwrap();
+    }
+
+    // Fresh core over the same directory: the block must come back from disk
+    // with its metadata.
+    let stream = Arc::new(RegionFilesStream::new(dir.0.clone()));
+    let mut core = build_core_with_materializable_data(stream);
+    let bs = core.data_block_size();
+    // No pre-inserted block here: the returning viewer must page it in from
+    // the region stream.
+    let viewer = viewer_over_block_zero(bs);
+    process_until(&mut core, &viewer, |core, _events| {
+        core.data()
+            .block_snapshot(Vector3i::zero(), 0)
+            .is_some_and(|block| block.has_voxels())
+    });
+    assert_eq!(core.voxel_metadata(meta_position), Some(expected));
 }
 
 #[test]

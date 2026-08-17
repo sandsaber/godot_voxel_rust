@@ -523,8 +523,8 @@ impl<F: VoxelFile> RegionFile<F> {
         out_block: &mut VoxelBuffer,
         limits: DecodeLimits,
     ) -> Result<(), RegionError> {
-        // A caller-ordering mistake must not abort the process (the workspace
-        // builds with `panic = "abort"`); surface it like any other failure.
+        // A caller-ordering mistake must not panic; surface it like any other
+        // failure so FFI callers never unwind across the Godot C ABI.
         if self.file.is_none() {
             return Err(RegionError::Io("load_block: file not open".into()));
         }
@@ -587,13 +587,11 @@ impl<F: VoxelFile> RegionFile<F> {
         let status =
             block_serializer::decompress_and_deserialize_with_limits(&payload, out_block, limits)
                 .map_err(RegionError::BlockSerializer)?;
-        // META-1 parity: surface metadata loss as a non-fatal warning via
-        // debug log. The voxel data is still loaded correctly.
-        if status == block_serializer::DeserializeStatus::MetadataLost {
-            // In a full implementation this would route through the engine's
-            // logger; for now we accept the loss silently (consistent with
-            // the non-metadata port) but the status is available to callers.
-        }
+        // META-1 parity: our MetadataValue entries decode in full; MetadataLost
+        // now means the section held foreign C++ custom/Variant entries or was
+        // corrupt. Upstream C++ ignores `deserialize_metadata` failures, so the
+        // voxel data is still loaded and the loss is accepted here too.
+        let _ = status;
         Ok(())
     }
 
@@ -918,6 +916,65 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn save_then_load_round_trips_block_and_voxel_metadata() {
+        let mut rf = open_memory(small_format());
+        let mut block = sample_block(7);
+        block.set_block_metadata(crate::storage::MetadataValue::Text("block".into()));
+        block.set_voxel_metadata(
+            Vector3i::new(1, 1, 1),
+            crate::storage::MetadataValue::Int(-9),
+        );
+        rf.save_block(
+            Vector3i::new(0, 0, 0),
+            &block,
+            compressed_data::Compression::None,
+        )
+        .unwrap();
+
+        let mut loaded = VoxelBuffer::new(Allocator::Default);
+        rf.load_block(Vector3i::new(0, 0, 0), &mut loaded).unwrap();
+        assert_eq!(
+            *loaded.block_metadata(),
+            crate::storage::MetadataValue::Text("block".into())
+        );
+        assert_eq!(
+            loaded.voxel_metadata(Vector3i::new(1, 1, 1)),
+            Some(&crate::storage::MetadataValue::Int(-9))
+        );
+        assert_eq!(loaded.get_voxel(1, 1, 1, 0), 7);
+    }
+
+    #[test]
+    fn metadata_growing_a_block_beyond_one_sector_round_trips() {
+        // With 64-byte sectors, a 600-character text entry forces the block
+        // payload across several sectors; sector accounting must follow the
+        // larger serialized size.
+        let mut rf = open_memory(small_format());
+        let position = Vector3i::new(1, 0, 0);
+        let mut block = sample_block(3);
+        block.set_voxel_metadata(
+            Vector3i::new(0, 0, 0),
+            crate::storage::MetadataValue::Text("s".repeat(600)),
+        );
+        rf.save_block(position, &block, compressed_data::Compression::None)
+            .unwrap();
+
+        let bi = rf.header.blocks[rf.block_index(position).unwrap()];
+        assert!(
+            bi.sector_count() > 1,
+            "the metadata must push the payload past one sector"
+        );
+
+        let mut loaded = VoxelBuffer::new(Allocator::Default);
+        rf.load_block(position, &mut loaded).unwrap();
+        assert_eq!(
+            loaded.voxel_metadata(Vector3i::new(0, 0, 0)),
+            Some(&crate::storage::MetadataValue::Text("s".repeat(600)))
+        );
+        assert_eq!(loaded.get_voxel(1, 1, 1, 0), 3);
     }
 
     #[test]

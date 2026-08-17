@@ -40,19 +40,34 @@ print(mem.get_block_count())
 ## VoxelStreamRegionFiles
 
 !!! note "Status: partially implemented"
-    Reading and writing `.vxr` region files works, but there is **no settings
-    surface yet**: region size, compression and file layout are hardcoded.
+    Reading and writing `.vxr` region files works. `region_size_po2` and
+    `sector_size` are applied when the stream is assigned to terrain, and
+    `convert_files` rewrites an existing directory under new region/sector/
+    block sizes (converted into a sibling directory; on success the old
+    region trees are deleted and the converted trees are moved into place).
 
-Disk persistence using region files, one file per 32×32×32 block region.
+Disk persistence using region files, one file per region of
+`(1 << region_size_po2)` blocks per axis.
+
+!!! warning "C++ interop"
+    This port writes `<dir>/lod{N}/r.*.vxr` while upstream godot_voxel writes
+    `<dir>/regions/lod{N}/...`; forests are not interchangeable. The terrain
+    also locks the SDF channel to 32-bit depth on first save, while upstream
+    defaults to 16-bit — extending a C++-written forest with this port fails
+    with a block format mismatch. Reading upstream saves needs an import
+    path (`convert_files` on a copied directory can rewrite sizes, not the
+    directory layout).
 
 | Property | Type | Default | Notes |
 |---|---|---|---|
-| `directory` | string | `"res://voxel_data"` | Folder where region files are stored. Created on first save. Use `user://` for runtime saves — `res://` is read-only in exported games. |
+| `directory` | string | `"user://voxel_data"` | Folder where region files are stored. Created on first save. Use `user://` for runtime saves — `res://` is read-only in exported games. |
+| `region_size_po2` | int | `4` (16 blocks/axis) | Power-of-two region size in blocks. |
+| `sector_size` | int | `512` | On-disk sector size in bytes. |
+| `block_size_po2` | int | `4` (16³ voxels) | Declared block size; actual saved blocks still follow the buffer. |
 
-Implementation details (not configurable yet):
+Implementation details:
 
-- Region size is fixed at **32 blocks per axis**.
-- Files are named `r.<x>.<y>.<z>.vxr` using the region coordinates.
+- Files are named `lod<N>/r.<x>.<y>.<z>.vxr` using the region coordinates.
 - Blocks are saved **LZ4-compressed**.
 - A missing file or missing block inside a file is treated as "no saved data"
   (the generator fills it in); corrupt files surface an error.

@@ -1682,6 +1682,27 @@ impl SharedVoxelData {
         })
     }
 
+    /// Insert a remotely received block, replacing any resident copy at the
+    /// same position (replication client path; see multiplayer.md). Unlike
+    /// [`Self::try_set_block`] this does not require the key to be absent.
+    pub fn replace_or_insert_remote_block(
+        &self,
+        block_pos: Vector3i,
+        block: VoxelDataBlock,
+    ) -> Result<bool, SharedVoxelDataMutationError> {
+        let lod_index = usize::from(block.lod_index());
+        assert!(lod_index < self.lods.len(), "block LOD is not loaded");
+        if block.has_voxels() {
+            assert_eq!(
+                block.voxels().size(),
+                Vector3i::splat(self.block_size() as i32),
+                "block voxels must match VoxelData block size"
+            );
+        }
+        self.begin_mutation()?
+            .replace_or_insert_block(block_pos, block, lod_index)
+    }
+
     pub fn try_set_block(
         &self,
         block_pos: Vector3i,
@@ -1878,6 +1899,221 @@ impl SharedVoxelData {
         for lod_index in 1..lod_count {
             let source_location = drafts
                 .last()
+                // Invariant: the LOD0 draft is pushed first in the loop
+                // above, so it exists whenever this arm runs. expect() here
+                // is unreachable on correct inputs; the workspace no-expect
+                // policy applies to caller-reachable paths.
+                .expect("LOD0 edit draft was prepared")
+                .snapshot
+                .location();
+            let destination_location = BlockLocation {
+                position: source_location.position >> 1,
+                lod_index: lod_index as u8,
+            };
+            let destination_bounds = checked_lod_block_bounds(
+                Box3i::new(destination_location.position, Vector3i::splat(1)),
+                block_size,
+                lod_index,
+            )
+            .ok_or(SharedVoxelDataMutationError::SpatialBoundsOverflow { lod_index })?;
+            let (snapshot, resident) = preview.block_draft(destination_location).ok_or(
+                SharedVoxelDataMutationError::LodDestinationUnavailable {
+                    position: destination_location.position,
+                    lod_index,
+                },
+            )?;
+            let needs_materialization = resident.as_ref().is_none_or(|block| !block.has_voxels());
+            if needs_materialization
+                && (settings.streaming_enabled || !settings.full_load_completed)
+            {
+                return Ok(None);
+            }
+            let mut destination =
+                resident.unwrap_or_else(|| VoxelDataBlock::empty(destination_location.lod_index));
+            if needs_materialization {
+                let mut voxels = create_block_buffer(block_size_i32, settings.format);
+                if let Some(generator) = settings.generator.as_deref() {
+                    generator.generate_block(VoxelQueryData {
+                        buffer: &mut voxels,
+                        origin_in_voxels: destination_bounds.min_pos,
+                        lod: lod_index as u32,
+                    });
+                }
+                destination.set_voxels(voxels);
+            }
+            let parity = Vector3i::new(
+                source_location.position.x.rem_euclid(2),
+                source_location.position.y.rem_euclid(2),
+                source_location.position.z.rem_euclid(2),
+            );
+            let destination_offset = parity * half_block_size;
+            let source = &drafts
+                .last()
+                .expect("previous LOD edit draft was prepared")
+                .block;
+            source.voxels().downscale_to(
+                destination.voxels_mut(),
+                Vector3i::zero(),
+                source.voxels().size(),
+                destination_offset,
+            );
+            destination.set_modified(true);
+            destination.set_needs_lodding(false);
+            drafts.push(EditDraft {
+                snapshot,
+                block: destination,
+            });
+        }
+
+        let mut block_revision = None;
+        for draft in &drafts {
+            let location = draft.snapshot.location();
+            let next_revision = key_revision_value(draft.snapshot.revision())
+                .checked_add(1)
+                .ok_or(SharedVoxelDataMutationError::KeyRevisionOverflow {
+                    position: location.position,
+                    lod_index: usize::from(location.lod_index),
+                })?;
+            if location == lod0_location {
+                block_revision = Some(next_revision);
+            }
+        }
+        let block_revision = block_revision.expect("prepared LOD0 edit has one next revision");
+
+        let mut operations = Vec::new();
+        let mut snapshots = Vec::new();
+        let mut inserted_locations = Vec::new();
+        operations
+            .try_reserve_exact(drafts.len())
+            .map_err(|_| SharedVoxelDataMutationError::CapacityReservationFailed)?;
+        snapshots
+            .try_reserve_exact(drafts.len())
+            .map_err(|_| SharedVoxelDataMutationError::CapacityReservationFailed)?;
+        inserted_locations
+            .try_reserve_exact(drafts.len())
+            .map_err(|_| SharedVoxelDataMutationError::CapacityReservationFailed)?;
+        for draft in drafts {
+            let location = draft.snapshot.location();
+            let operation = if draft.snapshot.is_present() {
+                SharedVoxelDataTransactionOperation::Replace {
+                    location,
+                    block: draft.block,
+                }
+            } else {
+                inserted_locations.push(location);
+                SharedVoxelDataTransactionOperation::Insert {
+                    location,
+                    block: draft.block,
+                    final_viewers: 0,
+                }
+            };
+            snapshots.push(draft.snapshot);
+            operations.push(operation);
+        }
+        #[cfg(test)]
+        self.notify_test_edit_phase(
+            SharedVoxelDataEditPhase::PreparedVoxelEditDraftedBeforeTransactionPrepare,
+        );
+        let transaction = preview
+            .prepare_transaction(operations, &snapshots)
+            .map_err(|error| error.into_parts().0)?;
+        Ok(Some(PreparedSharedVoxelDataEdit {
+            transaction,
+            edited_block: lod0_location,
+            block_revision,
+            inserted_locations,
+        }))
+    }
+
+    /// Prepare one LOD0 block edit (plus its parent-LOD cascade) as a single
+    /// shared-data transaction. `apply` mutates the already-materialized LOD0
+    /// buffer; `origin_in_voxels` is the world-space corner of that block.
+    pub(crate) fn prepare_lod0_block_edit(
+        self: &Arc<Self>,
+        lod0_block_position: Vector3i,
+        apply: impl FnOnce(&mut VoxelBuffer, Vector3i),
+    ) -> Result<Option<PreparedSharedVoxelDataEdit>, SharedVoxelDataMutationError> {
+        let preview = self.begin_transaction_preview();
+        let settings = preview.settings();
+        let validated_bounds =
+            checked_box_intersection(settings.bounds_in_voxels, settings.bounds_in_voxels)
+                .map_err(|_| SharedVoxelDataMutationError::SpatialBoundsOverflow {
+                    lod_index: 0,
+                })?;
+
+        struct EditDraft {
+            snapshot: SharedVoxelDataTransactionBlockSnapshot,
+            block: VoxelDataBlock,
+        }
+
+        let block_size = preview.block_size();
+        let block_size_i32 = block_size as i32;
+        let lod_count = self.lod_count();
+        let mut drafts = Vec::new();
+        drafts
+            .try_reserve_exact(lod_count)
+            .map_err(|_| SharedVoxelDataMutationError::CapacityReservationFailed)?;
+
+        let lod0_location = BlockLocation {
+            position: lod0_block_position,
+            lod_index: 0,
+        };
+        let lod0_bounds = checked_lod_block_bounds(
+            Box3i::new(lod0_location.position, Vector3i::splat(1)),
+            block_size,
+            0,
+        )
+        .ok_or(SharedVoxelDataMutationError::SpatialBoundsOverflow { lod_index: 0 })?;
+        if !validated_bounds.intersects(&Box3i::from_min_max(
+            lod0_bounds.min_pos,
+            lod0_bounds.max_pos,
+        )) {
+            return Ok(None);
+        }
+        let (lod0_snapshot, lod0_resident) = preview.block_draft(lod0_location).ok_or(
+            SharedVoxelDataMutationError::LodDestinationUnavailable {
+                position: lod0_location.position,
+                lod_index: 0,
+            },
+        )?;
+        let lod0_needs_materialization = lod0_resident
+            .as_ref()
+            .is_none_or(|block| !block.has_voxels());
+        if lod0_needs_materialization
+            && (settings.streaming_enabled || !settings.full_load_completed)
+        {
+            return Ok(None);
+        }
+        let mut lod0_block =
+            lod0_resident.unwrap_or_else(|| VoxelDataBlock::empty(lod0_location.lod_index));
+        if lod0_needs_materialization {
+            let mut voxels = create_block_buffer(block_size_i32, settings.format);
+            if let Some(generator) = settings.generator.as_deref() {
+                generator.generate_block(VoxelQueryData {
+                    buffer: &mut voxels,
+                    origin_in_voxels: lod0_bounds.min_pos,
+                    lod: 0,
+                });
+            }
+            lod0_block.set_voxels(voxels);
+        }
+        apply(lod0_block.voxels_mut(), lod0_bounds.min_pos);
+        lod0_block.set_modified(true);
+        lod0_block.set_edited(true);
+        lod0_block.set_needs_lodding(false);
+        drafts.push(EditDraft {
+            snapshot: lod0_snapshot,
+            block: lod0_block,
+        });
+
+        let half_block_size = block_size_i32 >> 1;
+        for lod_index in 1..lod_count {
+            let source_location = drafts
+                .last()
+                // Invariant: the LOD0 draft is pushed first in the loop
+                // above, so it exists whenever this arm runs. expect() here
+                // is unreachable on correct inputs; the workspace no-expect
+                // policy applies to caller-reachable paths.
                 .expect("LOD0 edit draft was prepared")
                 .snapshot
                 .location();
@@ -4222,6 +4458,36 @@ impl VoxelDataMutation<'_> {
             out.extend(missing_local);
         }
         Ok(())
+    }
+
+    /// Insert or replace a block at a position (replication client). A
+    /// resident block is replaced in place and its key revision advanced, so
+    /// ordering with concurrent edits is preserved.
+    fn replace_or_insert_block(
+        &self,
+        block_pos: Vector3i,
+        block: VoxelDataBlock,
+        lod_index: usize,
+    ) -> Result<bool, SharedVoxelDataMutationError> {
+        let block_box = Box3i::new(block_pos, Vector3i::splat(1));
+        let bounds = checked_lod_block_bounds(block_box, self.data.block_size(), lod_index)
+            .ok_or(SharedVoxelDataMutationError::SpatialBoundsOverflow { lod_index })?;
+        let _spatial = self.data.spatial_lock(lod_index).write_many([bounds]);
+        let lod = self
+            .data
+            .lods
+            .get(lod_index)
+            .expect("LOD index is outside the loaded range");
+        let mut state = lod.state.write().unwrap_or_else(|e| e.into_inner());
+        let next_revision = state.map.key_revision(block_pos).checked_add(1).ok_or(
+            SharedVoxelDataMutationError::KeyRevisionOverflow {
+                position: block_pos,
+                lod_index,
+            },
+        )?;
+        state.map.set_block(block_pos, block, true);
+        state.map.commit_key_revision(block_pos, next_revision);
+        Ok(true)
     }
 
     fn try_insert_block(

@@ -7,6 +7,7 @@ use godot::classes::Material;
 use godot::prelude::*;
 
 use crate::resources2::VoxelBlockyModelGD;
+use crate::resources3::VoxelBlockyModelCubeGD;
 use std::collections::HashMap;
 use voxel_core::math::Vector3i;
 
@@ -603,14 +604,17 @@ impl VoxelMesherBlockyGD {
 }
 
 impl VoxelMesherBlockyGD {
-    /// Build the engine-agnostic mesher, carrying the attached baked library.
-    pub fn core_mesher(&self) -> std::sync::Arc<dyn voxel_core::meshers::VoxelMesher> {
-        let library = self
-            .library_resource
+    /// Clone the attached baked library, if any.
+    pub(crate) fn core_library(&self) -> Option<voxel_core::meshers::blocky::BakedLibrary> {
+        self.library_resource
             .as_ref()
             .and_then(|resource| resource.clone().try_cast::<VoxelBlockyLibraryGD>().ok())
             .map(|library| library.bind().core_library())
-            .unwrap_or_default();
+    }
+
+    /// Build the engine-agnostic mesher, carrying the attached baked library.
+    pub fn core_mesher(&self) -> std::sync::Arc<dyn voxel_core::meshers::VoxelMesher> {
+        let library = self.core_library().unwrap_or_default();
         let type_channel = self.type_channel.max(0) as usize;
         std::sync::Arc::new(
             voxel_core::meshers::BlockyMesher::new(std::sync::Arc::new(library))
@@ -954,6 +958,8 @@ pub struct VoxelBlockyLibraryGD {
     model_count: i32,
     /// The real baked model table. Index 0 is always air.
     library: voxel_core::meshers::blocky::BakedLibrary,
+    /// Godot-side model resources, parallel to `library.models`.
+    godot_models: Vec<Option<Gd<Resource>>>,
     baked: bool,
 }
 
@@ -968,6 +974,7 @@ impl IResource for VoxelBlockyLibraryGD {
             base,
             model_count: 1,
             library,
+            godot_models: vec![None],
             baked: false,
         }
     }
@@ -988,6 +995,9 @@ impl VoxelBlockyLibraryGD {
             .push(voxel_core::meshers::blocky::solid_cube_model(
                 voxel_core::math::Color::from_rgb(r, g, b),
             ));
+        let mut cube = VoxelBlockyModelCubeGD::new_gd();
+        cube.bind_mut().set_color(r, g, b, 1.0);
+        self.godot_models.push(Some(cube.upcast::<Resource>()));
         self.model_count = self.library.models.len() as i32;
         self.baked = false;
         idx
@@ -1020,73 +1030,107 @@ impl VoxelBlockyLibraryGD {
     /// (the engine-agnostic `BakedModel` has no Godot-side peer yet). Matches
     /// `VoxelBlockyLibrary::add_model`.
     #[func]
-    fn add_model(&mut self, _model: Gd<Resource>) -> i32 {
+    fn add_model(&mut self, model: Gd<Resource>) -> i32 {
+        let baked = baked_model_from_resource(&model);
         let idx = self.library.models.len() as i32;
-        self.library
-            .models
-            .push(voxel_core::meshers::blocky::solid_cube_model(
-                voxel_core::math::Color::from_rgb(0.5, 0.5, 0.5),
-            ));
+        self.library.models.push(baked);
+        self.godot_models.push(Some(model));
         self.model_count = self.library.models.len() as i32;
         self.baked = false;
         idx
     }
 
-    /// Gets a model from its index. Returns the `VoxelBlockyModel` resource, or
-    /// `null` if the index is out of range. Matches
-    /// `VoxelBlockyLibrary::get_model`.
+    /// Gets a model from its index. Returns the stored resource, or `null` if
+    /// the index is out of range. Matches `VoxelBlockyLibrary::get_model`.
     #[func]
     fn get_model(&self, index: i32) -> Variant {
         let Ok(index) = usize::try_from(index) else {
             return Variant::nil();
         };
-        if index >= self.library.models.len() {
-            return Variant::nil();
+        match self.godot_models.get(index) {
+            Some(Some(model)) => model.to_variant(),
+            Some(None) | None => Variant::nil(),
         }
-        // The engine-agnostic BakedModel has no Godot-side resource peer yet;
-        // return a fresh VoxelBlockyModel placeholder so the slot is non-null.
-        VoxelBlockyModelGD::new_gd().to_variant()
     }
 
     /// Finds the index of the first model whose resource name matches `name`.
-    /// The engine-agnostic `BakedModel` does not carry a Godot resource name,
-    /// so this returns -1 (not found). Matches
-    /// `VoxelBlockyLibrary::get_model_index_from_resource_name`.
     #[func]
-    fn get_model_index_from_resource_name(&self, _name: GString) -> i32 {
+    fn get_model_index_from_resource_name(&self, name: GString) -> i32 {
+        let needle = name.to_string();
+        for (index, model) in self.godot_models.iter().enumerate() {
+            let Some(model) = model else {
+                continue;
+            };
+            if model.get_name().to_string() == needle {
+                return i32::try_from(index).unwrap_or(-1);
+            }
+        }
         -1
     }
 
     /// Array of all models (canonical `models` property getter). Each entry is
-    /// a `VoxelBlockyModel`. Matches `VoxelBlockyLibrary::get_models`.
+    /// the stored Godot resource, or `null` for the reserved air slot.
     #[func]
     fn get_models(&self) -> VarArray {
         let mut array = VarArray::new();
-        for _ in &self.library.models {
-            array.push(&VoxelBlockyModelGD::new_gd());
+        for model in &self.godot_models {
+            match model {
+                Some(resource) => array.push(&resource.to_variant()),
+                None => array.push(&Variant::nil()),
+            }
         }
         array
     }
 
     /// Replace the entire model array (canonical `models` property setter).
-    /// Each entry must be a `VoxelBlockyModel`. Matches
-    /// `VoxelBlockyLibrary::set_models`.
+    /// Each entry must be a `VoxelBlockyModel` or `VoxelBlockyModelCube`.
     #[func]
     fn set_models(&mut self, models: VarArray) {
         self.library.models.clear();
+        self.godot_models.clear();
         self.library
             .models
             .push(voxel_core::meshers::blocky::BakedModel::default());
-        for _item in models.iter_shared() {
-            self.library
-                .models
-                .push(voxel_core::meshers::blocky::solid_cube_model(
-                    voxel_core::math::Color::from_rgb(0.5, 0.5, 0.5),
-                ));
+        self.godot_models.push(None);
+        for item in models.iter_shared() {
+            let Ok(resource) = item.try_to::<Gd<Resource>>() else {
+                continue;
+            };
+            let baked = baked_model_from_resource(&resource);
+            self.library.models.push(baked);
+            self.godot_models.push(Some(resource));
         }
         self.model_count = self.library.models.len() as i32;
         self.baked = false;
     }
+}
+
+fn baked_model_from_resource(model: &Gd<Resource>) -> voxel_core::meshers::blocky::BakedModel {
+    if let Ok(cube) = model.clone().try_cast::<VoxelBlockyModelCubeGD>() {
+        return cube.bind().to_baked_model();
+    }
+    if let Ok(mesh) = model
+        .clone()
+        .try_cast::<crate::resources3::VoxelBlockyModelMeshGD>()
+    {
+        return mesh.bind().to_baked_model();
+    }
+    if let Ok(empty) = model
+        .clone()
+        .try_cast::<crate::resources3::VoxelBlockyModelEmptyGD>()
+    {
+        return empty.bind().to_baked_model();
+    }
+    if let Ok(fluid) = model
+        .clone()
+        .try_cast::<crate::resources3::VoxelBlockyModelFluidGD>()
+    {
+        return fluid.bind().to_baked_model();
+    }
+    if let Ok(blocky) = model.clone().try_cast::<VoxelBlockyModelGD>() {
+        return blocky.bind().to_baked_model();
+    }
+    voxel_core::meshers::blocky::solid_cube_model(voxel_core::math::Color::from_rgb(0.5, 0.5, 0.5))
 }
 
 impl VoxelBlockyLibraryGD {

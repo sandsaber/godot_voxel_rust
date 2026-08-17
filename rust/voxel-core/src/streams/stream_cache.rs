@@ -74,7 +74,7 @@ impl BlockCache {
         let Some(cached) = self.blocks.get(&(position, lod)) else {
             return false;
         };
-        copy_buffer_into(cached, out_voxels);
+        cached.copy_to(out_voxels);
         true
     }
 
@@ -95,7 +95,7 @@ impl BlockCache {
             return;
         }
         let mut entry = VoxelBuffer::new(voxels.allocator());
-        copy_buffer_into(voxels, &mut entry);
+        voxels.copy_to(&mut entry);
         self.blocks.insert((position, lod), entry);
     }
 
@@ -126,17 +126,6 @@ impl BlockCache {
             save_func(position, lod, &voxels);
         }
     }
-}
-
-/// Deep-copy `src` into `dst`, resizing `dst` and replicating every channel's
-/// depth / compression / data. Stands in for the C++ `VoxelBuffer::copy_to(dst,
-/// true)` (the `true` = copy all channels) used by both the cache and the
-/// memory stream. `dst` keeps its own allocator/pool as in C++.
-fn copy_buffer_into(src: &VoxelBuffer, dst: &mut VoxelBuffer) {
-    dst.create(src.size());
-    // `copy_channels_from` mirrors `copy_to(_, /*copy_channels=*/true)`: it
-    // copies depth, compression, default and raw bytes for every channel.
-    dst.copy_channels_from(src);
 }
 
 /// Read a single voxel back through the cache's public API in tests, to avoid
@@ -178,6 +167,27 @@ mod tests {
         assert!(cache.get(pos, 0, &mut out));
         assert_eq!(out.size(), Vector3i::new(2, 2, 2));
         assert_eq!(sample_voxel(&out, 1, 1, 1), 42);
+    }
+
+    #[test]
+    fn set_then_get_preserves_block_and_voxel_metadata() {
+        let mut cache = BlockCache::new();
+        let pos = Vector3i::new(0, 0, 0);
+        let mut stored = sample_block(5);
+        stored.set_block_metadata(crate::storage::MetadataValue::Int(3));
+        stored.set_voxel_metadata(
+            Vector3i::new(1, 1, 1),
+            crate::storage::MetadataValue::Text("cached".into()),
+        );
+
+        cache.set(pos, 0, &stored);
+        let mut out = VoxelBuffer::new(Allocator::Default);
+        assert!(cache.get(pos, 0, &mut out));
+        assert_eq!(*out.block_metadata(), crate::storage::MetadataValue::Int(3));
+        assert_eq!(
+            out.voxel_metadata(Vector3i::new(1, 1, 1)),
+            Some(&crate::storage::MetadataValue::Text("cached".into()))
+        );
     }
 
     #[test]

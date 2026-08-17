@@ -9,6 +9,7 @@
 //! Build the `.so`/`.dylib`/`.dll`, then add a `.gdextension` file pointing at
 //! it (see `rust/voxel-gdext/voxel_gdext.gdextension.in`). Restart the editor.
 
+mod debug_draw;
 mod editor;
 mod generators;
 mod resources;

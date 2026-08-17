@@ -107,18 +107,18 @@ impl InstanceGenerator for RandomScatterGenerator {
 }
 
 /// Simple xorshift PRNG for deterministic scatter.
-struct SimpleRng {
+pub struct SimpleRng {
     state: u32,
 }
 
 impl SimpleRng {
-    fn new(seed: u32) -> Self {
+    pub fn new(seed: u32) -> Self {
         Self {
             state: if seed == 0 { 1 } else { seed },
         }
     }
 
-    fn next_u32(&mut self) -> u32 {
+    pub fn next_u32(&mut self) -> u32 {
         self.state ^= self.state << 13;
         self.state ^= self.state >> 17;
         self.state ^= self.state << 5;
@@ -136,17 +136,14 @@ fn quat_yaw(yaw: f32) -> [f32; 4] {
     [0.0, half.sin(), 0.0, half.cos()]
 }
 
-/// Align to surface normal + apply yaw around the normal axis.
+/// Align model up (+Y) to the surface normal, then yaw around the local
+/// up axis. For the ground normal (0,1,0) the tilt is identity, so snapped
+/// ground instances stay upright — the previous cross-product frame built a
+/// horizontal "up" and pitched every instance 90 degrees onto its side.
 fn look_at_yaw(normal: Vector3f, yaw: f32) -> [f32; 4] {
-    // Simplified: use normal as up, yaw around Y.
-    // Full implementation would use a proper look-at quaternion.
     let n = normalize(normal);
-    let right = cross(Vector3f::new(0.0, 0.0, 1.0), n);
-    let up = cross(n, right);
-    // Build rotation matrix → quaternion (simplified to yaw + tilt).
     let yaw_q = quat_yaw(yaw);
-    // Blend with normal alignment (basic version).
-    let tilt_q = quat_from_vectors(Vector3f::new(0.0, 1.0, 0.0), up);
+    let tilt_q = quat_from_vectors(Vector3f::new(0.0, 1.0, 0.0), n);
     quat_mul(&tilt_q, &yaw_q)
 }
 
@@ -171,6 +168,11 @@ fn quat_from_vectors(from: Vector3f, to: Vector3f) -> [f32; 4] {
     let dot = from.x * to.x + from.y * to.y + from.z * to.z;
     if dot > 0.9999 {
         [0.0, 0.0, 0.0, 1.0] // identity
+    } else if dot < -0.9999 {
+        // Antiparallel: 180 degrees about an axis perpendicular to `from`.
+        // The generic branch divides by sqrt(2(1+dot)) ~ 0 here and would
+        // produce NaN components.
+        [1.0, 0.0, 0.0, 0.0]
     } else {
         let axis = cross(from, to);
         let s = ((2.0 * (1.0 + dot)).max(0.0)).sqrt();
@@ -190,6 +192,45 @@ fn quat_mul(a: &[f32; 4], b: &[f32; 4]) -> [f32; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snap_to_normal_keeps_ground_instances_upright() {
+        // Regression: the cross-product tilt frame pitched +Y-normal
+        // instances exactly 90 degrees onto their sides.
+        let q = look_at_yaw(Vector3f::new(0.0, 1.0, 0.0), 0.7);
+        let [x, y, z, w] = q;
+        let up_col = Vector3f::new(
+            2.0 * (x * y + w * z),
+            1.0 - 2.0 * (x * x + z * z),
+            2.0 * (y * z - w * x),
+        );
+        assert!(
+            up_col.x.abs() < 1e-6 && (up_col.y - 1.0).abs() < 1e-6 && up_col.z.abs() < 1e-6,
+            "ground-normal snap must keep up upright, got {up_col:?}"
+        );
+
+        // A 45-degree slope tilts up toward the slope but stays mostly up.
+        let slope = look_at_yaw(normalize(Vector3f::new(0.0, 1.0, 1.0)), 0.0);
+        let [sx, sy, sz, sw] = slope;
+        let up = Vector3f::new(
+            2.0 * (sx * sy + sw * sz),
+            1.0 - 2.0 * (sx * sx + sz * sz),
+            2.0 * (sy * sz - sw * sx),
+        );
+        assert!(
+            up.y > 0.7,
+            "45-degree slope should keep up mostly vertical, got {up:?}"
+        );
+
+        // Antiparallel (ceiling normal) must produce a finite unit
+        // quaternion, not NaN from the zero-length generic branch.
+        let ceil = quat_from_vectors(Vector3f::new(0.0, 1.0, 0.0), Vector3f::new(0.0, -1.0, 0.0));
+        let len: f32 = ceil.iter().map(|c| c * c).sum::<f32>().sqrt();
+        assert!(
+            (len - 1.0).abs() < 1e-6,
+            "antiparallel quat must be unit, len={len}"
+        );
+    }
 
     #[test]
     fn random_scatter_produces_instances() {

@@ -26,7 +26,7 @@ use super::voxel_stream::{
 };
 use crate::constants::voxel_constants::MAX_LOD;
 use crate::math::Vector3i;
-use crate::storage::voxel_buffer::{ALL_CHANNELS_MASK, MAX_CHANNELS};
+use crate::storage::voxel_buffer::ALL_CHANNELS_MASK;
 use crate::storage::VoxelBuffer;
 use std::collections::HashMap;
 use std::sync::{
@@ -85,7 +85,7 @@ impl MemoryStream {
             return;
         }
         let mut entry = VoxelBuffer::new(voxels.allocator());
-        copy_buffer_into(voxels, &mut entry);
+        voxels.copy_to(&mut entry);
         self.write_blocks().insert((position, lod), entry);
     }
 
@@ -106,7 +106,7 @@ impl MemoryStream {
         let Some(stored) = blocks.get(&(position, lod)) else {
             return LoadResult::NotFound;
         };
-        copy_buffer_into(stored, out_voxels);
+        stored.copy_to(out_voxels);
         LoadResult::Found
     }
 
@@ -163,20 +163,6 @@ impl VoxelStream for MemoryStream {
     }
 }
 
-/// Deep-copy `src` into `dst`, resizing `dst` and replicating every channel's
-/// depth / compression / data. Stands in for the C++ `VoxelBuffer::copy_to(dst,
-/// true)` used by the memory stream on both save and load. `dst` keeps its own
-/// allocator/pool, matching the C++ contract.
-fn copy_buffer_into(src: &VoxelBuffer, dst: &mut VoxelBuffer) {
-    dst.create(src.size());
-    // Mirrors `copy_to(_, /*copy_channels=*/true)`: copies depth, compression,
-    // default value and raw bytes for all eight channels.
-    for ci in 0..MAX_CHANNELS {
-        dst.set_channel_depth(ci, src.channel_depth(ci));
-    }
-    dst.copy_channels_from(src);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,6 +206,31 @@ mod tests {
         assert_eq!(type_voxel(&loaded, 1, 0, 1), 123);
         // Untouched voxels keep the (now-materialized) default of 0.
         assert_eq!(type_voxel(&loaded, 0, 0, 0), 0);
+    }
+
+    #[test]
+    fn save_then_load_preserves_block_and_voxel_metadata() {
+        let stream = MemoryStream::new();
+        let pos = Vector3i::new(1, 2, 3);
+        let mut stored = sample_block(9);
+        stored.set_block_metadata(crate::storage::MetadataValue::Text("meta".into()));
+        stored.set_voxel_metadata(
+            Vector3i::new(1, 0, 1),
+            crate::storage::MetadataValue::Int(4),
+        );
+
+        stream.save_block(pos, 0, &stored);
+
+        let mut loaded = VoxelBuffer::new(Allocator::Default);
+        assert_eq!(stream.load_block(pos, 0, &mut loaded), LoadResult::Found);
+        assert_eq!(
+            *loaded.block_metadata(),
+            crate::storage::MetadataValue::Text("meta".into())
+        );
+        assert_eq!(
+            loaded.voxel_metadata(Vector3i::new(1, 0, 1)),
+            Some(&crate::storage::MetadataValue::Int(4))
+        );
     }
 
     #[test]

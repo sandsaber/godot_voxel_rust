@@ -2,27 +2,51 @@
 
 The instancer scatters items (trees, rocks, grass) over voxel surfaces.
 
-!!! warning "Status: MVP — scatter counts only"
-    The scatter pipeline computes **how many instances would be placed and
-    where**, but there is **no rendering yet**: no `MultiMesh` output, no
-    scene instantiation, no attachment to live terrain blocks. Treat the
-    returned counts as the functional surface for now.
+!!! note "Status: MultiMesh + scene items + per-block streaming"
+    `scatter_from_buffer` / `scatter_test` replace this node's children:
+    MultiMesh items upload one `MultiMeshInstance3D` each, scene items
+    (see `set_item_scene`) spawn one real `Node3D` per instance. As a child
+    of `VoxelTerrain` / `VoxelLodTerrain`, the node also streams one instance
+    block per paged LOD0 mesh block (`sync_stream`,
+    `get_streamed_block_count`), spawning and freeing both node kinds in
+    lockstep with paging.
 
 ## VoxelInstancer
 
 A `Node3D` with its own internal item library and scatter configuration.
 
+!!! warning "State lifetime"
+    Items, meshes, scenes, and the seed are runtime-only: they do **not**
+    survive scene save/reload and have no inspector surface (only
+    `density_multiplier` is a serialized property). Build the library in
+    `_ready` from script. A serialized `VoxelInstanceLibrary` resource is the
+    planned upstream-parity path.
+
 | Member | Kind | Notes |
 |---|---|---|
 | `density_multiplier` | property | Global multiplier applied to every item's density. Default `1.0`. |
-| `add_item(name, density, min_scale, max_scale)` | method | Register a scatter item, returns its index. |
+| `add_item(name, density, min_scale, max_scale)` | method | Register a scatter item, returns its index. `density` is a probability per surface cell in `0..=1` — upstream's per-square-meter density is a different unit; values above `1` are clamped with a warning. |
 | `get_item_count()` | method | Number of registered items. |
 | `set_seed(seed)` | method | Seed for the scatter random generator. |
 | `scatter_from_buffer(buffer)` | method | Extracts surface points from a `VoxelBuffer`'s Type channel (channel 0) and runs every item's scatter generator over them. Returns the total instance count. |
 | `scatter_test(count)` | method | Debug helper: scatters over `count` dummy points using item 0. Returns the instance count. |
+| `set_item_mesh(index, mesh)` | method | Mesh used when uploading that item as a MultiMesh. Switches the item back to MultiMesh mode and clears its scene. |
+| `set_item_scene(index, scene)` | method | `PackedScene` instantiated once per instance of the item (scene mode); the scene root must be a `Node3D` (rejected otherwise). Clears the item's mesh. |
+| `get_item_scene(index)` | method | The scene assigned to an item, or `null` when it has none. |
+| `sync_stream()` | method | Diff parent terrain mesh blocks and load/unload instance blocks. Also runs from `_process`. |
+| `get_streamed_block_count()` | method | Resident streamed instance blocks. |
+| `get_streamed_instance_count()` | method | Instances across streamed blocks. |
 
-Surface extraction reads the buffer's Type channel: a voxel is a surface point
-when it is solid (`!= 0`) and the voxel directly below it is air (`== 0`).
+Surface extraction reads the buffer's Type channel: a surface point is an
+air cell (`== 0`) resting directly on solid ground (`!= 0` below it) — the
+point lands on the ground plane with a +Y normal. Cliffs yield no points and
+slopes under-sample by cos(theta); upstream samples mesh triangles instead.
+This also applies to the streaming path: **SDF-only terrain (the default
+Waves/Transvoxel setup) and flat-filled slabs produce zero instances** —
+there is no Type-channel geometry with air underneath. Use a generator that
+writes overhangs into the Type channel (e.g. noise) until an SDF-aware
+extractor lands; the instancer prints a one-time warning the first time a
+mesh block yields no points.
 The buffer must contain blocky-style type data — an SDF-only buffer produces
 no points.
 
@@ -83,8 +107,9 @@ One scatter item definition.
 
     - `VoxelInstanceLibraryMultiMeshItem` — property `mesh_instance_count`,
       method `has_instances()`. No MultiMesh creation.
-    - `VoxelInstanceLibrarySceneItem` — method `has_scene()` (a scene path
-      field, no instantiation).
+    - `VoxelInstanceLibrarySceneItem` — holds a real `PackedScene` slot
+      (`get_scene`/`set_scene`), paralleling the instancer's scene mode, but
+      is not yet attachable to the node's internal library.
     - `VoxelInstanceComponent` — `is_visible()` / `set_visible(v)` flags only.
 
 The editor plugin `VoxelInstancerEditorPlugin` adds an empty "Voxel Instancer"

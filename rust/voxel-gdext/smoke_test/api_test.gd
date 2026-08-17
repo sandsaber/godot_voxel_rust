@@ -23,6 +23,7 @@ func _ready() -> void:
 		"VoxelBuffer", "VoxelMesherBlocky", "VoxelMesherTransvoxel",
 		"VoxelStreamMemory", "VoxelColorPalette", "VoxelBoxMover",
 		"VoxelGraphFunction", "VoxelInstanceLibraryItem", "VoxelBlockyType",
+		"VoxelInstancer",
 	]
 	var missing := 0
 	for c in classes:
@@ -89,25 +90,85 @@ func _ready() -> void:
 		buf.set_voxel(0, 0, 0, 0, 7)
 		var iv = buf.get_voxel(0, 0, 0, 0)
 		_ok(int(iv) == 7, "VoxelBuffer set_voxel/get_voxel round-trips (got %d)" % int(iv))
+		buf.set_block_metadata("chunk")
+		_ok(str(buf.get_block_metadata()) == "chunk", "VoxelBuffer block metadata round-trips")
+		buf.set_voxel_metadata(Vector3i(1, 2, 3), 42)
+		_ok(int(buf.get_voxel_metadata(Vector3i(1, 2, 3))) == 42, "VoxelBuffer voxel metadata round-trips")
+		buf.clear_voxel_metadata(Vector3i(1, 2, 3))
+		_ok(buf.get_voxel_metadata(Vector3i(1, 2, 3)) == null, "VoxelBuffer clear_voxel_metadata drops the entry")
 
-	# 8. Name-like properties use class-specific accessors. Generic
-	#    get_name/set_name methods shadow Resource methods and become errors in
-	#    godot-rust 0.6.
+	# 8. Name-like properties use class-specific accessors: generic `name`
+	# cannot be assigned on these Resource subclasses in current Godot, so
+	# each class exposes its own getter/setter pair.
 	var graph_function: Resource = ClassDB.instantiate("VoxelGraphFunction")
 	_ok(graph_function != null, "VoxelGraphFunction instantiated")
 	if graph_function:
-		graph_function.name = "smoke_function"
-		_ok(graph_function.get_function_name() == "smoke_function", "VoxelGraphFunction.name round-trips")
+		graph_function.set_name("smoke_function")
+		_ok(graph_function.get_name() == "smoke_function", "VoxelGraphFunction name round-trips via class accessors")
 	var instance_item: Resource = ClassDB.instantiate("VoxelInstanceLibraryItem")
 	_ok(instance_item != null, "VoxelInstanceLibraryItem instantiated")
 	if instance_item:
-		instance_item.name = "smoke_item"
-		_ok(instance_item.get_item_name() == "smoke_item", "VoxelInstanceLibraryItem.name round-trips")
+		instance_item.set_item_name("smoke_item")
+		_ok(instance_item.get_item_name() == "smoke_item", "VoxelInstanceLibraryItem name round-trips via class accessors")
 	var blocky_type: Resource = ClassDB.instantiate("VoxelBlockyType")
 	_ok(blocky_type != null, "VoxelBlockyType instantiated")
 	if blocky_type:
-		blocky_type.name = "smoke_type"
-		_ok(blocky_type.get_type_name() == "smoke_type", "VoxelBlockyType.name round-trips")
+		blocky_type.set_unique_name(&"smoke_type")
+		_ok(blocky_type.get_unique_name() == &"smoke_type", "VoxelBlockyType unique name round-trips via class accessors")
+
+	# 9. Scene-item instancing: a scene-typed item spawns real Node3D children
+	#    per instance (R5), with type flipping and root validation.
+	var instancer := ClassDB.instantiate("VoxelInstancer") as Node
+	_ok(instancer != null, "VoxelInstancer instantiated")
+	if instancer:
+		add_child(instancer)
+		var item_index := int(instancer.add_item("trees", 1.0, 1.0, 1.0))
+		_ok(item_index == 0, "VoxelInstancer.add_item returns index 0")
+
+		# Build a PackedScene whose root is a Node3D, and one whose root is a
+		# plain Node (must be rejected).
+		var good_root := Node3D.new()
+		var good_scene := PackedScene.new()
+		var pack_ok := good_scene.pack(good_root)
+		good_root.free()
+		_ok(pack_ok == OK, "Node3D-rooted helper scene packs")
+		var bad_root := Node.new()
+		var bad_scene := PackedScene.new()
+		bad_scene.pack(bad_root)
+		bad_root.free()
+
+		instancer.set_item_scene(item_index, bad_scene)
+		_ok(instancer.get_item_scene(item_index) == null,
+			"set_item_scene rejects a non-Node3D scene root")
+		instancer.set_item_scene(item_index, good_scene)
+		_ok(instancer.get_item_scene(item_index) == good_scene,
+			"set_item_scene/get_item_scene round-trip")
+
+		var count := int(instancer.scatter_test(4))
+		_ok(count == 4, "scatter_test returns 4 (got %d)" % count)
+		# Assert by class and transform, not node names (naming is an
+		# implementation detail): scatter_test places instances at x = 0..3.
+		var scene_children := 0
+		var positions := {}
+		for child in instancer.get_children():
+			if child is Node3D:
+				scene_children += 1
+				positions[int(roundf(child.position.x))] = true
+		_ok(scene_children == 4,
+			"scene item spawns one real Node3D per instance (got %d)" % scene_children)
+		_ok(
+			positions.has(0) and positions.has(1) and positions.has(2) and positions.has(3),
+			"scene instances are placed at their scatter positions (x set: %s)" % str(positions.keys())
+		)
+
+		# Assigning a mesh flips the item back to MultiMesh and clears the scene.
+		var mesh := BoxMesh.new()
+		instancer.set_item_mesh(item_index, mesh)
+		_ok(instancer.get_item_scene(item_index) == null,
+			"set_item_mesh clears the scene slot")
+		_ok(int(instancer.scatter_test(2)) == 2, "MultiMesh path still scatters after the flip")
+
+		instancer.queue_free()
 
 	print("=== result: %d failure(s) ===" % failures)
 	get_tree().quit(1 if failures > 0 else 0)

@@ -1216,7 +1216,9 @@ fn try_clone_stream_error(
                 position: *position,
             })
         }
-        VoxelStreamError::BlockFormatMismatch => Ok(VoxelStreamError::BlockFormatMismatch),
+        VoxelStreamError::BlockFormatMismatch(detail) => {
+            Ok(VoxelStreamError::BlockFormatMismatch(detail.clone()))
+        }
         VoxelStreamError::UnsupportedOperation { operation } => {
             Ok(VoxelStreamError::UnsupportedOperation { operation })
         }
@@ -2908,6 +2910,37 @@ struct VariableLodRuntimeState {
     coverage_holds: CoverageHoldLedger,
 }
 
+/// One resident mesh block for the debug overlay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DebugMeshBlock {
+    pub position: Vector3i,
+    pub lod: u8,
+    pub visual_active: bool,
+    pub collision_active: bool,
+    pub is_loaded: bool,
+}
+
+/// One edited data block for the debug overlay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DebugEditedBlock {
+    pub position: Vector3i,
+    pub lod: u8,
+    pub modified: bool,
+}
+
+/// Boxes the Godot overlay can draw without locking planner internals again.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TerrainDebugSnapshot {
+    pub volume_bounds: Box3i,
+    pub mesh_block_size: i32,
+    pub lod_count: u8,
+    pub data_block_count: usize,
+    pub mesh_blocks: Vec<DebugMeshBlock>,
+    pub viewer_mesh_boxes: Vec<(u8, Box3i)>,
+    pub edited_blocks: Vec<DebugEditedBlock>,
+    pub metadata_voxels: Vec<Vector3i>,
+}
+
 /// Cloneable read-only access to storage owned by [`VoxelTerrainCore`].
 ///
 /// The wrapped shared handle is intentionally private. This type does not
@@ -2941,6 +2974,46 @@ impl VoxelTerrainDataView {
 
     pub fn block_snapshot(&self, block_pos: Vector3i, lod_index: usize) -> Option<VoxelDataBlock> {
         self.data.block_snapshot(block_pos, lod_index)
+    }
+
+    /// Per-block revision (monotonic, +1 per committed edit since the block
+    /// key first appeared; tombstones keep counting). Used by replication to
+    /// order snapshots and drop stale deltas (doc/source/multiplayer.md).
+    pub fn block_revision(&self, block_pos: Vector3i, lod_index: usize) -> Option<u64> {
+        if lod_index >= self.data.lod_count() {
+            return None;
+        }
+        Some(
+            self.data
+                .with_lod_map(lod_index, |map| map.key_revision_public(block_pos)),
+        )
+    }
+
+    /// Positions of every resident block in the given storage LOD.
+    pub fn block_positions(&self, lod_index: usize) -> Vec<Vector3i> {
+        self.data
+            .with_lod_map(lod_index, |map| map.block_positions().collect())
+    }
+
+    /// Visit every resident EDITED block with data-block position and its
+    /// revision, without cloning block payloads (server replication scan).
+    pub fn for_each_edited_block(
+        &self,
+        lod_index: usize,
+        mut visit: impl FnMut(Vector3i, u64, &crate::storage::VoxelBuffer),
+    ) {
+        self.data.with_lod_map(lod_index, |map| {
+            for position in map.block_positions() {
+                let Some(block) = map.get_block(position) else {
+                    continue;
+                };
+                if !block.is_edited() || !block.has_voxels() {
+                    continue;
+                }
+                let revision = map.key_revision_public(position);
+                visit(position, revision, block.voxels());
+            }
+        });
     }
 }
 
@@ -3364,19 +3437,509 @@ impl VoxelTerrainCore {
         self.commit_prepared_voxel_edit(publication).map(Some)
     }
 
+    /// Apply a shape edit to every LOD0 block overlapping the voxel AABB
+    /// `[min, max]` (inclusive). One storage transaction is published per
+    /// overlapping block instead of one per voxel.
+    pub fn try_edit_sphere(
+        &mut self,
+        center: crate::math::Vector3f,
+        radius: f32,
+        channel_index: usize,
+        mode: crate::edition::EditMode,
+        value: u64,
+    ) -> Result<u32, VoxelTerrainRuntimeError> {
+        if !center.x.is_finite()
+            || !center.y.is_finite()
+            || !center.z.is_finite()
+            || !radius.is_finite()
+            || radius < 0.0
+        {
+            return Ok(0);
+        }
+        if channel_index >= crate::storage::voxel_buffer::MAX_CHANNELS {
+            return Ok(0);
+        }
+        let min = Vector3i::new(
+            (center.x - radius).floor() as i32,
+            (center.y - radius).floor() as i32,
+            (center.z - radius).floor() as i32,
+        );
+        let max = Vector3i::new(
+            (center.x + radius).ceil() as i32,
+            (center.y + radius).ceil() as i32,
+            (center.z + radius).ceil() as i32,
+        );
+        self.try_edit_overlapping_blocks(min, max, |buffer, origin| {
+            let local_center = crate::math::Vector3f::new(
+                center.x - origin.x as f32,
+                center.y - origin.y as f32,
+                center.z - origin.z as f32,
+            );
+            crate::edition::do_sphere(buffer, channel_index, mode, value, local_center, radius);
+        })
+    }
+
+    /// Apply a box edit to every LOD0 block overlapping `[min, max]`
+    /// (inclusive). `do_box` uses an exclusive max, so this converts.
+    pub fn try_edit_box(
+        &mut self,
+        min: Vector3i,
+        max: Vector3i,
+        channel_index: usize,
+        mode: crate::edition::EditMode,
+        value: u64,
+    ) -> Result<u32, VoxelTerrainRuntimeError> {
+        if channel_index >= crate::storage::voxel_buffer::MAX_CHANNELS {
+            return Ok(0);
+        }
+        let lo = Vector3i::new(min.x.min(max.x), min.y.min(max.y), min.z.min(max.z));
+        let hi = Vector3i::new(min.x.max(max.x), min.y.max(max.y), min.z.max(max.z));
+        // Inclusive GDScript/tool contract → exclusive core `do_box`.
+        let exclusive = Vector3i::new(
+            hi.x.saturating_add(1),
+            hi.y.saturating_add(1),
+            hi.z.saturating_add(1),
+        );
+        self.try_edit_overlapping_blocks(lo, hi, |buffer, origin| {
+            let local_min = Vector3i::new(lo.x - origin.x, lo.y - origin.y, lo.z - origin.z);
+            let local_max = Vector3i::new(
+                exclusive.x - origin.x,
+                exclusive.y - origin.y,
+                exclusive.z - origin.z,
+            );
+            crate::edition::do_box(buffer, channel_index, mode, value, local_min, local_max);
+        })
+    }
+
+    /// Hemisphere brush: sphere cut by the plane whose outward normal is
+    /// `flat_direction`. `smoothness` rounds the crease.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_edit_hemisphere(
+        &mut self,
+        center: crate::math::Vector3f,
+        radius: f32,
+        flat_direction: crate::math::Vector3f,
+        smoothness: f32,
+        channel_index: usize,
+        mode: crate::edition::EditMode,
+        value: u64,
+    ) -> Result<u32, VoxelTerrainRuntimeError> {
+        if !center.x.is_finite()
+            || !center.y.is_finite()
+            || !center.z.is_finite()
+            || !radius.is_finite()
+            || radius < 0.0
+            || !flat_direction.x.is_finite()
+            || !flat_direction.y.is_finite()
+            || !flat_direction.z.is_finite()
+            || !smoothness.is_finite()
+            || smoothness < 0.0
+        {
+            return Ok(0);
+        }
+        if channel_index >= crate::storage::voxel_buffer::MAX_CHANNELS {
+            return Ok(0);
+        }
+        let pad = radius + smoothness;
+        let min = Vector3i::new(
+            (center.x - pad).floor() as i32,
+            (center.y - pad).floor() as i32,
+            (center.z - pad).floor() as i32,
+        );
+        let max = Vector3i::new(
+            (center.x + pad).ceil() as i32,
+            (center.y + pad).ceil() as i32,
+            (center.z + pad).ceil() as i32,
+        );
+        self.try_edit_overlapping_blocks(min, max, |buffer, origin| {
+            let local_center = crate::math::Vector3f::new(
+                center.x - origin.x as f32,
+                center.y - origin.y as f32,
+                center.z - origin.z as f32,
+            );
+            crate::edition::do_hemisphere(
+                buffer,
+                channel_index,
+                mode,
+                value,
+                local_center,
+                radius,
+                flat_direction,
+                smoothness,
+            );
+        })
+    }
+
+    /// Smooth the SDF channel inside a sphere of influence.
+    pub fn try_edit_smooth(
+        &mut self,
+        center: crate::math::Vector3f,
+        radius: f32,
+        blur_radius: i32,
+        channel_index: usize,
+    ) -> Result<u32, VoxelTerrainRuntimeError> {
+        if !center.x.is_finite()
+            || !center.y.is_finite()
+            || !center.z.is_finite()
+            || !radius.is_finite()
+            || radius < 0.0
+            || blur_radius < 0
+        {
+            return Ok(0);
+        }
+        if channel_index >= crate::storage::voxel_buffer::MAX_CHANNELS {
+            return Ok(0);
+        }
+        let min = Vector3i::new(
+            (center.x - radius).floor() as i32,
+            (center.y - radius).floor() as i32,
+            (center.z - radius).floor() as i32,
+        );
+        let max = Vector3i::new(
+            (center.x + radius).ceil() as i32,
+            (center.y + radius).ceil() as i32,
+            (center.z + radius).ceil() as i32,
+        );
+        self.try_edit_overlapping_blocks(min, max, |buffer, origin| {
+            let local_center = crate::math::Vector3f::new(
+                center.x - origin.x as f32,
+                center.y - origin.y as f32,
+                center.z - origin.z as f32,
+            );
+            crate::edition::do_smooth(buffer, channel_index, local_center, radius, blur_radius);
+        })
+    }
+
+    /// Install a block received over replication (doc/source/multiplayer.md,
+    /// client side). Mirrors the load-response insert: the block becomes
+    /// resident with `edited` set (never-generated state must survive
+    /// save-on-unload), replacing any resident copy. Returns `false` when
+    /// the core is shutting down or the storage rejects the insert.
+    pub fn try_install_remote_block(
+        &mut self,
+        position_in_blocks: Vector3i,
+        lod_index: u8,
+        voxels: VoxelBuffer,
+    ) -> bool {
+        if self.shutdown_epoch.is_some() {
+            return false;
+        }
+        let block_size = self.data().block_size() as i32;
+        if block_size <= 0 || voxels.size() != Vector3i::splat(block_size) {
+            return false;
+        }
+        let mut block = crate::storage::VoxelDataBlock::with_voxels(voxels, lod_index);
+        block.set_edited(true);
+        block.set_modified(true);
+        let replaced = self
+            .data
+            .replace_or_insert_remote_block(position_in_blocks, block)
+            .is_ok();
+        if replaced {
+            self.stats.blocks_loaded = self.stats.blocks_loaded.saturating_add(1);
+            // Storage alone never refreshes geometry: queue the covering
+            // mesh blocks so the next try_process remeshes them (same
+            // mechanism edit publication uses via blocks_pending_update).
+            // mesh_block_size == data_block_size in the minimum supported
+            // clipbox configuration (lod_clipbox docs); divide positions in
+            // voxels by the block size to get mesh-block coordinates. Pad by
+            // the mesher's minimum so neighbours that sample across the
+            // boundary remesh too (no seams).
+            let padding = self.meshing_dependency.mesher().minimum_padding() as i32;
+            let divisor = block_size.max(1);
+            let min = (position_in_blocks * block_size) - Vector3i::splat(padding);
+            let max = (position_in_blocks * block_size)
+                + Vector3i::splat(block_size)
+                + Vector3i::splat(padding);
+            let x0 = min.x.div_euclid(divisor);
+            let y0 = min.y.div_euclid(divisor);
+            let z0 = min.z.div_euclid(divisor);
+            let x1 = (max.x - 1).div_euclid(divisor);
+            let y1 = (max.y - 1).div_euclid(divisor);
+            let z1 = (max.z - 1).div_euclid(divisor);
+            for mz in z0..=z1 {
+                for my in y0..=y1 {
+                    for mx in x0..=x1 {
+                        let position = Vector3i::new(mx, my, mz);
+                        if let Some(entry) = self.mesh_maps[0].get_mut(&position) {
+                            if !entry.is_in_update_list {
+                                entry.is_in_update_list = true;
+                                self.blocks_pending_update[0].push(position);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        replaced
+    }
+
+    /// Set or clear per-voxel metadata at a world-space position. The write
+    /// goes through the same LOD0 block transaction as voxel edits, so it
+    /// marks the block edited and stays on the live buffer.
+    pub fn try_edit_voxel_metadata(
+        &mut self,
+        position: Vector3i,
+        metadata: Option<crate::storage::MetadataValue>,
+    ) -> Result<Option<VoxelEditOutcome>, VoxelTerrainRuntimeError> {
+        let block_size = self.data_block_size();
+        if block_size <= 0 {
+            return Ok(None);
+        }
+        let block_pos = Vector3i::new(
+            position.x.div_euclid(block_size),
+            position.y.div_euclid(block_size),
+            position.z.div_euclid(block_size),
+        );
+        self.try_edit_lod0_block(block_pos, |buffer, origin| {
+            let local = position - origin;
+            match metadata {
+                Some(value) if !value.is_nil() => buffer.set_voxel_metadata(local, value),
+                _ => buffer.clear_voxel_metadata(local),
+            }
+        })
+    }
+
+    /// Snapshot-read metadata at a world-space voxel, if the LOD0 block is
+    /// resident and the voxel carries an entry.
+    pub fn voxel_metadata(&self, position: Vector3i) -> Option<crate::storage::MetadataValue> {
+        let data = self.data();
+        let Ok(block_size) = i32::try_from(data.block_size()) else {
+            return None;
+        };
+        if block_size <= 0 {
+            return None;
+        }
+        let block_pos = crate::storage::voxel_data_map::VoxelDataMap::voxel_to_block_b(
+            position,
+            data.block_size_po2(),
+        );
+        let block = data.block_snapshot(block_pos, 0)?;
+        if !block.has_voxels() {
+            return None;
+        }
+        let local = Vector3i::new(
+            position.x.rem_euclid(block_size),
+            position.y.rem_euclid(block_size),
+            position.z.rem_euclid(block_size),
+        );
+        block.voxels().voxel_metadata(local).cloned()
+    }
+
+    /// Visit every resident LOD0 metadata entry whose world position is in
+    /// `[min, max)` (max exclusive).
+    pub fn for_each_voxel_metadata_in_area(
+        &self,
+        min: Vector3i,
+        max: Vector3i,
+        mut visit: impl FnMut(Vector3i, &crate::storage::MetadataValue),
+    ) {
+        let data = self.data();
+        let Ok(block_size) = i32::try_from(data.block_size()) else {
+            return;
+        };
+        if block_size <= 0 {
+            return;
+        }
+        let lo = Vector3i::new(min.x.min(max.x), min.y.min(max.y), min.z.min(max.z));
+        let hi = Vector3i::new(min.x.max(max.x), min.y.max(max.y), min.z.max(max.z));
+        if lo.x == hi.x || lo.y == hi.y || lo.z == hi.z {
+            return;
+        }
+        let last = Vector3i::new(
+            hi.x.saturating_sub(1),
+            hi.y.saturating_sub(1),
+            hi.z.saturating_sub(1),
+        );
+        let min_block = crate::storage::voxel_data_map::VoxelDataMap::voxel_to_block_b(
+            lo,
+            data.block_size_po2(),
+        );
+        let max_block = crate::storage::voxel_data_map::VoxelDataMap::voxel_to_block_b(
+            last,
+            data.block_size_po2(),
+        );
+        let mut z = min_block.z;
+        while z <= max_block.z {
+            let mut y = min_block.y;
+            while y <= max_block.y {
+                let mut x = min_block.x;
+                while x <= max_block.x {
+                    let block_pos = Vector3i::new(x, y, z);
+                    if let Some(block) = data.block_snapshot(block_pos, 0) {
+                        if block.has_voxels() {
+                            let origin = Vector3i::new(
+                                block_pos.x.saturating_mul(block_size),
+                                block_pos.y.saturating_mul(block_size),
+                                block_pos.z.saturating_mul(block_size),
+                            );
+                            block.voxels().for_each_voxel_metadata(|local, value| {
+                                let world = origin + local;
+                                if world.x >= lo.x
+                                    && world.y >= lo.y
+                                    && world.z >= lo.z
+                                    && world.x < hi.x
+                                    && world.y < hi.y
+                                    && world.z < hi.z
+                                {
+                                    visit(world, value);
+                                }
+                            });
+                        }
+                    }
+                    x = match x.checked_add(1) {
+                        Some(next) => next,
+                        None => break,
+                    };
+                }
+                y = match y.checked_add(1) {
+                    Some(next) => next,
+                    None => break,
+                };
+            }
+            z = match z.checked_add(1) {
+                Some(next) => next,
+                None => break,
+            };
+        }
+    }
+
+    /// Paste `src` into the volume so `src(0,0,0)` lands at `origin`.
+    /// `channel_mask` is a bitset of channels to copy.
+    pub fn try_paste(
+        &mut self,
+        origin: Vector3i,
+        src: &crate::storage::VoxelBuffer,
+        channel_mask: u8,
+    ) -> Result<u32, VoxelTerrainRuntimeError> {
+        if channel_mask == 0 {
+            return Ok(0);
+        }
+        let size = src.size();
+        if size.x <= 0 || size.y <= 0 || size.z <= 0 {
+            return Ok(0);
+        }
+        let max = Vector3i::new(
+            origin.x.saturating_add(size.x.saturating_sub(1)),
+            origin.y.saturating_add(size.y.saturating_sub(1)),
+            origin.z.saturating_add(size.z.saturating_sub(1)),
+        );
+        self.try_edit_overlapping_blocks(origin, max, |buffer, block_origin| {
+            buffer.paste(src, Vector3i::zero(), origin - block_origin, channel_mask);
+        })
+    }
+
+    fn try_edit_overlapping_blocks(
+        &mut self,
+        min: Vector3i,
+        max: Vector3i,
+        mut apply: impl FnMut(&mut crate::storage::VoxelBuffer, Vector3i),
+    ) -> Result<u32, VoxelTerrainRuntimeError> {
+        if self.shutdown_epoch.is_some() {
+            return Err(VoxelTerrainRuntimeError::ShutdownRetryPending);
+        }
+        let block_size = self.data_block_size();
+        if block_size <= 0 {
+            return Ok(0);
+        }
+        let min_block = Vector3i::new(
+            min.x.div_euclid(block_size),
+            min.y.div_euclid(block_size),
+            min.z.div_euclid(block_size),
+        );
+        let max_block = Vector3i::new(
+            max.x.div_euclid(block_size),
+            max.y.div_euclid(block_size),
+            max.z.div_euclid(block_size),
+        );
+        let mut edited = 0u32;
+        let mut z = min_block.z;
+        while z <= max_block.z {
+            let mut y = min_block.y;
+            while y <= max_block.y {
+                let mut x = min_block.x;
+                while x <= max_block.x {
+                    let block_pos = Vector3i::new(x, y, z);
+                    if self
+                        .try_edit_lod0_block(block_pos, |buffer, origin| apply(buffer, origin))?
+                        .is_some()
+                    {
+                        edited = edited.saturating_add(1);
+                    }
+                    x = match x.checked_add(1) {
+                        Some(next) => next,
+                        None => break,
+                    };
+                }
+                y = match y.checked_add(1) {
+                    Some(next) => next,
+                    None => break,
+                };
+            }
+            z = match z.checked_add(1) {
+                Some(next) => next,
+                None => break,
+            };
+        }
+        Ok(edited)
+    }
+
+    fn try_edit_lod0_block(
+        &mut self,
+        block_position: Vector3i,
+        apply: impl FnOnce(&mut crate::storage::VoxelBuffer, Vector3i),
+    ) -> Result<Option<VoxelEditOutcome>, VoxelTerrainRuntimeError> {
+        if self.shutdown_epoch.is_some() {
+            return Err(VoxelTerrainRuntimeError::ShutdownRetryPending);
+        }
+        let Some(prepared_edit) = self
+            .data
+            .prepare_lod0_block_edit(block_position, apply)
+            .map_err(map_voxel_edit_storage_error)?
+        else {
+            return Ok(None);
+        };
+        let block_size = self.data_block_size();
+        let origin = Vector3i::new(
+            block_position.x.saturating_mul(block_size),
+            block_position.y.saturating_mul(block_size),
+            block_position.z.saturating_mul(block_size),
+        );
+        let far = Vector3i::new(
+            origin.x.saturating_add(block_size.saturating_sub(1)),
+            origin.y.saturating_add(block_size.saturating_sub(1)),
+            origin.z.saturating_add(block_size.saturating_sub(1)),
+        );
+        let Some(publication) =
+            self.finish_prepared_edit_publication(prepared_edit, origin, far)?
+        else {
+            return Ok(None);
+        };
+        self.commit_prepared_voxel_edit(publication).map(Some)
+    }
+
     fn prepare_voxel_edit_publication(
         &mut self,
         value: u64,
         position: Vector3i,
         channel_index: usize,
     ) -> Result<Option<PreparedVoxelEditPublication>, VoxelTerrainRuntimeError> {
-        let Some(mut prepared_edit) = self
+        let Some(prepared_edit) = self
             .data
             .prepare_voxel_edit(value, position, channel_index)
             .map_err(map_voxel_edit_storage_error)?
         else {
             return Ok(None);
         };
+        self.finish_prepared_edit_publication(prepared_edit, position, position)
+    }
+
+    fn finish_prepared_edit_publication(
+        &mut self,
+        mut prepared_edit: crate::storage::voxel_data::PreparedSharedVoxelDataEdit,
+        edit_min: Vector3i,
+        edit_max: Vector3i,
+    ) -> Result<Option<PreparedVoxelEditPublication>, VoxelTerrainRuntimeError> {
         let edited_block = prepared_edit.edited_block();
         let block_revision = prepared_edit.block_revision();
         let mut inserted_data_locations = Vec::new();
@@ -3483,8 +4046,9 @@ impl VoxelTerrainCore {
         let mut next_request_generation = self.next_request_generation;
         let mut next_mesh_revision = self.next_mesh_revision;
         for (lod_index, queue_additions) in queue_additions.iter_mut().enumerate() {
-            let (minimum, maximum, candidate_count) = checked_edit_mesh_block_bounds(
-                position,
+            let (minimum, maximum, candidate_count) = checked_edit_mesh_block_bounds_span(
+                edit_min,
+                edit_max,
                 mesher.minimum_padding(),
                 mesher.maximum_padding(),
                 self.data_block_size(),
@@ -3829,6 +4393,84 @@ impl VoxelTerrainCore {
     /// Number of LOD levels.
     pub fn lod_count(&self) -> u8 {
         self.lod_count
+    }
+
+    /// Snapshot of boxes a debug overlay can draw. Clipbox streaming has no
+    /// legacy octree, so "octree nodes" are the resident mesh blocks (leaves).
+    pub fn debug_snapshot(&self) -> TerrainDebugSnapshot {
+        const MAX_ITEMS: usize = 4_096;
+        let mesh_block_size = i32::try_from(self.data.block_size()).unwrap_or(16);
+        let lod_count = self.lod_count;
+        let mut mesh_blocks = Vec::new();
+        for lod in 0..lod_count {
+            if (lod as usize) >= self.mesh_maps.len() {
+                break;
+            }
+            for (position, entry) in &self.mesh_maps[lod as usize] {
+                if mesh_blocks.len() >= MAX_ITEMS {
+                    break;
+                }
+                mesh_blocks.push(DebugMeshBlock {
+                    position: *position,
+                    lod,
+                    visual_active: entry.visual_active,
+                    collision_active: entry.collision_active,
+                    is_loaded: entry.is_loaded,
+                });
+            }
+        }
+        let mut viewer_mesh_boxes = Vec::new();
+        for viewer in &self.paired_viewers {
+            for (lod, mesh_box) in viewer.state.mesh_box_per_lod.iter().enumerate() {
+                if mesh_box.size.x <= 0 || mesh_box.size.y <= 0 || mesh_box.size.z <= 0 {
+                    continue;
+                }
+                viewer_mesh_boxes.push((lod as u8, *mesh_box));
+            }
+        }
+        let mut edited_blocks = Vec::new();
+        let mut metadata_voxels = Vec::new();
+        for lod in 0..self.data.lod_count() {
+            self.data.with_lod_map(lod, |map| {
+                let positions: Vec<_> = map.block_positions().collect();
+                for position in positions {
+                    let Some(block) = map.get_block(position) else {
+                        continue;
+                    };
+                    if block.is_edited() && edited_blocks.len() < MAX_ITEMS {
+                        edited_blocks.push(DebugEditedBlock {
+                            position,
+                            lod: lod as u8,
+                            modified: block.is_modified(),
+                        });
+                    }
+                    if lod == 0 && block.has_voxels() && metadata_voxels.len() < MAX_ITEMS {
+                        let origin = Vector3i::new(
+                            position.x.saturating_mul(mesh_block_size),
+                            position.y.saturating_mul(mesh_block_size),
+                            position.z.saturating_mul(mesh_block_size),
+                        );
+                        block.voxels().for_each_voxel_metadata(|local, _| {
+                            if metadata_voxels.len() < MAX_ITEMS {
+                                metadata_voxels.push(origin + local);
+                            }
+                        });
+                    }
+                }
+            });
+        }
+        TerrainDebugSnapshot {
+            volume_bounds: self.data.bounds(),
+            mesh_block_size,
+            lod_count,
+            data_block_count: (0..self.data.lod_count())
+                .map(|lod| self.data.with_lod_map(lod, |map| map.block_count()))
+                .sum(),
+            mesh_blocks,
+            viewer_mesh_boxes,
+            edited_blocks,
+            metadata_voxels,
+        }
     }
 
     /// Cumulative terrain statistics (blocks loaded/unloaded, meshes built/dropped).
@@ -15875,6 +16517,65 @@ fn compute_viewer_boxes_multi_lod(state: &mut ViewerState, data_block_size: i32,
 
 fn floor_div_vec(v: Vector3i, b: i32) -> Vector3i {
     Vector3i::new(v.x.div_euclid(b), v.y.div_euclid(b), v.z.div_euclid(b))
+}
+
+fn checked_edit_mesh_block_bounds_span(
+    edit_min: Vector3i,
+    edit_max: Vector3i,
+    minimum_padding: u32,
+    maximum_padding: u32,
+    data_block_size: i32,
+    lod_index: usize,
+) -> Result<(Vector3i, Vector3i, usize), VoxelTerrainRuntimeError> {
+    let (min_a, max_a, _) = checked_edit_mesh_block_bounds(
+        edit_min,
+        minimum_padding,
+        maximum_padding,
+        data_block_size,
+        lod_index,
+    )?;
+    if edit_min == edit_max {
+        let count = block_span_count(min_a, max_a)?;
+        return Ok((min_a, max_a, count));
+    }
+    let (min_b, max_b, _) = checked_edit_mesh_block_bounds(
+        edit_max,
+        minimum_padding,
+        maximum_padding,
+        data_block_size,
+        lod_index,
+    )?;
+    let minimum = Vector3i::new(
+        min_a.x.min(min_b.x),
+        min_a.y.min(min_b.y),
+        min_a.z.min(min_b.z),
+    );
+    let maximum = Vector3i::new(
+        max_a.x.max(max_b.x),
+        max_a.y.max(max_b.y),
+        max_a.z.max(max_b.z),
+    );
+    let count = block_span_count(minimum, maximum)?;
+    Ok((minimum, maximum, count))
+}
+
+fn block_span_count(
+    minimum: Vector3i,
+    maximum: Vector3i,
+) -> Result<usize, VoxelTerrainRuntimeError> {
+    let axis_count = |min: i32, max: i32| {
+        i64::from(max)
+            .checked_sub(i64::from(min))?
+            .checked_add(1)
+            .and_then(|count| usize::try_from(count).ok())
+    };
+    axis_count(minimum.x, maximum.x)
+        .and_then(|x| {
+            axis_count(minimum.y, maximum.y).and_then(|y| {
+                axis_count(minimum.z, maximum.z).and_then(|z| x.checked_mul(y)?.checked_mul(z))
+            })
+        })
+        .ok_or(VoxelTerrainRuntimeError::CoordinateOverflow)
 }
 
 fn checked_edit_mesh_block_bounds(

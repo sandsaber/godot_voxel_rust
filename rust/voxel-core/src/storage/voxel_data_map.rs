@@ -225,6 +225,12 @@ impl VoxelDataMap {
         self.blocks.try_reserve(additional)
     }
 
+    /// Public wrapper used by the terrain data view for replication
+    /// ordering; returns the raw counter (0 for keys never seen).
+    pub fn key_revision_public(&self, block_pos: Vector3i) -> u64 {
+        self.key_revision(block_pos)
+    }
+
     pub(crate) fn key_revision(&self, block_pos: Vector3i) -> u64 {
         self.key_revisions.get(&block_pos).copied().unwrap_or(0)
     }

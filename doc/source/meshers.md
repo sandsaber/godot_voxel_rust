@@ -107,6 +107,8 @@ standalone `build_vertex_count` helper still builds with defaults.)
 | Method | Notes |
 |---|---|
 | `add_solid_model(r, g, b)` | Append a solid-color model, returns its index. |
+| `add_model(model)` | Append a `VoxelBlockyModel` / `VoxelBlockyModelCube` and keep the resource. |
+| `get_model(index)` | The resource previously passed to `add_model` / `add_solid_model`, or `null`. |
 | `get_model_count()` | Number of models. |
 | `is_empty()` | Whether the library has no models. |
 

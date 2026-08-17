@@ -234,6 +234,19 @@ pub enum NodeKind {
     /// Output sink: writes its single input into the SDF channel of the
     /// destination `VoxelBuffer`. Treated as a leaf in topological order.
     OutputSdf { a: Option<GraphPort> },
+    /// Sample a 2D image at `(x, y)` with bilinear interpolation.
+    Image2D {
+        x: Option<GraphPort>,
+        y: Option<GraphPort>,
+        image: std::sync::Arc<crate::generators::graph::image::Image2D>,
+    },
+    /// Evaluate a parsed expression with `x`/`y`/`z` bound to the three ports.
+    Expression {
+        x: Option<GraphPort>,
+        y: Option<GraphPort>,
+        z: Option<GraphPort>,
+        expr: std::sync::Arc<crate::generators::graph::expression_node::ExpressionNode>,
+    },
 }
 
 impl NodeKind {
@@ -282,6 +295,8 @@ impl NodeKind {
             | NodeKind::SdfSmoothUnion { a, b, .. }
             | NodeKind::SdfSmoothSubtract { a, b, .. } => vec![*a, *b],
             NodeKind::OutputSdf { a } => vec![*a],
+            NodeKind::Image2D { x, y, .. } => vec![*x, *y],
+            NodeKind::Expression { x, y, z, .. } => vec![*x, *y, *z],
         }
     }
 
@@ -359,6 +374,11 @@ impl Graph {
         let id = self.nodes.iter().map(|n| n.id + 1).max().unwrap_or(0);
         self.add_node(GraphNode::new(id, kind));
         id
+    }
+
+    /// Remove every node. Used by the Godot `clear_graph` binding.
+    pub fn clear(&mut self) {
+        self.nodes.clear();
     }
 
     /// Returns the ids in topological order (producers before consumers).
@@ -716,6 +736,30 @@ impl Graph {
                     });
                     scratch.put(id, r);
                 }
+                NodeKind::Image2D { x, y, image } => {
+                    let image = image.clone();
+                    let r: Vec<f32> = (0..slice_size)
+                        .map(|i| {
+                            image.sample_bilinear(
+                                value_at(scratch, x, i, 0.0),
+                                value_at(scratch, y, i, 0.0),
+                            )
+                        })
+                        .collect();
+                    scratch.put(id, r);
+                }
+                NodeKind::Expression { x, y, z, expr } => {
+                    let xs: Vec<f32> = (0..slice_size)
+                        .map(|i| value_at(scratch, x, i, 0.0))
+                        .collect();
+                    let ys: Vec<f32> = (0..slice_size)
+                        .map(|i| value_at(scratch, y, i, 0.0))
+                        .collect();
+                    let zs: Vec<f32> = (0..slice_size)
+                        .map(|i| value_at(scratch, z, i, 0.0))
+                        .collect();
+                    scratch.put(id, expr.evaluate_slice(&[&xs, &ys, &zs]));
+                }
                 NodeKind::OutputSdf { a } => {
                     let r = monop(scratch, a, slice_size, |v| v);
                     outputs.push((GraphOutput::Sdf, r));
@@ -725,6 +769,422 @@ impl Graph {
 
         Ok(())
     }
+}
+
+/// Convert a possibly-negative script port id into a [`GraphPort`].
+/// Negative ids mean "unconnected" and become `None`.
+pub fn optional_graph_port(id: i64) -> Option<GraphPort> {
+    u32::try_from(id).ok().map(GraphPort::new)
+}
+
+/// Build a [`NodeKind`] from the compact Godot `add_node(kind, a, b, c, d, value)`
+/// contract documented in `doc/source/generators.md`.
+pub fn node_kind_from_spec(
+    kind: &str,
+    a: i64,
+    b: i64,
+    c: i64,
+    d: i64,
+    value: f32,
+) -> Option<NodeKind> {
+    let pa = optional_graph_port(a);
+    let pb = optional_graph_port(b);
+    let pc = optional_graph_port(c);
+    let pd = optional_graph_port(d);
+    Some(match kind {
+        "InputX" => NodeKind::InputX,
+        "InputY" => NodeKind::InputY,
+        "InputZ" => NodeKind::InputZ,
+        "Constant" => NodeKind::Constant(value),
+        "Add" => NodeKind::Add { a: pa, b: pb },
+        "Subtract" => NodeKind::Subtract { a: pa, b: pb },
+        "Multiply" => NodeKind::Multiply { a: pa, b: pb },
+        "Divide" => NodeKind::Divide { a: pa, b: pb },
+        "Min" => NodeKind::Min { a: pa, b: pb },
+        "Max" => NodeKind::Max { a: pa, b: pb },
+        "Sin" => NodeKind::Sin { a: pa },
+        "Cos" => NodeKind::Cos { a: pa },
+        "Abs" => NodeKind::Abs { a: pa },
+        "Sqrt" => NodeKind::Sqrt { a: pa },
+        "Floor" => NodeKind::Floor { a: pa },
+        "Fract" => NodeKind::Fract { a: pa },
+        "Pow" => NodeKind::Pow { a: pa, b: pb },
+        "Mix" => NodeKind::Mix {
+            a: pa,
+            b: pb,
+            t: pc,
+        },
+        "Clamp" => NodeKind::Clamp {
+            a: pa,
+            min_v: pb,
+            max_v: pc,
+        },
+        "SdfPlane" => NodeKind::SdfPlane { y: pa, height: pb },
+        "SdfSphere" => NodeKind::SdfSphere {
+            x: pa,
+            y: pb,
+            z: pc,
+            radius: pd,
+        },
+        "SdfBox" => NodeKind::SdfBox {
+            x: pa,
+            y: pb,
+            z: pc,
+            size_x: value,
+            size_y: value,
+            size_z: value,
+        },
+        "SdfUnion" => NodeKind::SdfUnion { a: pa, b: pb },
+        "SdfSubtract" => NodeKind::SdfSubtract { a: pa, b: pb },
+        "SdfSmoothUnion" => NodeKind::SdfSmoothUnion {
+            a: pa,
+            b: pb,
+            smoothness: value,
+        },
+        "SdfSmoothSubtract" => NodeKind::SdfSmoothSubtract {
+            a: pa,
+            b: pb,
+            smoothness: value,
+        },
+        "Noise2D" => NodeKind::Noise2D {
+            x: pa,
+            y: pb,
+            noise: crate::generators::simple::NoiseConfig::default(),
+        },
+        "Noise3D" => NodeKind::Noise3D {
+            x: pa,
+            y: pb,
+            z: pc,
+            noise: crate::generators::simple::NoiseConfig::default(),
+        },
+        "OutputSdf" => NodeKind::OutputSdf { a: pa },
+        // Image2D round-trip: the pixel data is lost (only ports and a 1×1
+        // fill survive the compact spec) — same limitation as Expression's
+        // text field being carried separately via `expr`.
+        "Image2D" => NodeKind::Image2D {
+            x: pa,
+            y: pb,
+            image: std::sync::Arc::new(crate::generators::graph::image::Image2D::new_filled(
+                1, 1, value,
+            )),
+        },
+        _ => return None,
+    })
+}
+
+/// Compact interchange fields for one graph node.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NodeSpec {
+    pub kind: String,
+    pub a: i64,
+    pub b: i64,
+    pub c: i64,
+    pub d: i64,
+    pub value: f32,
+    pub expr: Option<String>,
+}
+
+fn port_id(port: Option<GraphPort>) -> i64 {
+    port.map(|port| i64::from(port.node)).unwrap_or(-1)
+}
+
+/// Reverse of [`node_kind_from_spec`] for JSON / visual-editor interchange.
+pub fn node_kind_to_spec(kind: &NodeKind) -> NodeSpec {
+    let unset = NodeSpec {
+        kind: String::new(),
+        a: -1,
+        b: -1,
+        c: -1,
+        d: -1,
+        value: 0.0,
+        expr: None,
+    };
+    match kind {
+        NodeKind::InputX => NodeSpec {
+            kind: "InputX".into(),
+            ..unset
+        },
+        NodeKind::InputY => NodeSpec {
+            kind: "InputY".into(),
+            ..unset
+        },
+        NodeKind::InputZ => NodeSpec {
+            kind: "InputZ".into(),
+            ..unset
+        },
+        NodeKind::Constant(value) => NodeSpec {
+            kind: "Constant".into(),
+            value: *value,
+            ..unset
+        },
+        NodeKind::Add { a, b } => NodeSpec {
+            kind: "Add".into(),
+            a: port_id(*a),
+            b: port_id(*b),
+            ..unset
+        },
+        NodeKind::Subtract { a, b } => NodeSpec {
+            kind: "Subtract".into(),
+            a: port_id(*a),
+            b: port_id(*b),
+            ..unset
+        },
+        NodeKind::Multiply { a, b } => NodeSpec {
+            kind: "Multiply".into(),
+            a: port_id(*a),
+            b: port_id(*b),
+            ..unset
+        },
+        NodeKind::Divide { a, b } => NodeSpec {
+            kind: "Divide".into(),
+            a: port_id(*a),
+            b: port_id(*b),
+            ..unset
+        },
+        NodeKind::Min { a, b } => NodeSpec {
+            kind: "Min".into(),
+            a: port_id(*a),
+            b: port_id(*b),
+            ..unset
+        },
+        NodeKind::Max { a, b } => NodeSpec {
+            kind: "Max".into(),
+            a: port_id(*a),
+            b: port_id(*b),
+            ..unset
+        },
+        NodeKind::Sin { a } => NodeSpec {
+            kind: "Sin".into(),
+            a: port_id(*a),
+            ..unset
+        },
+        NodeKind::Cos { a } => NodeSpec {
+            kind: "Cos".into(),
+            a: port_id(*a),
+            ..unset
+        },
+        NodeKind::Abs { a } => NodeSpec {
+            kind: "Abs".into(),
+            a: port_id(*a),
+            ..unset
+        },
+        NodeKind::Sqrt { a } => NodeSpec {
+            kind: "Sqrt".into(),
+            a: port_id(*a),
+            ..unset
+        },
+        NodeKind::Floor { a } => NodeSpec {
+            kind: "Floor".into(),
+            a: port_id(*a),
+            ..unset
+        },
+        NodeKind::Fract { a } => NodeSpec {
+            kind: "Fract".into(),
+            a: port_id(*a),
+            ..unset
+        },
+        NodeKind::Pow { a, b } => NodeSpec {
+            kind: "Pow".into(),
+            a: port_id(*a),
+            b: port_id(*b),
+            ..unset
+        },
+        NodeKind::Mix { a, b, t } => NodeSpec {
+            kind: "Mix".into(),
+            a: port_id(*a),
+            b: port_id(*b),
+            c: port_id(*t),
+            ..unset
+        },
+        NodeKind::Clamp { a, min_v, max_v } => NodeSpec {
+            kind: "Clamp".into(),
+            a: port_id(*a),
+            b: port_id(*min_v),
+            c: port_id(*max_v),
+            ..unset
+        },
+        NodeKind::SdfPlane { y, height } => NodeSpec {
+            kind: "SdfPlane".into(),
+            a: port_id(*y),
+            b: port_id(*height),
+            ..unset
+        },
+        NodeKind::SdfSphere { x, y, z, radius } => NodeSpec {
+            kind: "SdfSphere".into(),
+            a: port_id(*x),
+            b: port_id(*y),
+            c: port_id(*z),
+            d: port_id(*radius),
+            ..unset
+        },
+        NodeKind::SdfBox {
+            x, y, z, size_x, ..
+        } => NodeSpec {
+            kind: "SdfBox".into(),
+            a: port_id(*x),
+            b: port_id(*y),
+            c: port_id(*z),
+            value: *size_x,
+            ..unset
+        },
+        NodeKind::SdfUnion { a, b } => NodeSpec {
+            kind: "SdfUnion".into(),
+            a: port_id(*a),
+            b: port_id(*b),
+            ..unset
+        },
+        NodeKind::SdfSubtract { a, b } => NodeSpec {
+            kind: "SdfSubtract".into(),
+            a: port_id(*a),
+            b: port_id(*b),
+            ..unset
+        },
+        NodeKind::SdfSmoothUnion { a, b, smoothness } => NodeSpec {
+            kind: "SdfSmoothUnion".into(),
+            a: port_id(*a),
+            b: port_id(*b),
+            value: *smoothness,
+            ..unset
+        },
+        NodeKind::SdfSmoothSubtract { a, b, smoothness } => NodeSpec {
+            kind: "SdfSmoothSubtract".into(),
+            a: port_id(*a),
+            b: port_id(*b),
+            value: *smoothness,
+            ..unset
+        },
+        NodeKind::Noise2D { x, y, .. } => NodeSpec {
+            kind: "Noise2D".into(),
+            a: port_id(*x),
+            b: port_id(*y),
+            ..unset
+        },
+        NodeKind::Noise3D { x, y, z, .. } => NodeSpec {
+            kind: "Noise3D".into(),
+            a: port_id(*x),
+            b: port_id(*y),
+            c: port_id(*z),
+            ..unset
+        },
+        NodeKind::OutputSdf { a } => NodeSpec {
+            kind: "OutputSdf".into(),
+            a: port_id(*a),
+            ..unset
+        },
+        NodeKind::Image2D { x, y, .. } => NodeSpec {
+            kind: "Image2D".into(),
+            a: port_id(*x),
+            b: port_id(*y),
+            ..unset
+        },
+        NodeKind::Expression { x, y, z, expr } => NodeSpec {
+            kind: "Expression".into(),
+            a: port_id(*x),
+            b: port_id(*y),
+            c: port_id(*z),
+            expr: Some(expr.expression_text().to_owned()),
+            ..unset
+        },
+        NodeKind::Remap { a, to_end, .. } => NodeSpec {
+            kind: "Remap".into(),
+            a: port_id(*a),
+            value: *to_end,
+            ..unset
+        },
+        NodeKind::Distance2D { x0, y0, x1, y1 } => NodeSpec {
+            kind: "Distance2D".into(),
+            a: port_id(*x0),
+            b: port_id(*y0),
+            c: port_id(*x1),
+            d: port_id(*y1),
+            ..unset
+        },
+        NodeKind::Distance3D { x0, y0, z0, .. } => NodeSpec {
+            kind: "Distance3D".into(),
+            a: port_id(*x0),
+            b: port_id(*y0),
+            c: port_id(*z0),
+            ..unset
+        },
+        NodeKind::Normalize3D { x, y, z } => NodeSpec {
+            kind: "Normalize3D".into(),
+            a: port_id(*x),
+            b: port_id(*y),
+            c: port_id(*z),
+            ..unset
+        },
+        NodeKind::SdfTorus { x, y, z, r1, .. } => NodeSpec {
+            kind: "SdfTorus".into(),
+            a: port_id(*x),
+            b: port_id(*y),
+            c: port_id(*z),
+            value: *r1,
+            ..unset
+        },
+        NodeKind::Curve { a, .. } => NodeSpec {
+            kind: "Curve".into(),
+            a: port_id(*a),
+            ..unset
+        },
+    }
+}
+
+fn json_escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Serialize a graph to the compact interchange consumed by `set_graph_json`.
+pub fn graph_to_json(graph: &Graph) -> String {
+    let mut out = String::from("{\"nodes\":[");
+    for (index, node) in graph.nodes().iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        let spec = node_kind_to_spec(&node.kind);
+        out.push_str("{\"id\":");
+        out.push_str(&node.id.to_string());
+        out.push_str(",\"kind\":\"");
+        out.push_str(&spec.kind);
+        out.push('"');
+        if spec.a >= 0 {
+            out.push_str(",\"a\":");
+            out.push_str(&spec.a.to_string());
+        }
+        if spec.b >= 0 {
+            out.push_str(",\"b\":");
+            out.push_str(&spec.b.to_string());
+        }
+        if spec.c >= 0 {
+            out.push_str(",\"c\":");
+            out.push_str(&spec.c.to_string());
+        }
+        if spec.d >= 0 {
+            out.push_str(",\"d\":");
+            out.push_str(&spec.d.to_string());
+        }
+        if spec.value != 0.0 {
+            out.push_str(",\"value\":");
+            out.push_str(&spec.value.to_string());
+        }
+        if let Some(expr) = spec.expr.as_ref() {
+            out.push_str(",\"expr\":\"");
+            out.push_str(&json_escape(expr));
+            out.push('"');
+        }
+        out.push('}');
+    }
+    out.push_str("]}");
+    out
 }
 
 /// Compiled, analysis-cached form of a [`Graph`] (audit §9.6-C1).
@@ -925,6 +1385,7 @@ impl CompiledGraph {
                 // Curve/Noise — non-monotone; conservative.
                 NodeKind::Curve { .. } => inf,
                 NodeKind::Noise2D { .. } | NodeKind::Noise3D { .. } => inf,
+                NodeKind::Image2D { .. } | NodeKind::Expression { .. } => inf,
                 // SDF nodes: easy ones compose from interval primitives.
                 NodeKind::SdfPlane { y, height } => resolve(&ranges, y) - resolve(&ranges, height),
                 NodeKind::SdfBox { .. } | NodeKind::SdfTorus { .. } => inf,
@@ -1324,6 +1785,23 @@ impl CompiledGraph {
                     })
                     .collect(),
             ),
+            NodeKind::Image2D { x, y, image } => {
+                let image = image.clone();
+                scratch.set(
+                    node_index,
+                    (0..slice_size)
+                        .map(|i| {
+                            image.sample_bilinear(self.val(scratch, x, i), self.val(scratch, y, i))
+                        })
+                        .collect(),
+                );
+            }
+            NodeKind::Expression { x, y, z, expr } => {
+                let xs: Vec<f32> = (0..slice_size).map(|i| self.val(scratch, x, i)).collect();
+                let ys: Vec<f32> = (0..slice_size).map(|i| self.val(scratch, y, i)).collect();
+                let zs: Vec<f32> = (0..slice_size).map(|i| self.val(scratch, z, i)).collect();
+                scratch.set(node_index, expr.evaluate_slice(&[&xs, &ys, &zs]));
+            }
             NodeKind::OutputSdf { a } => {
                 let data: Vec<f32> = (0..slice_size).map(|i| self.val(scratch, a, i)).collect();
                 scratch.set(node_index, data);
@@ -1492,6 +1970,93 @@ mod tests {
     }
 
     // ---- C1: CompiledGraph tests (audit §9.6-C1) ----
+
+    #[test]
+    fn expression_and_image2d_nodes_evaluate() {
+        use crate::generators::graph::expression_node::ExpressionNode;
+        use crate::generators::graph::image::Image2D;
+
+        let mut g = Graph::new();
+        let x = g.push(NodeKind::InputX);
+        let expr = ExpressionNode::new("x * 2", &[("x", 0), ("y", 1), ("z", 2)]).unwrap();
+        let e = g.push(NodeKind::Expression {
+            x: Some(GraphPort::new(x)),
+            y: None,
+            z: None,
+            expr: std::sync::Arc::new(expr),
+        });
+        g.push(NodeKind::OutputSdf {
+            a: Some(GraphPort::new(e)),
+        });
+        let compiled = CompiledGraph::compile(&g).expect("compile expression");
+        let xs = [3.0f32];
+        let zs = [0.0f32];
+        let inputs = GraphInputs {
+            x: &xs,
+            y: 0.0,
+            z: &zs,
+        };
+        let mut scratch = CompiledScratch::new();
+        let mut out = Vec::new();
+        compiled.generate_slice(&inputs, 1, &mut scratch, &mut out, false);
+        let sdf = out
+            .into_iter()
+            .find(|(k, _)| *k == GraphOutput::Sdf)
+            .and_then(|(_, v)| v.into_iter().next())
+            .unwrap();
+        assert!((sdf - 6.0).abs() < 1e-5, "expression x*2 at x=3, got {sdf}");
+
+        let mut g2 = Graph::new();
+        let ix = g2.push(NodeKind::InputX);
+        let iy = g2.push(NodeKind::InputY);
+        let img = Image2D::from_data(2, 2, vec![0.0, 1.0, 2.0, 3.0]);
+        let sample = g2.push(NodeKind::Image2D {
+            x: Some(GraphPort::new(ix)),
+            y: Some(GraphPort::new(iy)),
+            image: std::sync::Arc::new(img),
+        });
+        g2.push(NodeKind::OutputSdf {
+            a: Some(GraphPort::new(sample)),
+        });
+        assert!(CompiledGraph::compile(&g2).is_ok());
+    }
+
+    #[test]
+    fn graph_to_json_round_trips_through_from_spec() {
+        let mut graph = Graph::new();
+        let x = graph.push(NodeKind::InputX);
+        let c = graph.push(NodeKind::Constant(2.5));
+        graph.push(NodeKind::Add {
+            a: Some(GraphPort::new(x)),
+            b: Some(GraphPort::new(c)),
+        });
+        let json = graph_to_json(&graph);
+        assert!(json.contains("\"kind\":\"InputX\""));
+        assert!(json.contains("\"kind\":\"Constant\""));
+        assert!(json.contains("\"value\":2.5"));
+        assert!(json.contains("\"kind\":\"Add\""));
+    }
+
+    #[test]
+    fn node_kind_from_spec_builds_documented_kinds() {
+        assert!(matches!(
+            node_kind_from_spec("InputX", -1, -1, -1, -1, 0.0),
+            Some(NodeKind::InputX)
+        ));
+        assert!(matches!(
+            node_kind_from_spec("Constant", -1, -1, -1, -1, 4.5),
+            Some(NodeKind::Constant(v)) if v == 4.5
+        ));
+        assert!(matches!(
+            node_kind_from_spec("SdfSphere", 0, 1, 2, 3, 0.0),
+            Some(NodeKind::SdfSphere { .. })
+        ));
+        assert!(matches!(
+            node_kind_from_spec("OutputSdf", 4, -1, -1, -1, 0.0),
+            Some(NodeKind::OutputSdf { .. })
+        ));
+        assert!(node_kind_from_spec("NotANode", -1, -1, -1, -1, 0.0).is_none());
+    }
 
     #[test]
     fn compiled_graph_topological_order_matches_lazy() {

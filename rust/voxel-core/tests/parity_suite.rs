@@ -14057,6 +14057,7 @@ mod random_tick_parity {
             1,
             ChannelId::Type.index(),
             10,
+            7,
             |pos| ticked.push(pos),
         );
 
@@ -14085,6 +14086,7 @@ mod random_tick_parity {
             1,
             ChannelId::Type.index(),
             10,
+            7,
             |_| count += 1,
         );
 
@@ -14107,6 +14109,7 @@ mod random_tick_parity {
             1,
             ChannelId::Type.index(),
             5, // batch_count
+            7,
             |_| count += 1,
         );
 

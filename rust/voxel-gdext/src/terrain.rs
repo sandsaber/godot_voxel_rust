@@ -599,6 +599,10 @@ pub struct VoxelTerrain {
     core: Option<VoxelTerrainCore>,
     mesh_instances: HashMap<MeshBlockRenderId, RenderedMeshBlock>,
     render_state: RenderState,
+    /// Monotonic counter bumped whenever a mesh block is created, updated,
+    /// or removed. The instancer uses it to detect terrain edits (remeshes
+    /// reuse the same mesh-block keys) and rescatter its instances.
+    mesh_revision: u64,
     generator_resource: Option<Gd<Resource>>,
     mesher_resource: Option<Gd<Resource>>,
     #[export]
@@ -642,13 +646,13 @@ pub struct VoxelTerrain {
     /// The pinned GDScript-facing `max_view_distance` property.
     #[var(get = get_max_view_distance, set = set_max_view_distance)]
     max_view_distance: PhantomVar<i32>,
-    /// The pinned GDScript-facing `collision_layer` property (stubbed).
+    /// The pinned GDScript-facing `collision_layer` property.
     #[var(get = get_collision_layer, set = set_collision_layer)]
     collision_layer: PhantomVar<i32>,
-    /// The pinned GDScript-facing `collision_mask` property (stubbed).
+    /// The pinned GDScript-facing `collision_mask` property.
     #[var(get = get_collision_mask, set = set_collision_mask)]
     collision_mask: PhantomVar<i32>,
-    /// The pinned GDScript-facing `collision_margin` property (stubbed).
+    /// The pinned GDScript-facing `collision_margin` property.
     #[var(get = get_collision_margin, set = set_collision_margin)]
     collision_margin: PhantomVar<f32>,
     /// The pinned GDScript-facing read-only `mesh_block_size` property.
@@ -690,6 +694,7 @@ impl INode3D for VoxelTerrain {
             base,
             core: None,
             mesh_instances: HashMap::new(),
+            mesh_revision: 0,
             render_state: RenderState::default(),
             generator_resource: None,
             mesher_resource: None,
@@ -734,6 +739,12 @@ impl INode3D for VoxelTerrain {
     fn ready(&mut self) {
         if self.core.is_some() {
             godot_print!("VoxelTerrain ready — reusing retained terrain core");
+            return;
+        }
+        // Editor hint: the pinned `run_stream_in_editor` contract — without
+        // the opt-in, opening a scene in the editor must not page terrain
+        // or write stream files.
+        if godot::classes::Engine::singleton().is_editor_hint() && !self.run_stream_in_editor {
             return;
         }
 
@@ -788,6 +799,9 @@ impl INode3D for VoxelTerrain {
     }
 
     fn process(&mut self, _delta: f64) {
+        if self.core.is_none() {
+            return;
+        }
         let viewers = collect_child_viewers(
             self.base().get_children().iter_shared(),
             "VoxelTerrain",
@@ -795,6 +809,7 @@ impl INode3D for VoxelTerrain {
             self.generate_collision,
         );
 
+        let mut mesh_revision_delta = 0u64;
         let pending_ops = {
             let Some(core) = self.core.as_mut() else {
                 return;
@@ -810,6 +825,15 @@ impl INode3D for VoxelTerrain {
                     // `signals()` borrow, so re-acquire it per emit.
                     let data_block_size = core.data().block_size() as i32;
                     for event in &events {
+                        if matches!(
+                            event,
+                            voxel_core::terrain::voxel_terrain_core::VoxelTerrainEvent::MeshBlockEntered(_)
+                                | voxel_core::terrain::voxel_terrain_core::VoxelTerrainEvent::MeshBlockUpdated(_)
+                                | voxel_core::terrain::voxel_terrain_core::VoxelTerrainEvent::MeshBlockBecameEmpty(_)
+                                | voxel_core::terrain::voxel_terrain_core::VoxelTerrainEvent::MeshBlockExited(_)
+                        ) {
+                            mesh_revision_delta = mesh_revision_delta.wrapping_add(1);
+                        }
                         match event {
                             voxel_core::terrain::voxel_terrain_core::VoxelTerrainEvent::DataBlockLoaded(loc) => {
                                 let p = loc.position * data_block_size;
@@ -851,6 +875,7 @@ impl INode3D for VoxelTerrain {
             };
             reduce_render_events(&mut self.render_state, events)
         };
+        self.mesh_revision = self.mesh_revision.wrapping_add(mesh_revision_delta);
 
         // Godot nodes are mutated only after the terrain core borrow ends.
         for op in pending_ops {
@@ -920,6 +945,79 @@ mod stream_selection_tests {
         );
         assert!(raycast_step_count(MAX_RAYCAST_STEPS as f32 + 1.0).is_err());
         assert!(normalize_direction(f32::MAX, f32::MAX, f32::MAX).is_ok());
+    }
+
+    #[test]
+    fn collect_core_voxels_applies_cap_to_filtered_candidates() {
+        // Random-tick starvation regression: dense untickable material must
+        // not consume the scan cap before tickable voxels later in ZYX order
+        // are seen. Without a library a candidate is a non-zero voxel with
+        // (voxel & mask) != 0, so value=1 is filtered out by mask=2.
+        // The parity constructor auto-materializes edited blocks (no viewer
+        // residency setup needed), matching how the core's own edit tests
+        // drive `try_edit_voxel`.
+        let mut data = VoxelData::new();
+        data.set_bounds(voxel_core::math::Box3i::new(
+            Vector3i::splat(-1024),
+            Vector3i::splat(2048),
+        ));
+        data.set_streaming_enabled(false);
+        data.set_full_load_completed(true);
+        let mut core = VoxelTerrainCore::legacy_variable_lod_for_parity(
+            data,
+            Arc::new(MemoryStream::new()),
+            MeshingDependency::new(Arc::new(TransvoxelMesher::new()), None),
+            1,
+        );
+        let data = core.data();
+        let channel = ChannelId::Type.index();
+        let block_size = i32::try_from(data.block_size()).unwrap();
+        let origin = Vector3i::zero();
+
+        // Fill the first block with 100 "stone" voxels (bit 0) and place one
+        // tickable voxel (bit 1) at the far corner of the scan order.
+        let mut edits = 0;
+        for z in 0..5 {
+            for y in 0..5 {
+                for x in 0..4 {
+                    assert!(
+                        core.try_edit_voxel(
+                            1,
+                            Vector3i::new(origin.x + x, origin.y + y, origin.z + z),
+                            channel
+                        )
+                        .unwrap()
+                        .is_some(),
+                        "stone edit must materialize its block"
+                    );
+                    edits += 1;
+                }
+            }
+        }
+        let tickable = Vector3i::new(origin.x, origin.y + 7, origin.z + 7);
+        assert!(
+            core.try_edit_voxel(2, tickable, channel).unwrap().is_some(),
+            "tickable edit must materialize its block"
+        );
+        assert_eq!(edits, 100);
+
+        let mask = 2u64;
+        let collected = collect_core_voxels(
+            &core,
+            origin,
+            origin + Vector3i::splat(block_size - 1),
+            channel,
+            4,
+            |value| value != 0 && (value & mask) != 0,
+        );
+        // The cap (4) applies to candidates: the untickable stone never
+        // takes a slot, and the single tickable voxel is found regardless of
+        // scan order.
+        assert_eq!(
+            collected,
+            vec![(tickable, 2)],
+            "cap must bound candidates, not the pre-filter scan"
+        );
     }
 
     #[test]
@@ -996,6 +1094,39 @@ mod stream_selection_tests {
                 collisions: true,
             }
         );
+    }
+
+    #[test]
+    fn viewer_mesh_demand_honors_per_viewer_flags() {
+        assert_eq!(
+            viewer_mesh_demand(true, false, true),
+            MeshDemand {
+                visuals: false,
+                collisions: true,
+            }
+        );
+        assert_eq!(
+            viewer_mesh_demand(true, true, false),
+            MeshDemand {
+                visuals: true,
+                collisions: false,
+            }
+        );
+        assert_eq!(
+            viewer_mesh_demand(false, true, true),
+            MeshDemand {
+                visuals: true,
+                collisions: false,
+            }
+        );
+    }
+
+    #[test]
+    fn viewer_vertical_distance_applies_ratio() {
+        assert_eq!(viewer_vertical_distance(100, 0.5), 50);
+        assert_eq!(viewer_vertical_distance(100, 2.0), 200);
+        assert_eq!(viewer_vertical_distance(100, f32::NAN), 100);
+        assert_eq!(viewer_vertical_distance(-4, 2.0), 0);
     }
 }
 
@@ -1685,10 +1816,167 @@ pub(crate) fn clamp_view_distance(distance: i64) -> i32 {
     distance.clamp(0, i64::from(i32::MAX)) as i32
 }
 
+#[cfg(test)]
 pub(crate) const fn fixed_viewer_demand(generate_collision: bool) -> MeshDemand {
+    viewer_mesh_demand(generate_collision, true, true)
+}
+
+pub(crate) fn pack_mesh_block_locations(
+    ids: impl IntoIterator<Item = MeshBlockRenderId>,
+) -> PackedInt32Array {
+    let mut packed = PackedInt32Array::new();
+    for id in ids {
+        packed.push(id.position_in_blocks.x);
+        packed.push(id.position_in_blocks.y);
+        packed.push(id.position_in_blocks.z);
+        packed.push(i32::from(id.lod_index));
+    }
+    packed
+}
+
+pub(crate) fn surface_points_from_core(
+    core: &VoxelTerrainCore,
+    position: Vector3i,
+    block_size: i32,
+) -> (
+    Vec<voxel_core::math::Vector3f>,
+    Vec<voxel_core::math::Vector3f>,
+) {
+    let Some(block) = core.data().block_snapshot(position, 0) else {
+        return (Vec::new(), Vec::new());
+    };
+    if !block.has_voxels() {
+        return (Vec::new(), Vec::new());
+    }
+    let origin = voxel_core::math::Vector3f::new(
+        (position.x * block_size) as f32,
+        (position.y * block_size) as f32,
+        (position.z * block_size) as f32,
+    );
+    voxel_core::instancing::extract_surface_points(
+        block.voxels(),
+        origin,
+        voxel_core::storage::ChannelId::Type.index(),
+    )
+}
+
+/// Snapshot-read voxels in an inclusive world box. Used by paste/random-tick
+/// without taking a write transaction per cell.
+pub(crate) fn collect_core_voxels(
+    core: &VoxelTerrainCore,
+    min: Vector3i,
+    max: Vector3i,
+    channel: usize,
+    max_items: usize,
+    keep: impl Fn(u64) -> bool,
+) -> Vec<(Vector3i, u64)> {
+    if max_items == 0 || channel >= voxel_core::storage::voxel_buffer::MAX_CHANNELS {
+        return Vec::new();
+    }
+    let data = core.data();
+    let Ok(block_size) = i32::try_from(data.block_size()) else {
+        return Vec::new();
+    };
+    if block_size <= 0 {
+        return Vec::new();
+    }
+    // An inverted box is empty, not normalized — the same contract the
+    // metadata-area helpers pin. Normalizing would silently tick a swapped
+    // region for a caller that passed min/max in the wrong order.
+    if min.x > max.x || min.y > max.y || min.z > max.z {
+        return Vec::new();
+    }
+    let lo = min;
+    let hi = max;
+    let mut out = Vec::new();
+    let mut z = lo.z;
+    while z <= hi.z && out.len() < max_items {
+        let mut y = lo.y;
+        while y <= hi.y && out.len() < max_items {
+            let mut x = lo.x;
+            while x <= hi.x && out.len() < max_items {
+                let pos = Vector3i::new(x, y, z);
+                let block_pos = voxel_core::storage::voxel_data_map::VoxelDataMap::voxel_to_block_b(
+                    pos,
+                    data.block_size_po2(),
+                );
+                if let Some(block) = data.block_snapshot(block_pos, 0) {
+                    if block.has_voxels() {
+                        let raw = block.voxels().get_voxel(
+                            pos.x.rem_euclid(block_size),
+                            pos.y.rem_euclid(block_size),
+                            pos.z.rem_euclid(block_size),
+                            channel,
+                        );
+                        // The cap must apply to *candidates*: filtering
+                        // after a capped scan would let dense untickable
+                        // material starve later tickable voxels of slots.
+                        if raw != 0 && keep(raw) {
+                            out.push((pos, raw));
+                        }
+                    }
+                }
+                x = match x.checked_add(1) {
+                    Some(next) => next,
+                    None => break,
+                };
+            }
+            y = match y.checked_add(1) {
+                Some(next) => next,
+                None => break,
+            };
+        }
+        z = match z.checked_add(1) {
+            Some(next) => next,
+            None => break,
+        };
+    }
+    out
+}
+
+/// Combine the terrain-wide collision toggle with the viewer's own demand
+/// flags. A collision-only viewer (`requires_visuals = false`) must not force
+/// visual meshes; a visual-only viewer must not force colliders.
+pub(crate) const fn viewer_mesh_demand(
+    generate_collision: bool,
+    requires_visuals: bool,
+    requires_collisions: bool,
+) -> MeshDemand {
     MeshDemand {
-        visuals: true,
-        collisions: generate_collision,
+        visuals: requires_visuals,
+        collisions: generate_collision && requires_collisions,
+    }
+}
+
+/// Vertical view distance from the inspector ratio. Non-finite ratios fall
+/// back to the horizontal distance so a bad property cannot reject the tick.
+pub(crate) fn viewer_vertical_distance(horizontal: i32, ratio: f32) -> i32 {
+    if !ratio.is_finite() {
+        return horizontal.max(0);
+    }
+    let scaled = f64::from(horizontal.max(0)) * f64::from(ratio);
+    scaled.round().clamp(0.0, f64::from(i32::MAX)) as i32
+}
+
+/// Physics bits applied to each block `StaticBody3D`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct CollisionBodySettings {
+    pub layer: u32,
+    pub mask: u32,
+    pub margin: f32,
+}
+
+impl CollisionBodySettings {
+    pub(crate) fn from_inspector(layer: i32, mask: i32, margin: f32) -> Self {
+        Self {
+            layer: layer as u32,
+            mask: mask as u32,
+            margin: if margin.is_finite() && margin >= 0.0 {
+                margin
+            } else {
+                0.04
+            },
+        }
     }
 }
 
@@ -1780,6 +2068,35 @@ impl VoxelTerrain {
         i32::try_from(self.mesh_instances.len()).unwrap_or(i32::MAX)
     }
 
+    /// Packed `x,y,z,lod` for every resident mesh block. Used by the instancer
+    /// to stream per-block MultiMeshes in lockstep with paging.
+    /// Monotonic counter that advances whenever any mesh block is created,
+    /// updated, or removed. The instancer uses it to detect edits and
+    /// rescatter instances; scripts can use it as a cheap change signal.
+    #[func]
+    pub(crate) fn get_mesh_revision(&self) -> i64 {
+        i64::try_from(self.mesh_revision).unwrap_or(i64::MAX)
+    }
+
+    #[func]
+    pub(crate) fn get_mesh_block_locations(&self) -> PackedInt32Array {
+        pack_mesh_block_locations(self.mesh_instances.keys().copied())
+    }
+
+    pub(crate) fn surface_points_for_block(
+        &self,
+        position: Vector3i,
+        block_size: i32,
+    ) -> (
+        Vec<voxel_core::math::Vector3f>,
+        Vec<voxel_core::math::Vector3f>,
+    ) {
+        let Some(core) = self.core.as_ref() else {
+            return (Vec::new(), Vec::new());
+        };
+        surface_points_from_core(core, position, block_size)
+    }
+
     /// Returns the voxel-core version string (diagnostic).
     #[func]
     fn get_version(&self) -> GString {
@@ -1868,6 +2185,11 @@ impl VoxelTerrain {
 
     #[func]
     fn set_stream(&mut self, value: Option<Gd<Resource>>) {
+        if self.core.is_some() {
+            godot_error!(
+                "VoxelTerrain.stream: the stream is resolved once in _ready; assign it before adding the terrain to the tree"
+            );
+        }
         self.stream_resource = value;
     }
 
@@ -2339,8 +2661,7 @@ impl VoxelTerrain {
         }
     }
 
-    /// Physics collision layer. Stubbed: not surfaced to voxel-core; the
-    /// value is stored faithfully so GDScript reads round-trip.
+    /// Physics collision layer applied to every block `StaticBody3D`.
     #[func]
     fn get_collision_layer(&self) -> i32 {
         self.collision_layer_value
@@ -2349,10 +2670,10 @@ impl VoxelTerrain {
     #[func]
     fn set_collision_layer(&mut self, layer: i32) {
         self.collision_layer_value = layer;
+        self.refresh_collision_bodies();
     }
 
-    /// Physics collision Mask. Stubbed: not surfaced to voxel-core; the
-    /// value is stored faithfully so GDScript reads round-trip.
+    /// Physics collision mask applied to every block `StaticBody3D`.
     #[func]
     fn get_collision_mask(&self) -> i32 {
         self.collision_mask_value
@@ -2361,10 +2682,10 @@ impl VoxelTerrain {
     #[func]
     fn set_collision_mask(&mut self, mask: i32) {
         self.collision_mask_value = mask;
+        self.refresh_collision_bodies();
     }
 
-    /// Collision shape margin (in voxels). Stubbed: not surfaced to
-    /// voxel-core; the value is stored faithfully so GDScript reads round-trip.
+    /// Collision shape margin applied to every block collider.
     #[func]
     fn get_collision_margin(&self) -> f32 {
         self.collision_margin_value
@@ -2380,12 +2701,13 @@ impl VoxelTerrain {
             );
             self.collision_margin_value
         };
+        self.refresh_collision_bodies();
     }
 
     /// Mesh block size in voxels (read-only). Reflects the live core's data
     /// block size when one exists, otherwise the inspector default of 16.
     #[func]
-    fn get_mesh_block_size(&self) -> i32 {
+    pub(crate) fn get_mesh_block_size(&self) -> i32 {
         match self.core.as_ref() {
             Some(core) => core.data().block_size() as i32,
             None => self.mesh_block_size_value,
@@ -2559,52 +2881,12 @@ impl VoxelTerrain {
         mode: voxel_core::edition::EditMode,
         value: u64,
     ) {
-        let r = radius.ceil() as i32;
-        let min = Vector3i::new(
-            (center.x - radius).floor() as i32,
-            (center.y - radius).floor() as i32,
-            (center.z - radius).floor() as i32,
-        );
-        let max = Vector3i::new(
-            (center.x + radius).ceil() as i32,
-            (center.y + radius).ceil() as i32,
-            (center.z + radius).ceil() as i32,
-        );
-        let is_sdf = channel == ChannelId::Sdf.index();
-        let r2 = radius * radius;
-        for z in min.z..=max.z {
-            for y in min.y..=max.y {
-                for x in min.x..=max.x {
-                    let dx = x as f32 + 0.5 - center.x;
-                    let dy = y as f32 + 0.5 - center.y;
-                    let dz = z as f32 + 0.5 - center.z;
-                    if dx * dx + dy * dy + dz * dz > r2 {
-                        continue;
-                    }
-                    let pos = Vector3i::new(x, y, z);
-                    if is_sdf {
-                        let sdf = (dx * dx + dy * dy + dz * dz).sqrt() - radius;
-                        let existing = self.get_voxel_sdf(x, y, z);
-                        let blended = voxel_core::edition::blend_sdf(existing, sdf, mode);
-                        let _ = self.set_voxel_sdf(x, y, z, blended);
-                    } else {
-                        let raw = match mode {
-                            voxel_core::edition::EditMode::Add => {
-                                if self.read_world_voxel(pos, channel) == 0 {
-                                    value
-                                } else {
-                                    continue;
-                                }
-                            }
-                            voxel_core::edition::EditMode::Remove => 0,
-                            voxel_core::edition::EditMode::Set => value,
-                        };
-                        let _ = self.edit_world_voxel(pos, channel, raw);
-                    }
-                }
-            }
+        let Some(core) = self.core.as_mut() else {
+            return;
+        };
+        if let Err(error) = core.try_edit_sphere(center, radius, channel, mode, value) {
+            godot_error!("VoxelTerrain.edit_sphere failed: {error}");
         }
-        let _ = r;
     }
 
     pub(crate) fn edit_box(
@@ -2615,42 +2897,138 @@ impl VoxelTerrain {
         mode: voxel_core::edition::EditMode,
         value: u64,
     ) {
-        let lo = Vector3i::new(min.x.min(max.x), min.y.min(max.y), min.z.min(max.z));
-        let hi = Vector3i::new(min.x.max(max.x), min.y.max(max.y), min.z.max(max.z));
-        let is_sdf = channel == ChannelId::Sdf.index();
-        for z in lo.z..=hi.z {
-            for y in lo.y..=hi.y {
-                for x in lo.x..=hi.x {
-                    let pos = Vector3i::new(x, y, z);
-                    if is_sdf {
-                        let sdf = match mode {
-                            voxel_core::edition::EditMode::Remove => 1.0,
-                            _ => -1.0,
-                        };
-                        let _ = self.set_voxel_sdf(x, y, z, sdf);
-                    } else {
-                        let raw = match mode {
-                            voxel_core::edition::EditMode::Add => {
-                                if self.read_world_voxel(pos, channel) == 0 {
-                                    value
-                                } else {
-                                    continue;
-                                }
-                            }
-                            voxel_core::edition::EditMode::Remove => 0,
-                            voxel_core::edition::EditMode::Set => value,
-                        };
-                        let _ = self.edit_world_voxel(pos, channel, raw);
-                    }
-                }
-            }
+        let Some(core) = self.core.as_mut() else {
+            return;
+        };
+        if let Err(error) = core.try_edit_box(min, max, channel, mode, value) {
+            godot_error!("VoxelTerrain.edit_box failed: {error}");
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn edit_hemisphere(
+        &mut self,
+        center: voxel_core::math::Vector3f,
+        radius: f32,
+        flat_direction: voxel_core::math::Vector3f,
+        smoothness: f32,
+        channel: usize,
+        mode: voxel_core::edition::EditMode,
+        value: u64,
+    ) {
+        let Some(core) = self.core.as_mut() else {
+            return;
+        };
+        if let Err(error) = core.try_edit_hemisphere(
+            center,
+            radius,
+            flat_direction,
+            smoothness,
+            channel,
+            mode,
+            value,
+        ) {
+            godot_error!("VoxelTerrain.edit_hemisphere failed: {error}");
+        }
+    }
+
+    pub(crate) fn edit_smooth(
+        &mut self,
+        center: voxel_core::math::Vector3f,
+        radius: f32,
+        blur_radius: i32,
+        channel: usize,
+    ) {
+        let Some(core) = self.core.as_mut() else {
+            return;
+        };
+        if let Err(error) = core.try_edit_smooth(center, radius, blur_radius, channel) {
+            godot_error!("VoxelTerrain.edit_smooth failed: {error}");
+        }
+    }
+
+    pub(crate) fn paste_buffer(
+        &mut self,
+        origin: Vector3i,
+        src: &voxel_core::storage::VoxelBuffer,
+        channel_mask: u8,
+    ) {
+        let Some(core) = self.core.as_mut() else {
+            return;
+        };
+        if let Err(error) = core.try_paste(origin, src, channel_mask) {
+            godot_error!("VoxelTerrain.paste failed: {error}");
+        }
+    }
+
+    pub(crate) fn collect_voxels_in_box(
+        &self,
+        min: Vector3i,
+        max: Vector3i,
+        channel: usize,
+        max_items: usize,
+        keep: impl Fn(u64) -> bool,
+    ) -> Vec<(Vector3i, u64)> {
+        let Some(core) = self.core.as_ref() else {
+            return Vec::new();
+        };
+        collect_core_voxels(core, min, max, channel, max_items, keep)
+    }
+
+    pub(crate) fn edit_world_voxel_metadata(
+        &mut self,
+        pos: Vector3i,
+        metadata: Option<voxel_core::storage::MetadataValue>,
+    ) -> bool {
+        let Some(core) = self.core.as_mut() else {
+            return false;
+        };
+        matches!(core.try_edit_voxel_metadata(pos, metadata), Ok(Some(_)))
+    }
+
+    pub(crate) fn read_world_voxel_metadata(
+        &self,
+        pos: Vector3i,
+    ) -> Option<voxel_core::storage::MetadataValue> {
+        self.core.as_ref().and_then(|core| core.voxel_metadata(pos))
+    }
+
+    pub(crate) fn for_each_world_voxel_metadata(
+        &self,
+        min: Vector3i,
+        max: Vector3i,
+        visit: impl FnMut(Vector3i, &voxel_core::storage::MetadataValue),
+    ) {
+        if let Some(core) = self.core.as_ref() {
+            core.for_each_voxel_metadata_in_area(min, max, visit);
+        }
+    }
+
+    pub(crate) fn blocky_library(&self) -> Option<voxel_core::meshers::blocky::BakedLibrary> {
+        resolve_blocky_library(self.mesher_resource.as_ref())
+    }
+
+    fn collision_settings(&self) -> CollisionBodySettings {
+        CollisionBodySettings::from_inspector(
+            self.collision_layer_value,
+            self.collision_mask_value,
+            self.collision_margin_value,
+        )
+    }
+
+    fn refresh_collision_bodies(&mut self) {
+        let settings = self.collision_settings();
+        for rendered in self.mesh_instances.values_mut() {
+            apply_collision_settings_to_instance(&mut rendered.instance, settings);
         }
     }
 }
 
 /// Resolve a Godot generator resource into a voxel-core generator shared
 /// handle. Shared between `VoxelTerrain` and `VoxelLodTerrain`. If no resource
-/// is set (or an unknown resource type), defaults to Waves(60, 128).
+/// is set, defaults to Waves(60, 128). An assigned but unrecognised type logs
+/// an error and still falls back to Waves. `VoxelGeneratorGraph` is resolved
+/// to a real [`GraphGenerator`] — it must never silently become Waves.
 pub(crate) fn resolve_core_generator(
     resource: Option<&Gd<Resource>>,
 ) -> voxel_core::storage::SharedVoxelGenerator {
@@ -2658,6 +3036,7 @@ pub(crate) fn resolve_core_generator(
         VoxelGeneratorFlat, VoxelGeneratorHeightmap, VoxelGeneratorImage, VoxelGeneratorNoise,
         VoxelGeneratorWaves,
     };
+    use crate::voxel_buffer::VoxelGeneratorGraphGD;
 
     if let Some(res) = resource {
         if let Ok(waves) = res.clone().try_cast::<VoxelGeneratorWaves>() {
@@ -2675,8 +3054,16 @@ pub(crate) fn resolve_core_generator(
         if let Ok(img) = res.clone().try_cast::<VoxelGeneratorImage>() {
             return img.bind().create_core_generator();
         }
+        if let Ok(graph) = res.clone().try_cast::<VoxelGeneratorGraphGD>() {
+            return graph.bind().create_core_generator();
+        }
+        godot_error!(
+            "generator must be VoxelGeneratorWaves, Flat, Noise, Heightmap, Image or Graph; \
+             falling back to Waves"
+        );
     }
-    // Default: Waves with sensible parameters.
+    // Default: Waves with sensible parameters — only when nothing was assigned
+    // (or the assigned resource is not a supported generator).
     let mut waves = voxel_core::generators::simple::Waves::default();
     waves.set_pattern_size(voxel_core::math::Vector2f::new(128.0, 128.0));
     waves.heightmap.height_range = 60.0;
@@ -2714,10 +3101,29 @@ pub(crate) fn resolve_core_mesher(
     Arc::new(TransvoxelMesher::new())
 }
 
+pub(crate) fn resolve_blocky_library(
+    resource: Option<&Gd<Resource>>,
+) -> Option<voxel_core::meshers::blocky::BakedLibrary> {
+    let mesher = resource?
+        .clone()
+        .try_cast::<crate::resources::VoxelMesherBlockyGD>()
+        .ok()?;
+    let library = mesher.bind().core_library();
+    library
+}
+
 impl VoxelTerrain {
+    pub(crate) fn core(&self) -> Option<&VoxelTerrainCore> {
+        self.core.as_ref()
+    }
+
+    pub(crate) fn core_mut(&mut self) -> Option<&mut VoxelTerrainCore> {
+        self.core.as_mut()
+    }
     fn apply_render_op(&mut self, op: PendingRenderOp) {
         let material_override = self.material_override.clone();
         let generate_collision = self.generate_collision;
+        let collision_settings = self.collision_settings();
         let mut base_node = self.to_gd().upcast::<Node3D>();
         apply_pending_render_op(
             op,
@@ -2725,6 +3131,7 @@ impl VoxelTerrain {
             &mut base_node,
             material_override.as_ref(),
             generate_collision,
+            collision_settings,
         );
     }
 }
@@ -2754,12 +3161,20 @@ where
                 continue;
             };
             let view_distance = distance(viewer.view_distance_voxels());
+            let vertical = distance(viewer_vertical_distance(
+                viewer.view_distance_voxels(),
+                viewer.get_view_distance_vertical_ratio(),
+            ));
             viewers.push(ViewerUpdate {
                 id,
                 world_position_voxels,
                 horizontal_view_distance_voxels: view_distance,
-                vertical_view_distance_voxels: view_distance,
-                demand: fixed_viewer_demand(generate_collision),
+                vertical_view_distance_voxels: vertical,
+                demand: viewer_mesh_demand(
+                    generate_collision,
+                    viewer.is_requiring_visuals(),
+                    viewer.is_requiring_collisions(),
+                ),
             });
             id += 1;
         }
@@ -2773,6 +3188,7 @@ pub(crate) fn apply_pending_render_op(
     base: &mut Gd<Node3D>,
     material_override: Option<&Gd<Material>>,
     generate_collision: bool,
+    collision_settings: CollisionBodySettings,
 ) {
     match op {
         PendingRenderOp::Upload {
@@ -2781,23 +3197,41 @@ pub(crate) fn apply_pending_render_op(
             surfaces,
             transition_mask,
             collision,
-        } => {
-            if let Some(mut old) = mesh_instances.remove(&id) {
-                debug_assert!(old.revision < revision);
-                old.instance.queue_free();
+        } => match mesh_instances.entry(id) {
+            std::collections::hash_map::Entry::Occupied(mut occupied) => {
+                let rendered = occupied.get_mut();
+                debug_assert!(rendered.revision < revision);
+                if replace_mesh_on_instance(
+                    &mut rendered.instance,
+                    &surfaces,
+                    material_override,
+                    generate_collision,
+                    transition_mask,
+                    &collision,
+                    &id,
+                    collision_settings,
+                ) {
+                    rendered.revision = revision;
+                } else {
+                    rendered.instance.queue_free();
+                    occupied.remove();
+                }
             }
-            if let Some(instance) = upload_mesh_block(
-                id,
-                &surfaces,
-                base,
-                material_override,
-                generate_collision,
-                transition_mask,
-                &collision,
-            ) {
-                mesh_instances.insert(id, RenderedMeshBlock { revision, instance });
+            std::collections::hash_map::Entry::Vacant(vacant) => {
+                if let Some(instance) = upload_mesh_block(
+                    id,
+                    &surfaces,
+                    base,
+                    material_override,
+                    generate_collision,
+                    transition_mask,
+                    &collision,
+                    collision_settings,
+                ) {
+                    vacant.insert(RenderedMeshBlock { revision, instance });
+                }
             }
-        }
+        },
         PendingRenderOp::Remove { id } => {
             if let Some(mut old) = mesh_instances.remove(&id) {
                 old.instance.queue_free();
@@ -2846,8 +3280,9 @@ pub(crate) fn upload_mesh_block(
     generate_collision: bool,
     transition_mask: TransitionMask,
     collision: &PendingCollisionGeometry,
+    collision_settings: CollisionBodySettings,
 ) -> Option<Gd<MeshInstance3D>> {
-    let mut array_mesh = ArrayMesh::new_gd();
+    let array_mesh = build_array_mesh(surfaces)?;
     let block_size = 16i32;
     let lod_stride = 1i32 << id.lod_index;
     let origin = Vector3::new(
@@ -2856,6 +3291,56 @@ pub(crate) fn upload_mesh_block(
         (id.position_in_blocks.z * block_size * lod_stride) as f32,
     );
 
+    let mut instance = MeshInstance3D::new_alloc();
+    instance.set_mesh(&array_mesh);
+    instance.set_position(origin);
+    if let Some(mat) = material_override {
+        instance.set_material_override(mat);
+    }
+    apply_transition_mask(&mut instance, transition_mask);
+    if generate_collision {
+        create_block_collision(&mut instance, collision, &id, collision_settings);
+    }
+    let instance_name = format!(
+        "mesh_lod{}_{}_{}_{}",
+        id.lod_index, id.position_in_blocks.x, id.position_in_blocks.y, id.position_in_blocks.z
+    );
+    instance.set_name(&instance_name);
+    let _ = base;
+    base.add_child(&instance);
+    Some(instance)
+}
+
+/// Rebuild the `ArrayMesh` on an existing instance so remesh does not change
+/// the Godot node identity (scripts holding the MeshInstance keep working).
+#[allow(clippy::too_many_arguments)]
+fn replace_mesh_on_instance(
+    instance: &mut Gd<MeshInstance3D>,
+    surfaces: &[PendingRenderSurface],
+    material_override: Option<&Gd<Material>>,
+    generate_collision: bool,
+    transition_mask: TransitionMask,
+    collision: &PendingCollisionGeometry,
+    id: &MeshBlockRenderId,
+    collision_settings: CollisionBodySettings,
+) -> bool {
+    let Some(array_mesh) = build_array_mesh(surfaces) else {
+        return false;
+    };
+    instance.set_mesh(&array_mesh);
+    if let Some(mat) = material_override {
+        instance.set_material_override(mat);
+    }
+    apply_transition_mask(instance, transition_mask);
+    clear_block_collision(instance);
+    if generate_collision {
+        create_block_collision(instance, collision, id, collision_settings);
+    }
+    true
+}
+
+fn build_array_mesh(surfaces: &[PendingRenderSurface]) -> Option<Gd<ArrayMesh>> {
+    let mut array_mesh = ArrayMesh::new_gd();
     for surface in surfaces {
         if surface.indices.is_empty() {
             continue;
@@ -2912,29 +3397,7 @@ pub(crate) fn upload_mesh_block(
     if array_mesh.get_surface_count() == 0 {
         return None;
     }
-
-    // Create MeshInstance3D child.
-    let mut instance = MeshInstance3D::new_alloc();
-    instance.set_mesh(&array_mesh);
-    instance.set_position(origin);
-    // Apply material override if set.
-    if let Some(mat) = material_override {
-        instance.set_material_override(mat);
-    }
-    // C3: stamp the latest LOD transition mask onto the new instance.
-    apply_transition_mask(&mut instance, transition_mask);
-    // C4: build collisions from the regular-only collision surface instead of
-    // the visual mesh so LOD transition triangles never become colliders.
-    if generate_collision {
-        create_block_collision(&mut instance, base, collision, &id);
-    }
-    let instance_name = format!(
-        "mesh_lod{}_{}_{}_{}",
-        id.lod_index, id.position_in_blocks.x, id.position_in_blocks.y, id.position_in_blocks.z
-    );
-    instance.set_name(&instance_name);
-    base.add_child(&instance);
-    Some(instance)
+    Some(array_mesh)
 }
 
 /// Builds a trimesh collision body for one block from its regular-only
@@ -2947,15 +3410,16 @@ pub(crate) fn upload_mesh_block(
 /// mesher does not separate collision still gets a collider.
 pub(crate) fn create_block_collision(
     instance: &mut Gd<MeshInstance3D>,
-    base: &mut Gd<Node3D>,
     collision: &PendingCollisionGeometry,
     id: &MeshBlockRenderId,
+    settings: CollisionBodySettings,
 ) {
     if collision.is_empty() {
         // No separate collision surface: keep the legacy visual-derived
         // trimesh so collision-enabled terrain without a dedicated collision
         // surface remains functional.
         instance.create_trimesh_collision();
+        apply_collision_settings_to_instance(instance, settings);
         return;
     }
     let mut shape = ConcavePolygonShape3D::new_gd();
@@ -2969,6 +3433,7 @@ pub(crate) fn create_block_collision(
         }
     }
     shape.set_faces(&faces);
+    shape.set_margin(settings.margin);
     let mut collision_shape = CollisionShape3D::new_alloc();
     collision_shape.set_shape(&shape);
     let mut body = StaticBody3D::new_alloc();
@@ -2977,12 +3442,47 @@ pub(crate) fn create_block_collision(
         id.lod_index, id.position_in_blocks.x, id.position_in_blocks.y, id.position_in_blocks.z
     );
     body.set_name(&body_name);
+    body.set_collision_layer(settings.layer);
+    body.set_collision_mask(settings.mask);
     body.add_child(&collision_shape);
     // Parent under the mesh instance so a Remove op that queue_free's the
     // mesh also drops the collider. Local origin: the instance is already
     // placed at the block origin.
-    let _ = base;
     instance.add_child(&body);
+}
+
+fn clear_block_collision(instance: &mut Gd<MeshInstance3D>) {
+    let children = instance.get_children();
+    for child in children.iter_shared() {
+        if child.clone().try_cast::<StaticBody3D>().is_ok() {
+            let mut node = child;
+            instance.remove_child(&node);
+            node.queue_free();
+        }
+    }
+}
+
+pub(crate) fn apply_collision_settings_to_instance(
+    instance: &mut Gd<MeshInstance3D>,
+    settings: CollisionBodySettings,
+) {
+    let children = instance.get_children();
+    for child in children.iter_shared() {
+        let Ok(mut body) = child.try_cast::<StaticBody3D>() else {
+            continue;
+        };
+        body.set_collision_layer(settings.layer);
+        body.set_collision_mask(settings.mask);
+        let body_children = body.get_children();
+        for body_child in body_children.iter_shared() {
+            let Ok(shape_node) = body_child.try_cast::<CollisionShape3D>() else {
+                continue;
+            };
+            if let Some(mut shape) = shape_node.get_shape() {
+                shape.set_margin(settings.margin);
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3122,5 +3622,158 @@ impl VoxelViewer {
     /// The configured view distance in voxels (horizontal and vertical).
     pub(crate) fn view_distance_voxels(&self) -> i32 {
         self.view_distance
+    }
+}
+
+// ---------------------------------------------------------------------------
+// VoxelTerrainReplicatorGD — R3 transport-agnostic replication bridge
+// ---------------------------------------------------------------------------
+
+/// A `Node` bridging the voxel-core replication protocol (see
+/// `doc/source/multiplayer.md`) to any Godot transport. It owns **no
+/// sockets**: scripts move byte frames between peers using whatever they
+/// prefer (MultiplayerAPI RPCs, ENet, WebSocket, UDP…).
+///
+/// Server role (child of the authoritative `VoxelTerrain`):
+/// ```gdscript
+/// var replicator := VoxelTerrainReplicator.new()
+/// replicator.role = replicator.ROLE_SERVER
+/// terrain.add_child(replicator)
+/// replicator.set_peer_area(peer_id, center, radius_blocks)
+/// # every frame / tick:
+/// for frame in replicator.poll_outbound(peer_id):
+///     rpc_id(peer_id, receive_frame.bind(frame))
+/// ```
+///
+/// Client role (child of the local `VoxelTerrain`):
+/// ```gdscript
+/// func receive_frame(frame: PackedByteArray) -> void:
+///     replicator.receive_frame(frame)
+/// ```
+#[derive(GodotClass)]
+#[class(base = Node, tool, rename = VoxelTerrainReplicator)]
+pub struct VoxelTerrainReplicatorGD {
+    base: Base<Node>,
+    /// 0 = server, 1 = client.
+    #[var]
+    role: u32,
+    server: voxel_core::terrain::replication::ReplicationServer,
+    client: voxel_core::terrain::replication::ReplicationClient,
+}
+
+#[godot_api]
+impl INode for VoxelTerrainReplicatorGD {
+    fn init(base: Base<Node>) -> Self {
+        Self {
+            base,
+            role: Self::ROLE_SERVER,
+            server: voxel_core::terrain::replication::ReplicationServer::new(8),
+            client: voxel_core::terrain::replication::ReplicationClient::new(),
+        }
+    }
+}
+
+#[godot_api]
+impl VoxelTerrainReplicatorGD {
+    /// Server role: produce snapshots for the authoritative parent terrain.
+    #[allow(dead_code)] // script-facing documentation constants
+    pub const ROLE_SERVER: u32 = 0;
+    /// Client role: apply received snapshots to the local parent terrain.
+    #[allow(dead_code)] // script-facing documentation constants
+    pub const ROLE_CLIENT: u32 = 1;
+
+    /// Server: set (or move) a peer's interest box. `center` is in world
+    /// voxels; `radius_blocks` is half the box extent in data blocks.
+    #[func]
+    fn set_peer_area(&mut self, peer_id: i64, center: Vector3, radius_blocks: i32) {
+        let Ok(peer) = u32::try_from(peer_id.max(0)) else {
+            godot_error!("VoxelTerrainReplicator.set_peer_area: peer id must fit u32");
+            return;
+        };
+        let Some(terrain) = self.parent_terrain() else {
+            godot_error!("VoxelTerrainReplicator.set_peer_area: parent must be a VoxelTerrain");
+            return;
+        };
+        let bound = terrain.bind();
+        let block_size = bound.get_data_block_size().max(1);
+        drop(bound);
+        let center_blocks = Vector3i::new(
+            (center.x as i32).div_euclid(block_size),
+            (center.y as i32).div_euclid(block_size),
+            (center.z as i32).div_euclid(block_size),
+        );
+        let radius = radius_blocks.clamp(0, 1 << 20);
+        let area = voxel_core::math::Box3i::new(
+            center_blocks - Vector3i::splat(radius),
+            Vector3i::splat(2 * radius + 1),
+        );
+        if let Err(error) = self.server.set_peer_area(peer, area) {
+            godot_error!("VoxelTerrainReplicator.set_peer_area: rejected ({error:?})");
+        }
+    }
+
+    /// Server: forget a peer (on disconnect).
+    #[func]
+    fn remove_peer(&mut self, peer_id: i64) {
+        let Ok(peer) = u32::try_from(peer_id.max(0)) else {
+            return;
+        };
+        self.server.remove_peer(peer);
+    }
+
+    /// Server: poll the parent terrain and return outbound frames for the
+    /// given peer as an array of byte arrays. Call periodically (e.g. every
+    /// `_process`); only newly-changed edited blocks are produced.
+    #[func]
+    fn poll_outbound(&mut self, peer_id: i64) -> Array<PackedByteArray> {
+        let mut out = Array::new();
+        let Ok(peer) = u32::try_from(peer_id.max(0)) else {
+            return out;
+        };
+        let Some(terrain) = self.parent_terrain() else {
+            return out;
+        };
+        let bound = terrain.bind();
+        let Some(core) = bound.core() else {
+            return out;
+        };
+        // Per-peer computation: the all-peers poll marks every peer's
+        // frames sent on the first call, starving everyone else.
+        for snapshot in self.server.poll_outbound_for_peer(core, peer) {
+            let mut frame = Vec::new();
+            snapshot.encode(&mut frame);
+            let packed = PackedByteArray::from(frame.as_slice());
+            out.push(&packed);
+        }
+        out
+    }
+
+    /// Client: drop the revision table. MUST be called on rejoin or server
+    /// restart — server revisions are per-process (see multiplayer.md), so
+    /// stale table entries would silently drop every snapshot of the new
+    /// session.
+    #[func]
+    fn reset_client(&mut self) {
+        self.client.reset();
+    }
+
+    /// Client: apply one received frame to the local parent terrain.
+    /// Returns `true` when the snapshot was installed (newer revision).
+    #[func]
+    fn receive_frame(&mut self, frame: PackedByteArray) -> bool {
+        let Some(mut terrain) = self.parent_terrain() else {
+            godot_error!("VoxelTerrainReplicator.receive_frame: parent must be a VoxelTerrain");
+            return false;
+        };
+        let mut bound = terrain.bind_mut();
+        let Some(core) = bound.core_mut() else {
+            return false;
+        };
+        self.client.apply_frame(core, frame.as_slice())
+    }
+
+    fn parent_terrain(&self) -> Option<Gd<VoxelTerrain>> {
+        let parent = self.base().get_parent()?;
+        parent.try_cast::<VoxelTerrain>().ok()
     }
 }

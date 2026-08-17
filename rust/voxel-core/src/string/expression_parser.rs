@@ -24,7 +24,7 @@ pub enum Op {
 /// AST node. One enum covers every node kind the parser produces. The C++
 /// version uses a `Node` base + four subclasses; the Rust port folds that into
 /// a single enum with `Box<Node>` children (idiomatic, no vtable cost).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Node {
     /// Numeric literal.
     Number(f32),

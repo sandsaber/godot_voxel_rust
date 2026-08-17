@@ -170,6 +170,17 @@ impl OrthoBasis {
         p.x * self.x + p.y * self.y + p.z * self.z
     }
 
+    /// Float counterpart of [`xform`](Self::xform). Used when rotating baked
+    /// mesh vertices and normals.
+    #[inline]
+    pub fn xform_f(&self, p: crate::math::Vector3f) -> crate::math::Vector3f {
+        crate::math::Vector3f::new(
+            p.x * self.x.x as f32 + p.y * self.y.x as f32 + p.z * self.z.x as f32,
+            p.x * self.x.y as f32 + p.y * self.y.y as f32 + p.z * self.z.y as f32,
+            p.x * self.x.z as f32 + p.y * self.y.z as f32 + p.z * self.z.z as f32,
+        )
+    }
+
     /// Basis composition: apply `other`'s axes through `self`. Matches
     /// `operator*(OrthoBasis)`.
     #[inline]
@@ -588,6 +599,10 @@ mod tests {
         let id = OrthoBasis::default();
         // Identity leaves vectors unchanged.
         assert_eq!(id.xform(Vector3i::new(1, 2, 3)), Vector3i::new(1, 2, 3));
+        assert_eq!(
+            id.xform_f(crate::math::Vector3f::new(1.0, 2.0, 3.0)),
+            crate::math::Vector3f::new(1.0, 2.0, 3.0)
+        );
     }
 
     #[test]

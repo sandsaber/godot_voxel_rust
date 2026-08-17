@@ -34,7 +34,7 @@ cargo build -p voxel-gdext --release
 | macOS arm64 | `rust/target/release/libvoxel_gdext.dylib` |
 
 Always use `--release` for real use: the release profile enables
-`opt-level = 3`, fat LTO and `panic = "abort"` (≈5 MB). Debug builds are
+`opt-level = 3`, fat LTO and `panic = "unwind"` (≈5 MB). Debug builds are
 ≈200 MB and much slower.
 
 ## Mobile builds

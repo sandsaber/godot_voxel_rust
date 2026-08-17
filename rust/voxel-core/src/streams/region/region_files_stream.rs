@@ -1,3 +1,4 @@
+use super::forest_meta::{region_size_po2, RegionForestMeta, META_FILE_NAME};
 use super::{RegionError, RegionFile, RegionFormat};
 use crate::constants::voxel_constants::MAX_LOD;
 use crate::math::Vector3i;
@@ -29,22 +30,24 @@ pub struct RegionKey {
 }
 
 impl RegionKey {
-    fn from_block_position(position: Vector3i, lod_index: u8) -> Self {
+    fn from_block_position(position: Vector3i, lod_index: u8, region_size: i32) -> Self {
+        let region_size = region_size.max(1);
         Self {
             lod_index,
             region_position: Vector3i::new(
-                position.x.div_euclid(REGION_SIZE),
-                position.y.div_euclid(REGION_SIZE),
-                position.z.div_euclid(REGION_SIZE),
+                position.x.div_euclid(region_size),
+                position.y.div_euclid(region_size),
+                position.z.div_euclid(region_size),
             ),
         }
     }
 
-    fn local_block_position(self, position: Vector3i) -> Vector3i {
+    fn local_block_position(self, position: Vector3i, region_size: i32) -> Vector3i {
+        let region_size = region_size.max(1);
         Vector3i::new(
-            position.x.rem_euclid(REGION_SIZE),
-            position.y.rem_euclid(REGION_SIZE),
-            position.z.rem_euclid(REGION_SIZE),
+            position.x.rem_euclid(region_size),
+            position.y.rem_euclid(region_size),
+            position.z.rem_euclid(region_size),
         )
     }
 }
@@ -100,17 +103,155 @@ impl SharedRegionFile {
     }
 }
 
+struct MetaState {
+    loaded: bool,
+    saved: bool,
+    meta: RegionForestMeta,
+}
+
 pub struct RegionFilesStream {
     directory: PathBuf,
+    region_size: i32,
+    sector_size: u32,
+    block_size_po2: u8,
+    meta: Mutex<MetaState>,
     regions: Mutex<HashMap<RegionKey, Arc<SharedRegionFile>>>,
 }
 
 impl RegionFilesStream {
     pub fn new(directory: PathBuf) -> Self {
+        Self::with_settings(directory, REGION_SIZE, 512)
+    }
+
+    /// Construct a stream with inspector-configured region/sector sizes.
+    /// `region_size` is blocks per axis (clamped to `1..=255` to match the
+    /// on-disk `RegionFormat` byte field). `sector_size` is bytes.
+    pub fn with_settings(directory: PathBuf, region_size: i32, sector_size: u32) -> Self {
+        Self::with_block_size(directory, region_size, sector_size, 4)
+    }
+
+    /// Same as [`with_settings`](Self::with_settings) plus the forest
+    /// `block_size_po2` written to `meta.vxrm`.
+    pub fn with_block_size(
+        directory: PathBuf,
+        region_size: i32,
+        sector_size: u32,
+        block_size_po2: u8,
+    ) -> Self {
+        let region_size = region_size.clamp(1, 255);
+        let sector_size = sector_size.max(1);
+        let block_size_po2 = block_size_po2.clamp(1, 8);
         Self {
             directory: normalize_directory(directory),
+            region_size,
+            sector_size,
+            block_size_po2,
+            meta: Mutex::new(MetaState {
+                loaded: false,
+                saved: false,
+                meta: RegionForestMeta::from_settings(block_size_po2, region_size, sector_size),
+            }),
             regions: Mutex::new(HashMap::new()),
         }
+    }
+
+    pub fn region_size(&self) -> i32 {
+        self.effective_region_size()
+    }
+
+    pub fn sector_size(&self) -> u32 {
+        self.meta
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .meta
+            .sector_size
+    }
+
+    pub fn block_size_po2(&self) -> u8 {
+        self.meta
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .meta
+            .block_size_po2
+    }
+
+    pub fn channel_depths(&self) -> [crate::storage::ChannelDepth; MAX_CHANNELS] {
+        self.meta
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .meta
+            .channel_depths
+    }
+
+    /// Rewrite every `.vxr` under `source` into `destination` using
+    /// `new_region_size` / `new_sector_size`. Returns the number of blocks
+    /// copied. Source files are left untouched.
+    pub fn convert_directory(
+        source: PathBuf,
+        destination: PathBuf,
+        new_region_size: i32,
+        new_sector_size: u32,
+    ) -> Result<u32, VoxelStreamError> {
+        Self::convert_directory_ex(source, destination, new_region_size, new_sector_size, 4)
+    }
+
+    /// Rewrite region files and `meta.vxrm` with an explicit `block_size_po2`.
+    pub fn convert_directory_ex(
+        source: PathBuf,
+        destination: PathBuf,
+        new_region_size: i32,
+        new_sector_size: u32,
+        new_block_size_po2: u8,
+    ) -> Result<u32, VoxelStreamError> {
+        let dest = RegionFilesStream::with_block_size(
+            destination,
+            new_region_size,
+            new_sector_size,
+            new_block_size_po2,
+        );
+        let mut copied = 0u32;
+        visit_region_files(&source, |path, lod_index, region_position| {
+            let mut file = RegionFile::open(&path, false).map_err(|error| {
+                VoxelStreamError::Io(format!("open {}: {error}", path.display()))
+            })?;
+            let region_size = file.format().region_size.x.max(1);
+            let count = file.header_block_count();
+            for index in 0..count {
+                let local = file.block_position_from_index(index as u32);
+                if !file.has_block(local) {
+                    continue;
+                }
+                let mut buffer = VoxelBuffer::with_size(Vector3i::splat(1));
+                match file.load_block(local, &mut buffer) {
+                    Ok(()) => {}
+                    Err(RegionError::BlockNotFound | RegionError::NotFound(_)) => continue,
+                    Err(error) => {
+                        return Err(map_region_error(error, &path));
+                    }
+                }
+                let world = Vector3i::new(
+                    region_position.x.saturating_mul(region_size) + local.x,
+                    region_position.y.saturating_mul(region_size) + local.y,
+                    region_position.z.saturating_mul(region_size) + local.z,
+                );
+                dest.save_voxel_block(VoxelSaveQuery::new(&buffer, world, lod_index))?;
+                copied = copied.saturating_add(1);
+            }
+            Ok(())
+        })?;
+        dest.flush()?;
+        let mut meta = dest.current_meta();
+        meta.region_size_po2 = region_size_po2(new_region_size);
+        meta.sector_size = new_sector_size;
+        if copied == 0 {
+            if let Ok(Some(source_meta)) = RegionForestMeta::load(&source) {
+                meta.channel_depths = source_meta.channel_depths;
+                meta.block_size_po2 = source_meta.block_size_po2;
+            }
+        }
+        meta.save(&dest.directory)
+            .map_err(|error| VoxelStreamError::Io(error.to_string()))?;
+        Ok(copied)
     }
 
     fn region_path(&self, key: RegionKey) -> PathBuf {
@@ -187,16 +328,134 @@ impl RegionFilesStream {
     fn lock_regions(&self) -> MutexGuard<'_, HashMap<RegionKey, Arc<SharedRegionFile>>> {
         self.regions.lock().unwrap_or_else(PoisonError::into_inner)
     }
+
+    fn lock_meta(&self) -> MutexGuard<'_, MetaState> {
+        self.meta.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn effective_region_size(&self) -> i32 {
+        let state = self.lock_meta();
+        if state.loaded {
+            state.meta.region_size_blocks()
+        } else {
+            self.region_size
+        }
+    }
+
+    fn ensure_meta_loaded(&self) -> Result<bool, VoxelStreamError> {
+        let mut state = self.lock_meta();
+        if state.loaded {
+            return Ok(state.saved);
+        }
+        match RegionForestMeta::load(&self.directory) {
+            Ok(Some(meta)) => {
+                state.meta = meta;
+                state.loaded = true;
+                state.saved = true;
+                Ok(true)
+            }
+            Ok(None) | Err(super::forest_meta::ForestMetaError::Io(_)) => {
+                // Missing or unreadable sidecar: keep going so region-file I/O
+                // can report the concrete path error (symlink loops, ENOTDIR).
+                state.loaded = true;
+                state.saved = false;
+                Ok(false)
+            }
+            Err(super::forest_meta::ForestMetaError::Invalid(message)) => {
+                Err(VoxelStreamError::CorruptData(format!(
+                    "{}: {message}",
+                    self.directory.join(META_FILE_NAME).display()
+                )))
+            }
+        }
+    }
+
+    fn persist_meta_from_block(
+        &self,
+        buffer: &VoxelBuffer,
+    ) -> Result<RegionForestMeta, VoxelStreamError> {
+        let _ = self.ensure_meta_loaded()?;
+        // First save: derive the candidate from this stream's settings and
+        // the buffer, and validate BEFORE touching the filesystem. Writing
+        // meta.vxrm for a mismatched buffer (e.g. a wrong inspector
+        // `block_size_po2`) would lock the forest into a format no block can
+        // ever match, poisoning every future save while no voxels exist on
+        // disk yet.
+        let candidate = {
+            let state = self.lock_meta();
+            if state.saved {
+                if state.meta.matches_buffer(buffer) {
+                    return Ok(state.meta.clone());
+                }
+                return Err(VoxelStreamError::BlockFormatMismatch(
+                    "locked forest meta does not match the buffer".to_string(),
+                ));
+            }
+            let mut candidate = state.meta.clone();
+            candidate.block_size_po2 = self.block_size_po2;
+            candidate.region_size_po2 = region_size_po2(self.region_size);
+            candidate.sector_size = self.sector_size;
+            candidate.capture_channel_depths(buffer);
+            if !candidate.matches_buffer(buffer) {
+                return Err(VoxelStreamError::BlockFormatMismatch(format!(
+                    "stream block size {} does not match the buffer {:?}",
+                    1 << candidate.block_size_po2,
+                    buffer.size()
+                )));
+            }
+            candidate
+        };
+        // Write outside the meta lock: filesystem I/O must not hold up
+        // concurrent meta readers.
+        candidate
+            .save(&self.directory)
+            .map_err(|error| VoxelStreamError::Io(error.to_string()))?;
+        let mut state = self.lock_meta();
+        if !state.saved {
+            state.meta = candidate;
+            state.saved = true;
+            state.loaded = true;
+        } else if !state.meta.matches_buffer(buffer) {
+            // Lost the first-save race: this thread's candidate bytes may be
+            // the ones on disk while the winner's format is authoritative.
+            // Restore the committed meta so the file cannot poison the next
+            // session with a format no block matches.
+            state
+                .meta
+                .save(&self.directory)
+                .map_err(|error| VoxelStreamError::Io(error.to_string()))?;
+            return Err(VoxelStreamError::BlockFormatMismatch(
+                "lost the first-save race to a different format".to_string(),
+            ));
+        }
+        Ok(state.meta.clone())
+    }
+
+    fn current_meta(&self) -> RegionForestMeta {
+        self.lock_meta().meta.clone()
+    }
 }
 
 impl VoxelStream for RegionFilesStream {
     fn load_voxel_block(&self, query: VoxelLoadQuery<'_>) -> StreamResult<LoadResult> {
-        let key = RegionKey::from_block_position(query.position_in_blocks, query.lod_index);
-        let local_position = key.local_block_position(query.position_in_blocks);
+        let has_meta = self.ensure_meta_loaded()?;
+        let meta = self.current_meta();
+        if has_meta {
+            meta.apply_channel_depths(query.voxel_buffer);
+        }
+        let region_size = meta.region_size_blocks();
+        let key =
+            RegionKey::from_block_position(query.position_in_blocks, query.lod_index, region_size);
+        let local_position = key.local_block_position(query.position_in_blocks, region_size);
+        let format = if has_meta {
+            meta.to_region_format()
+        } else {
+            RegionFormat::default()
+        };
         let region = if let Some(region) = self.get_cached_region(key) {
             region
         } else {
-            let Some(region) = self.get_or_open_region(key, false, RegionFormat::default())? else {
+            let Some(region) = self.get_or_open_region(key, false, format)? else {
                 return Ok(LoadResult::NotFound);
             };
             region
@@ -210,11 +469,13 @@ impl VoxelStream for RegionFilesStream {
     }
 
     fn save_voxel_block(&self, query: VoxelSaveQuery<'_>) -> StreamResult<()> {
-        let key = RegionKey::from_block_position(query.position_in_blocks, query.lod_index);
-        let local_position = key.local_block_position(query.position_in_blocks);
-        let format = format_for_block(query.voxel_buffer)?;
+        let meta = self.persist_meta_from_block(query.voxel_buffer)?;
+        let region_size = meta.region_size_blocks();
+        let key =
+            RegionKey::from_block_position(query.position_in_blocks, query.lod_index, region_size);
+        let local_position = key.local_block_position(query.position_in_blocks, region_size);
         let region = self
-            .get_or_open_region(key, true, format)?
+            .get_or_open_region(key, true, meta.to_region_format())?
             .expect("create_if_not_found always returns a region or an error");
         region
             .with_file(|file| file.save_block(local_position, query.voxel_buffer, Compression::Lz4))
@@ -383,35 +644,110 @@ where
     }
 }
 
-fn format_for_block(block: &VoxelBuffer) -> Result<RegionFormat, VoxelStreamError> {
+fn visit_region_files(
+    root: &Path,
+    mut visit: impl FnMut(PathBuf, u8, Vector3i) -> Result<(), VoxelStreamError>,
+) -> Result<(), VoxelStreamError> {
+    if !root.is_dir() {
+        return Ok(());
+    }
+    // Root-level r.*.vxr is the legacy LOD0 layout. When lod0/ also exists,
+    // the current layout is authoritative (same precedence as loads) —
+    // walking both copies the same world positions twice.
+    let has_lod0_dir = root.join("lod0").is_dir();
+    if !has_lod0_dir {
+        visit_region_dir(root, 0, &mut visit)?;
+    }
+    for lod in 0..=MAX_LOD as u8 {
+        let lod_dir = root.join(format!("lod{lod}"));
+        if lod_dir.is_dir() {
+            visit_region_dir(&lod_dir, lod, &mut visit)?;
+        }
+    }
+    Ok(())
+}
+
+fn visit_region_dir(
+    dir: &Path,
+    lod_index: u8,
+    visit: &mut impl FnMut(PathBuf, u8, Vector3i) -> Result<(), VoxelStreamError>,
+) -> Result<(), VoxelStreamError> {
+    let entries = std::fs::read_dir(dir).map_err(|error| {
+        VoxelStreamError::Io(format!("read region directory {}: {error}", dir.display()))
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            VoxelStreamError::Io(format!("read region entry {}: {error}", dir.display()))
+        })?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Some(position) = parse_region_file_name(name) else {
+            continue;
+        };
+        visit(path, lod_index, position)?;
+    }
+    Ok(())
+}
+
+fn parse_region_file_name(name: &str) -> Option<Vector3i> {
+    let name = name.strip_suffix(".vxr")?;
+    let mut parts = name.split('.');
+    if parts.next()? != "r" {
+        return None;
+    }
+    let x = parts.next()?.parse().ok()?;
+    let y = parts.next()?.parse().ok()?;
+    let z = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(Vector3i::new(x, y, z))
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn format_for_block(
+    block: &VoxelBuffer,
+    region_size: i32,
+    sector_size: u32,
+) -> Result<RegionFormat, VoxelStreamError> {
     let size = block.size();
     if size.x <= 0
         || size.x != size.y
         || size.x != size.z
         || !u32::try_from(size.x).is_ok_and(|axis_size| axis_size.is_power_of_two())
     {
-        return Err(VoxelStreamError::BlockFormatMismatch);
+        return Err(VoxelStreamError::BlockFormatMismatch(
+            "block size must be cubic and a power of two".to_string(),
+        ));
     }
 
-    let block_size_po2 =
-        u8::try_from(size.x.ilog2()).map_err(|_| VoxelStreamError::BlockFormatMismatch)?;
+    let block_size_po2 = u8::try_from(size.x.ilog2())
+        .map_err(|_| VoxelStreamError::BlockFormatMismatch("block size po2 over u8".to_string()))?;
     let mut format = RegionFormat {
         block_size_po2,
-        region_size: Vector3i::splat(REGION_SIZE),
+        region_size: Vector3i::splat(region_size),
+        sector_size,
         ..RegionFormat::default()
     };
     for channel_index in 0..MAX_CHANNELS {
         format.channel_depths[channel_index] = block.channel_depth(channel_index);
     }
-    format
-        .validate_result()
-        .map_err(|_| VoxelStreamError::BlockFormatMismatch)?;
+    format.validate_result().map_err(|_| {
+        VoxelStreamError::BlockFormatMismatch("region format rejected the settings".to_string())
+    })?;
     Ok(format)
 }
 
 fn map_region_error(error: RegionError, path: &Path) -> VoxelStreamError {
     match error {
-        RegionError::BlockFormatMismatch => VoxelStreamError::BlockFormatMismatch,
+        RegionError::BlockFormatMismatch => VoxelStreamError::BlockFormatMismatch(
+            "region file header rejected the block".to_string(),
+        ),
         RegionError::InvalidBlockPosition => VoxelStreamError::InvalidBlockPosition {
             position: Vector3i::zero(),
         },
@@ -439,11 +775,12 @@ fn map_region_error(error: RegionError, path: &Path) -> VoxelStreamError {
 mod tests {
     use super::{
         flush_all, format_for_block, open_shared_region, region_identity_path_with,
-        RegionFilesStream, RegionKey, REGION_REGISTRY,
+        RegionFilesStream, RegionKey, REGION_REGISTRY, REGION_SIZE,
     };
     use crate::math::Vector3i;
     use crate::storage::{Allocator, ChannelId, VoxelBuffer};
     use crate::streams::compressed_data::Compression;
+    use crate::streams::region::forest_meta::{RegionForestMeta, META_FILE_NAME};
     use crate::streams::region::RegionFile;
     use crate::streams::{
         LoadResult, VoxelLoadQuery, VoxelSaveQuery, VoxelStream, VoxelStreamError,
@@ -524,6 +861,176 @@ mod tests {
     }
 
     #[test]
+    fn with_settings_uses_configured_region_size() {
+        let dir = TestDir::new();
+        let stream = RegionFilesStream::with_settings(dir.path().to_path_buf(), 16, 256);
+        assert_eq!(stream.region_size(), 16);
+        assert_eq!(stream.sector_size(), 256);
+        save(&stream, Vector3i::new(17, 0, 0), 0, &sample_block(9)).unwrap();
+        stream.flush().unwrap();
+        drop(stream);
+        let reopened = RegionFilesStream::with_settings(dir.path().to_path_buf(), 16, 256);
+        let (result, loaded) = load(&reopened, Vector3i::new(17, 0, 0), 0).unwrap();
+        assert_eq!(result, LoadResult::Found);
+        assert_eq!(loaded.get_voxel(1, 2, 3, ChannelId::Type.index()), 9);
+        // region_size 16 → block 17 maps to region x=1.
+        assert!(dir.path().join("lod0/r.1.0.0.vxr").is_file());
+    }
+
+    #[test]
+    fn convert_directory_rewrites_blocks_under_new_region_size() {
+        let src = TestDir::new();
+        let stream = RegionFilesStream::with_settings(src.path().to_path_buf(), 32, 512);
+        save(&stream, Vector3i::new(17, 0, 0), 0, &sample_block(11)).unwrap();
+        stream.flush().unwrap();
+        drop(stream);
+
+        let dest = TestDir::new();
+        let copied = RegionFilesStream::convert_directory(
+            src.path().to_path_buf(),
+            dest.path().to_path_buf(),
+            16,
+            256,
+        )
+        .unwrap();
+        assert_eq!(copied, 1);
+        let reopened = RegionFilesStream::with_settings(dest.path().to_path_buf(), 16, 256);
+        let (result, loaded) = load(&reopened, Vector3i::new(17, 0, 0), 0).unwrap();
+        assert_eq!(result, LoadResult::Found);
+        assert_eq!(loaded.get_voxel(1, 2, 3, ChannelId::Type.index()), 11);
+        assert!(dest.path().join("lod0/r.1.0.0.vxr").is_file());
+        assert!(dest.path().join(META_FILE_NAME).is_file());
+    }
+
+    #[test]
+    fn region_stream_round_trips_metadata_across_reopen() {
+        let dir = TestDir::new();
+        let stream = RegionFilesStream::new(dir.path().to_path_buf());
+        let position = Vector3i::new(2, -3, 4);
+
+        let mut block = sample_block(41);
+        block.set_block_metadata(crate::storage::MetadataValue::Bytes(vec![9, 8, 7]));
+        block.set_voxel_metadata(
+            Vector3i::new(1, 2, 3),
+            crate::storage::MetadataValue::Text("maple".into()),
+        );
+        save(&stream, position, 0, &block).unwrap();
+        stream.flush().unwrap();
+        drop(stream);
+
+        let reopened = RegionFilesStream::new(dir.path().to_path_buf());
+        let (result, loaded) = load(&reopened, position, 0).unwrap();
+        assert_eq!(result, LoadResult::Found);
+        assert_eq!(
+            *loaded.block_metadata(),
+            crate::storage::MetadataValue::Bytes(vec![9, 8, 7])
+        );
+        assert_eq!(
+            loaded.voxel_metadata(Vector3i::new(1, 2, 3)),
+            Some(&crate::storage::MetadataValue::Text("maple".into()))
+        );
+        assert_eq!(loaded.get_voxel(1, 2, 3, ChannelId::Type.index()), 41);
+    }
+
+    #[test]
+    fn convert_directory_preserves_metadata() {
+        let src = TestDir::new();
+        let stream = RegionFilesStream::with_settings(src.path().to_path_buf(), 32, 512);
+        let mut block = sample_block(11);
+        block.set_block_metadata(crate::storage::MetadataValue::Int(5));
+        block.set_voxel_metadata(
+            Vector3i::new(1, 2, 3),
+            crate::storage::MetadataValue::Float(1.5),
+        );
+        save(&stream, Vector3i::new(17, 0, 0), 0, &block).unwrap();
+        stream.flush().unwrap();
+        drop(stream);
+
+        let dest = TestDir::new();
+        let copied = RegionFilesStream::convert_directory(
+            src.path().to_path_buf(),
+            dest.path().to_path_buf(),
+            16,
+            256,
+        )
+        .unwrap();
+        assert_eq!(copied, 1);
+        let reopened = RegionFilesStream::with_settings(dest.path().to_path_buf(), 16, 256);
+        let (result, loaded) = load(&reopened, Vector3i::new(17, 0, 0), 0).unwrap();
+        assert_eq!(result, LoadResult::Found);
+        assert_eq!(
+            *loaded.block_metadata(),
+            crate::storage::MetadataValue::Int(5)
+        );
+        assert_eq!(
+            loaded.voxel_metadata(Vector3i::new(1, 2, 3)),
+            Some(&crate::storage::MetadataValue::Float(1.5))
+        );
+    }
+
+    #[test]
+    fn first_save_with_mismatched_block_size_does_not_poison_meta() {
+        // The stream's block_size_po2 (4 -> 16) does not match the actual
+        // buffer (32): the first save must fail WITHOUT writing meta.vxrm,
+        // so a subsequent correctly-sized save still succeeds.
+        let dir = TestDir::new();
+        let stream = RegionFilesStream::with_block_size(dir.path().to_path_buf(), 16, 256, 4);
+        let wrong = VoxelBuffer::with_size(Vector3i::splat(32));
+
+        assert!(matches!(
+            save(&stream, Vector3i::zero(), 0, &wrong),
+            Err(VoxelStreamError::BlockFormatMismatch(_))
+        ));
+        assert!(
+            !dir.path().join(META_FILE_NAME).is_file(),
+            "a rejected first save must not lock the forest format"
+        );
+
+        let right = VoxelBuffer::with_size(Vector3i::splat(16));
+        save(&stream, Vector3i::zero(), 0, &right).unwrap();
+        assert!(dir.path().join(META_FILE_NAME).is_file());
+    }
+
+    #[test]
+    fn first_save_writes_meta_vxrm_and_locks_channel_depths() {
+        let dir = TestDir::new();
+        let stream = RegionFilesStream::with_block_size(dir.path().to_path_buf(), 16, 256, 4);
+        let mut block = sample_block(3);
+        block.set_channel_depth(ChannelId::Sdf.index(), crate::storage::ChannelDepth::Bit32);
+        save(&stream, Vector3i::zero(), 0, &block).unwrap();
+        stream.flush().unwrap();
+        drop(stream);
+
+        let meta_path = dir.path().join(META_FILE_NAME);
+        assert!(meta_path.is_file());
+        let meta =
+            RegionForestMeta::from_json(&std::fs::read_to_string(meta_path).unwrap()).unwrap();
+        assert_eq!(meta.block_size_po2, 4);
+        assert_eq!(meta.region_size_po2, 4);
+        assert_eq!(meta.sector_size, 256);
+        assert_eq!(
+            meta.channel_depths[ChannelId::Sdf.index()],
+            crate::storage::ChannelDepth::Bit32
+        );
+
+        let reopened = RegionFilesStream::with_block_size(dir.path().to_path_buf(), 16, 256, 4);
+        let (result, loaded) = load(&reopened, Vector3i::zero(), 0).unwrap();
+        assert_eq!(result, LoadResult::Found);
+        assert_eq!(
+            loaded.channel_depth(ChannelId::Sdf.index()),
+            crate::storage::ChannelDepth::Bit32
+        );
+        assert_eq!(loaded.get_voxel(1, 2, 3, ChannelId::Type.index()), 3);
+
+        let mut other = sample_block(4);
+        other.set_channel_depth(ChannelId::Sdf.index(), crate::storage::ChannelDepth::Bit8);
+        assert!(matches!(
+            save(&reopened, Vector3i::new(1, 0, 0), 0, &other),
+            Err(VoxelStreamError::BlockFormatMismatch(_))
+        ));
+    }
+
+    #[test]
     fn keeps_same_position_separate_across_lods() {
         let dir = TestDir::new();
         let stream = RegionFilesStream::new(dir.path().to_path_buf());
@@ -586,7 +1093,7 @@ mod tests {
         let region = open_shared_region(
             unresolved_path.clone(),
             false,
-            format_for_block(&sample_block(1)).unwrap(),
+            format_for_block(&sample_block(1), REGION_SIZE, 512).unwrap(),
         )
         .unwrap();
 
@@ -624,7 +1131,7 @@ mod tests {
         let error = match open_shared_region(
             unresolved_path,
             true,
-            format_for_block(&sample_block(1)).unwrap(),
+            format_for_block(&sample_block(1), REGION_SIZE, 512).unwrap(),
         ) {
             Err(error) => error,
             Ok(_) => panic!("creation must not publish a region without a resolved parent"),
@@ -720,8 +1227,8 @@ mod tests {
             .join("voxel-data");
         let first = Arc::new(RegionFilesStream::new(directory.clone()));
         let second = Arc::new(RegionFilesStream::new(alias));
-        let key = RegionKey::from_block_position(Vector3i::zero(), 0);
-        let format = format_for_block(&sample_block(1)).unwrap();
+        let key = RegionKey::from_block_position(Vector3i::zero(), 0, REGION_SIZE);
+        let format = format_for_block(&sample_block(1), REGION_SIZE, 512).unwrap();
 
         save(&first, Vector3i::zero(), 0, &sample_block(1)).unwrap();
         let first_region = first
@@ -784,7 +1291,7 @@ mod tests {
         std::os::unix::fs::symlink(&physical_directory, dir.path().join("first-alias")).unwrap();
         std::os::unix::fs::symlink(&physical_directory, dir.path().join("second-alias")).unwrap();
 
-        let key = RegionKey::from_block_position(Vector3i::zero(), 0);
+        let key = RegionKey::from_block_position(Vector3i::zero(), 0, REGION_SIZE);
         let start = Arc::new(Barrier::new(2));
         let first_thread = {
             let stream = first.clone();
@@ -869,7 +1376,7 @@ mod tests {
         let legacy_path = dir.path().join("r.0.0.0.vxr");
         let existing_position = Vector3i::new(3, 0, 0);
         let added_position = Vector3i::new(4, 0, 0);
-        let format = format_for_block(&sample_block(1)).unwrap();
+        let format = format_for_block(&sample_block(1), REGION_SIZE, 512).unwrap();
 
         let mut legacy = RegionFile::open_with_format(&legacy_path, true, format.clone()).unwrap();
         legacy
@@ -911,7 +1418,7 @@ mod tests {
         let mut legacy = RegionFile::open_with_format(
             &legacy_path,
             true,
-            format_for_block(&original_block).unwrap(),
+            format_for_block(&original_block, REGION_SIZE, 512).unwrap(),
         )
         .unwrap();
         legacy
@@ -946,9 +1453,13 @@ mod tests {
         let dir = TestDir::new();
         std::fs::create_dir_all(dir.path().join("lod0")).unwrap();
         let stream = Arc::new(RegionFilesStream::new(dir.path().to_path_buf()));
-        let first_key = RegionKey::from_block_position(Vector3i::zero(), 0);
+        let first_key = RegionKey::from_block_position(Vector3i::zero(), 0, REGION_SIZE);
         let first_region = stream
-            .get_or_open_region(first_key, true, format_for_block(&sample_block(1)).unwrap())
+            .get_or_open_region(
+                first_key,
+                true,
+                format_for_block(&sample_block(1), REGION_SIZE, 512).unwrap(),
+            )
             .unwrap()
             .unwrap();
         let first_guard = first_region.lock();

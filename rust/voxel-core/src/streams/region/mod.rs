@@ -14,16 +14,17 @@
 //!   one synchronized handle per open region.
 //!
 //! ## Deferred
-//! - **Forest metadata and tools**: meta.vxrm JSON, LRU eviction,
-//!   `convert_files` — C++ surfaces tied to Godot `Resource`/`JSON`.
+//! - **LRU eviction** of open region handles.
 //! - **v2→v3 legacy migration**: needs `FileAccess::insert_bytes` (grow-file-
 //!   in-place); only relevant for reading old saves.
 //! - **Cross-process file locking** (`file_utils.h`).
 
+pub mod forest_meta;
 pub mod format;
 pub mod region_file;
 pub mod region_files_stream;
 
+pub use forest_meta::{RegionForestMeta, META_FILE_NAME};
 pub use format::{RegionBlockInfo, RegionFormat, FILE_EXTENSION, FORMAT_VERSION, MAGIC};
 pub use region_file::{RegionError, RegionFile};
 pub use region_files_stream::RegionFilesStream;

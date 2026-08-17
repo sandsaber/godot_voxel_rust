@@ -5,6 +5,7 @@
 //! and are engine-agnostic (no Godot dependency).
 
 use crate::math::{Vector3f, Vector3i};
+use crate::meshers::blocky::BakedLibrary;
 use crate::storage::{ChannelDepth, ChannelId, VoxelBuffer};
 
 /// Edit mode (add/remove/set). Matches C++ `Mode` in `funcs.h:492`.
@@ -73,6 +74,31 @@ impl<'a> VoxelToolBuffer<'a> {
     /// Edit an axis-aligned box from `min` to `max`.
     pub fn do_box(&mut self, min: Vector3i, max: Vector3i) {
         do_box(self.buffer, self.channel, self.mode, self.value, min, max);
+    }
+
+    /// Edit a hemisphere. `flat_direction` is the outward normal of the flat face.
+    pub fn do_hemisphere(
+        &mut self,
+        center: Vector3f,
+        radius: f32,
+        flat_direction: Vector3f,
+        smoothness: f32,
+    ) {
+        do_hemisphere(
+            self.buffer,
+            self.channel,
+            self.mode,
+            self.value,
+            center,
+            radius,
+            flat_direction,
+            smoothness,
+        );
+    }
+
+    /// Smooth the SDF channel inside a sphere of influence.
+    pub fn do_smooth(&mut self, center: Vector3f, radius: f32, blur_radius: i32) {
+        do_smooth(self.buffer, self.channel, center, radius, blur_radius);
     }
 
     /// Set a single voxel at integer position.
@@ -227,6 +253,136 @@ pub fn do_box(
     }
 }
 
+/// Signed distance of a hemisphere: the intersection of a sphere and the
+/// half-space opposite `flat_direction` (the outward normal of the flat face).
+/// `smoothness` > 0 rounds the crease with a polynomial smooth intersection.
+pub fn hemisphere_sdf(
+    point: Vector3f,
+    center: Vector3f,
+    radius: f32,
+    flat_direction: Vector3f,
+    smoothness: f32,
+) -> f32 {
+    let dx = point.x - center.x;
+    let dy = point.y - center.y;
+    let dz = point.z - center.z;
+    let sphere = (dx * dx + dy * dy + dz * dz).sqrt() - radius;
+    let len_sq = flat_direction.x * flat_direction.x
+        + flat_direction.y * flat_direction.y
+        + flat_direction.z * flat_direction.z;
+    let (nx, ny, nz) = if len_sq > 1e-16 {
+        let inv = len_sq.sqrt().recip();
+        (
+            flat_direction.x * inv,
+            flat_direction.y * inv,
+            flat_direction.z * inv,
+        )
+    } else {
+        (0.0, 1.0, 0.0)
+    };
+    let plane = dx * nx + dy * ny + dz * nz;
+    smooth_intersection(sphere, plane, smoothness.max(0.0))
+}
+
+fn smooth_union(a: f32, b: f32, k: f32) -> f32 {
+    if k <= 0.0 {
+        return a.min(b);
+    }
+    let h = (0.5 + 0.5 * (b - a) / k).clamp(0.0, 1.0);
+    b * (1.0 - h) + a * h - k * h * (1.0 - h)
+}
+
+fn smooth_intersection(a: f32, b: f32, k: f32) -> f32 {
+    if k <= 0.0 {
+        return a.max(b);
+    }
+    -smooth_union(-a, -b, k)
+}
+
+/// Apply a hemisphere edit to a VoxelBuffer's channel.
+#[allow(clippy::too_many_arguments)]
+pub fn do_hemisphere(
+    buffer: &mut VoxelBuffer,
+    channel: usize,
+    mode: EditMode,
+    value: u64,
+    center: Vector3f,
+    radius: f32,
+    flat_direction: Vector3f,
+    smoothness: f32,
+) {
+    let depth = buffer.channel_depth(channel);
+    let is_sdf = channel == ChannelId::Sdf.index();
+    let size = buffer.size();
+    let pad = radius + smoothness.max(0.0);
+    let min = Vector3i::new(
+        (center.x - pad).floor() as i32,
+        (center.y - pad).floor() as i32,
+        (center.z - pad).floor() as i32,
+    )
+    .max_element(Vector3i::zero());
+    let max = Vector3i::new(
+        (center.x + pad).ceil() as i32,
+        (center.y + pad).ceil() as i32,
+        (center.z + pad).ceil() as i32,
+    )
+    .min_element(size);
+    if min.x >= max.x || min.y >= max.y || min.z >= max.z {
+        return;
+    }
+
+    buffer.decompress_channel(channel);
+
+    for z in min.z..max.z {
+        for y in min.y..max.y {
+            for x in min.x..max.x {
+                let point = Vector3f::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
+                let sdf = hemisphere_sdf(point, center, radius, flat_direction, smoothness);
+                if sdf > 0.0 {
+                    continue;
+                }
+                if is_sdf && depth != ChannelDepth::Bit8 {
+                    let existing = buffer.get_voxel_f(x, y, z, channel);
+                    let blended = blend_sdf(existing, sdf, mode);
+                    buffer.set_voxel_f(blended, x, y, z, channel);
+                } else {
+                    match mode {
+                        EditMode::Add => {
+                            let cur = buffer.get_voxel(x, y, z, channel);
+                            if cur == 0 {
+                                buffer.set_voxel(value, x, y, z, channel);
+                            }
+                        }
+                        EditMode::Remove => {
+                            buffer.set_voxel(0, x, y, z, channel);
+                        }
+                        EditMode::Set => {
+                            buffer.set_voxel(value, x, y, z, channel);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Smooth the SDF channel inside a sphere of influence using [`box_blur`].
+pub fn do_smooth(
+    buffer: &mut VoxelBuffer,
+    channel: usize,
+    center: Vector3f,
+    radius: f32,
+    blur_radius: i32,
+) {
+    if channel != ChannelId::Sdf.index() || !radius.is_finite() || radius < 0.0 {
+        return;
+    }
+    let mut src = VoxelBuffer::with_size(buffer.size());
+    src.set_channel_depth(channel, buffer.channel_depth(channel));
+    src.copy_channel_from(buffer, channel);
+    box_blur(&src, buffer, blur_radius.max(0), center, radius);
+}
+
 /// Blend the shape SDF with the existing voxel SDF value.
 pub fn blend_sdf(existing: f32, shape_sdf: f32, mode: EditMode) -> f32 {
     match mode {
@@ -345,6 +501,32 @@ pub fn box_blur(
     }
 }
 
+/// Whether a voxel id should participate in blocky random-tick.
+///
+/// When a baked library is present the model must be `is_random_tickable`,
+/// and `tags_mask` (when non-zero) must intersect the model's tag bits.
+/// Without a library, non-zero voxels are candidates; a non-zero `tags_mask`
+/// then filters by `(voxel_id as u32) & tags_mask`.
+pub fn voxel_is_random_tick_candidate(
+    voxel: u64,
+    tags_mask: u32,
+    library: Option<&BakedLibrary>,
+) -> bool {
+    if voxel == 0 {
+        return false;
+    }
+    if let Some(library) = library {
+        let Some(model) = library.models.get(voxel as usize) else {
+            return false;
+        };
+        if !model.is_random_tickable {
+            return false;
+        }
+        return tags_mask == 0 || (model.tags_mask & tags_mask) != 0;
+    }
+    tags_mask == 0 || ((voxel as u32) & tags_mask) != 0
+}
+
 /// Run blocky random tick: iterate over random tickable voxels within a box
 /// and invoke `callback` for each one selected. Returns the number of
 /// callbacks invoked. Matches `ops::run_blocky_random_tick` semantics:
@@ -356,6 +538,7 @@ pub fn run_blocky_random_tick<F: FnMut(Vector3i)>(
     tickable_id: u64,
     channel: usize,
     batch_count: usize,
+    seed: u32,
     callback: F,
 ) {
     let mut callback = callback;
@@ -380,15 +563,14 @@ pub fn run_blocky_random_tick<F: FnMut(Vector3i)>(
         return;
     }
 
-    // Simple deterministic iteration (not truly random — mirrors the "tick"
-    // semantic without needing a PRNG dependency).
-    let step = (candidates.len() / batch_count.max(1)).max(1);
-    let mut invoked = 0usize;
-    for (i, &pos) in candidates.iter().enumerate() {
-        if i % step == 0 && invoked < batch_count {
-            callback(pos);
-            invoked += 1;
-        }
+    // Draw uniformly random candidates per call (upstream semantics: a
+    // fixed-stride subset would re-tick the same positions forever and
+    // permanently starve the rest). Deterministic under a fixed seed.
+    let mut rng = crate::instancing::scatter::SimpleRng::new(seed);
+    let draws = batch_count.min(candidates.len());
+    for _ in 0..draws {
+        let index = (rng.next_u32() as usize) % candidates.len();
+        callback(candidates[index]);
     }
 }
 
@@ -403,6 +585,35 @@ mod tests {
         fmt.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
         fmt.configure_buffer(&mut buf);
         buf
+    }
+
+    #[test]
+    fn random_tick_candidate_honors_tags_and_library() {
+        assert!(!voxel_is_random_tick_candidate(0, 0, None));
+        assert!(voxel_is_random_tick_candidate(3, 0, None));
+        assert!(voxel_is_random_tick_candidate(3, 1, None));
+        assert!(!voxel_is_random_tick_candidate(2, 1, None));
+
+        let library = crate::meshers::blocky::BakedLibrary {
+            models: vec![
+                crate::meshers::blocky::BakedModel::default(),
+                crate::meshers::blocky::BakedModel {
+                    is_random_tickable: true,
+                    tags_mask: 0b01,
+                    ..crate::meshers::blocky::BakedModel::default()
+                },
+                crate::meshers::blocky::BakedModel {
+                    is_random_tickable: false,
+                    tags_mask: 0b01,
+                    ..crate::meshers::blocky::BakedModel::default()
+                },
+            ],
+            ..crate::meshers::blocky::BakedLibrary::default()
+        };
+        assert!(voxel_is_random_tick_candidate(1, 0, Some(&library)));
+        assert!(voxel_is_random_tick_candidate(1, 0b01, Some(&library)));
+        assert!(!voxel_is_random_tick_candidate(1, 0b10, Some(&library)));
+        assert!(!voxel_is_random_tick_candidate(2, 0, Some(&library)));
     }
 
     #[test]
@@ -428,6 +639,49 @@ mod tests {
         // Corner should still be outside.
         let corner = buf.get_voxel_f(0, 0, 0, ch);
         assert!(corner > 0.0, "corner should remain air, got {corner}");
+    }
+
+    #[test]
+    fn do_hemisphere_is_half_of_a_sphere() {
+        let mut buf = make_buffer(16);
+        let ch = ChannelId::Sdf.index();
+        buf.clear_channel_f(ch, 100.0);
+        do_hemisphere(
+            &mut buf,
+            ch,
+            EditMode::Add,
+            1,
+            Vector3f::new(8.0, 8.0, 8.0),
+            4.0,
+            Vector3f::new(0.0, 1.0, 0.0),
+            0.0,
+        );
+        assert!(
+            buf.get_voxel_f(8, 6, 8, ch) < 0.0,
+            "below the equator should be solid"
+        );
+        assert!(
+            buf.get_voxel_f(8, 10, 8, ch) > 0.0,
+            "above the flat face should stay air"
+        );
+    }
+
+    #[test]
+    fn do_smooth_moves_a_sharp_sdf_boundary() {
+        let mut buf = make_buffer(8);
+        let ch = ChannelId::Sdf.index();
+        buf.clear_channel_f(ch, 1.0);
+        for z in 0..8 {
+            for y in 0..8 {
+                for x in 0..4 {
+                    buf.set_voxel_f(-1.0, x, y, z, ch);
+                }
+            }
+        }
+        let before = buf.get_voxel_f(3, 4, 4, ch);
+        do_smooth(&mut buf, ch, Vector3f::new(4.0, 4.0, 4.0), 8.0, 1);
+        let after = buf.get_voxel_f(3, 4, 4, ch);
+        assert!(after > before, "blur should pull the solid side toward air");
     }
 
     #[test]

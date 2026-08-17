@@ -146,6 +146,28 @@ func _edit_voxel_for_mesh(mesh_instance: MeshInstance3D) -> Vector3i:
 	)
 
 
+func _wait_for_remesh(
+	terrain: Node3D,
+	instance_id: int,
+	old_mesh_id: int
+) -> bool:
+	# Remesh uploads a fresh ArrayMesh onto the SAME MeshInstance3D; the node
+	# is intentionally reused (upstream parity). Wait for the mesh resource to
+	# change identity while the node stays alive.
+	var deadline := Time.get_ticks_msec() + WAIT_TIMEOUT_MSEC
+	while Time.get_ticks_msec() < deadline:
+		await get_tree().process_frame
+		for current in _mesh_children(terrain):
+			if (
+				current.get_instance_id() == instance_id
+				and current.mesh != null
+				and current.mesh.get_surface_count() > 0
+				and current.mesh.get_instance_id() != old_mesh_id
+			):
+				return true
+	return false
+
+
 func _wait_for_replacement(
 	terrain: Node3D,
 	mesh_position: Vector3,
@@ -229,7 +251,7 @@ func _snapshot_buffer_values(buffer: RefCounted) -> Array[int]:
 	return values
 
 
-func _exercise_invalid_calls(terrain: Node3D, edited_voxel: Vector3i, edited_value: float) -> void:
+func _exercise_invalid_calls(terrain: Node3D, edited_voxel: Vector3i) -> void:
 	var buffer: RefCounted = ClassDB.instantiate("VoxelBuffer")
 	_ok(buffer != null, "VoxelBuffer exists for invalid-input checks")
 	if buffer == null:
@@ -286,6 +308,9 @@ func _exercise_invalid_calls(terrain: Node3D, edited_voxel: Vector3i, edited_val
 		)
 
 	var mesh_count_before := int(terrain.get_mesh_block_count())
+	var baseline_value := float(terrain.get_voxel_sdf(
+		edited_voxel.x, edited_voxel.y, edited_voxel.z
+	))
 	var invalid_negative = terrain.raycast(0.0, 100.0, 0.0, 0.0, -1.0, 0.0, -1.0)
 	var invalid_infinite = terrain.raycast(
 		0.0, 100.0, 0.0, 0.0, -1.0, 0.0, INF
@@ -305,7 +330,7 @@ func _exercise_invalid_calls(terrain: Node3D, edited_voxel: Vector3i, edited_val
 		and invalid_oversized.is_empty()
 		and not invalid_edit_ok
 		and int(terrain.get_mesh_block_count()) == mesh_count_before
-		and is_equal_approx(value_after, edited_value),
+		and is_equal_approx(value_after, baseline_value),
 		"invalid raycast and SDF calls return safely without changing terrain state"
 	)
 
@@ -336,9 +361,14 @@ func _run_lifecycle_checks() -> void:
 	var target_id := target.get_instance_id()
 	var target_position := target.position
 	var old_target_ref: WeakRef = weakref(target)
+	var target_mesh_id := (
+		target.mesh.get_instance_id() if target.mesh != null else 0
+	)
 	var edit_voxel := _edit_voxel_for_mesh(target)
 	var old_value := float(terrain.get_voxel_sdf(edit_voxel.x, edit_voxel.y, edit_voxel.z))
 	var edited_value := -1.0 if old_value >= 0.0 else 1.0
+	# NOTE: do_sphere below may rewrite the same voxel; edited_value is
+	# re-snapshotted afterwards so later assertions compare against reality.
 	var edit_ok := bool(terrain.set_voxel_sdf(
 		edit_voxel.x, edit_voxel.y, edit_voxel.z, edited_value
 	))
@@ -353,10 +383,15 @@ func _run_lifecycle_checks() -> void:
 	var tool = terrain.get_voxel_tool()
 	_ok(tool != null, "get_voxel_tool returns a live VoxelToolTerrain")
 	if tool != null:
-		var before := float(terrain.get_voxel_sdf(edit_voxel.x, edit_voxel.y, edit_voxel.z))
+		# Force the strong branch: an Add sphere centered on an air voxel
+		# (SDF +1) must solidify it, regardless of which mesh uploaded first
+		# (the old `after != before or after < 0.0` form passed vacuously
+		# whenever the pre-edit voxel was already solid).
+		assert(bool(terrain.set_voxel_sdf(edit_voxel.x, edit_voxel.y, edit_voxel.z, 1.0)))
 		tool.do_sphere(Vector3(edit_voxel.x, edit_voxel.y, edit_voxel.z), 1.5, 0)
 		var after := float(terrain.get_voxel_sdf(edit_voxel.x, edit_voxel.y, edit_voxel.z))
-		_ok(after != before or after < 0.0, "VoxelToolTerrain.do_sphere edits the bound terrain")
+		_ok(after < 0.0, "VoxelToolTerrain.do_sphere solidifies a +1 SDF voxel (after=%f)" % after)
+		edited_value = after
 	_ok(
 		bool(terrain.flush_pending_saves())
 		and terrain.is_inside_tree()
@@ -367,26 +402,23 @@ func _run_lifecycle_checks() -> void:
 		"explicit save flush succeeds without deactivating the viewed terrain"
 	)
 
-	var replacement := await _wait_for_replacement(
-		terrain, target_position, target_id
-	)
+	var remeshed := await _wait_for_remesh(terrain, target_id, target_mesh_id)
 	_ok(
-		replacement != null
-		and replacement.get_instance_id() != target_id
-		and old_target_ref.get_ref() == null,
-		"SDF edit replaces the target MeshInstance3D with a new object instance"
+		remeshed
+		and old_target_ref.get_ref() != null,
+		"SDF edit swaps the ArrayMesh on the same MeshInstance3D (node identity preserved)"
 	)
 
-	_exercise_invalid_calls(terrain, edit_voxel, edited_value)
+	_exercise_invalid_calls(terrain, edit_voxel)
 
-	if replacement != null:
-		var replacement_ref: WeakRef = weakref(replacement)
+	if remeshed:
+		var replacement_ref: WeakRef = weakref(target)
 		var viewer := _viewer(terrain)
 		_ok(viewer != null, "terrain viewer remains available for unload check")
 		if viewer != null:
 			viewer.position = Vector3(4096.0, 4096.0, 4096.0)
 			var removed := await _wait_for_removal(
-				terrain, replacement.position, replacement_ref
+				terrain, target_position, replacement_ref
 			)
 			_ok(
 				removed,

@@ -51,7 +51,7 @@ jobs:
       - name: Run ${{ matrix.target }} fuzzer (60s bounded)
         run: |
           set +e
-          timeout 70 cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=60 -max_len=4096
+          timeout 70 cargo +nightly fuzz run ${{ matrix.target }} fuzz/seed_corpus/${{ matrix.target }} -- -max_total_time=60 -max_len=4096
           ec=$?
           # timeout exits 124 on a clean time-out (success); real crashes are non-124 non-zero.
           if [ "$ec" = "124" ]; then exit 0; fi

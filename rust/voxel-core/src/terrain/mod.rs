@@ -6,6 +6,10 @@
 //! `terrain/variable_lod/`. Godot `Node3D` / `RenderingServer` glue lives in
 //! the `voxel-gdext` crate.
 
+pub mod area_finder;
+pub mod replication;
+
+pub use area_finder::{box_subtraction, AreaError, AreaId, VoxelAreaFinder, MAX_CELLS_PER_AREA};
 pub mod clipbox_coordinator;
 #[allow(dead_code)] // Dormant Task 6 ledger; VoxelTerrainCore adoption is the next bounded slice.
 pub(super) mod coverage_hold_ledger;
@@ -23,13 +27,13 @@ pub use variable_lod_coverage::{
     RenderTopologyBatch, TopologyOperation, TransitionFace, TransitionMask, VariableLodCoverage,
 };
 pub use voxel_terrain_core::{
-    DataRefField, IndeterminateIoResolution, JournalPersistenceState, MeshBlockEntry,
-    MeshLifecycleEventDescriptor, MeshLifecycleEventKind, MeshOutputApplyError, MeshRefField,
-    PairedViewer, PersistenceOperation, PreparedPublicationConflict, SaveFlushError,
-    UnsavedBlockSave, UnsavedBlockSaveDetails, VariableLodConstructionError,
-    VariableLodCoverageHoldError, ViewerId, ViewerInputError, ViewerState, ViewerUpdate,
-    VoxelEditOutcome, VoxelTerrainCore, VoxelTerrainDataView, VoxelTerrainEvent,
-    VoxelTerrainRuntimeError, VoxelTerrainStats,
+    DataRefField, DebugEditedBlock, DebugMeshBlock, IndeterminateIoResolution,
+    JournalPersistenceState, MeshBlockEntry, MeshLifecycleEventDescriptor, MeshLifecycleEventKind,
+    MeshOutputApplyError, MeshRefField, PairedViewer, PersistenceOperation,
+    PreparedPublicationConflict, SaveFlushError, TerrainDebugSnapshot, UnsavedBlockSave,
+    UnsavedBlockSaveDetails, VariableLodConstructionError, VariableLodCoverageHoldError, ViewerId,
+    ViewerInputError, ViewerState, ViewerUpdate, VoxelEditOutcome, VoxelTerrainCore,
+    VoxelTerrainDataView, VoxelTerrainEvent, VoxelTerrainRuntimeError, VoxelTerrainStats,
 };
 
 // Task 4/6 integration seam. These zero-runtime function-pointer contracts

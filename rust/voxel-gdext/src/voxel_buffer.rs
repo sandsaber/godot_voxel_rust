@@ -3,11 +3,16 @@
 //! `VoxelBufferGD` exposes a VoxelBuffer as a Godot RefCounted.
 //! `VoxelInstancerGD` is a Node3D for scatter-based instance placement.
 
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+use godot::classes::multi_mesh::TransformFormat;
+use godot::classes::{BoxMesh, MultiMesh, MultiMeshInstance3D, Node3D, PackedScene};
 use godot::prelude::*;
 use voxel_core::instancing::scatter::{InstanceGenerator, RandomScatterGenerator};
-use voxel_core::instancing::{InstanceLibrary, ScatterConfig};
+use voxel_core::instancing::{BlockInstanceData, InstanceLibrary, InstanceMeshType, ScatterConfig};
 use voxel_core::math::{Vector3f, Vector3i};
-use voxel_core::storage::{ChannelId, VoxelBuffer, VoxelFormat};
+use voxel_core::storage::{ChannelId, MetadataValue, VoxelBuffer, VoxelFormat};
 
 pub(crate) const MAX_SCRIPT_ITEMS: usize = 65_536;
 pub(crate) const MAX_SCRIPT_VOXELS: u64 = 2_097_152;
@@ -64,6 +69,279 @@ pub(crate) fn validate_position(
 
 pub(crate) fn validate_voxel_value(value: i64) -> Result<u64, &'static str> {
     u64::try_from(value).map_err(|_| "voxel value must be non-negative")
+}
+
+pub(crate) fn metadata_from_variant(value: &Variant) -> Result<MetadataValue, &'static str> {
+    if value.is_nil() {
+        return Ok(MetadataValue::Nil);
+    }
+    if let Ok(v) = value.try_to::<i64>() {
+        return Ok(MetadataValue::Int(v));
+    }
+    if let Ok(v) = value.try_to::<f64>() {
+        return Ok(MetadataValue::Float(v));
+    }
+    if let Ok(v) = value.try_to::<GString>() {
+        return Ok(MetadataValue::Text(v.to_string()));
+    }
+    if let Ok(v) = value.try_to::<PackedByteArray>() {
+        return Ok(MetadataValue::Bytes(v.as_slice().to_vec()));
+    }
+    // Wide (R7) types: bool, vectors, rect/plane/quaternion/AABB/color,
+    // Dictionary, Array, and packed arrays map onto the Variant arm.
+    if let Some(wide) = variant_wire_from_godot(value) {
+        return Ok(MetadataValue::Variant(wide));
+    }
+    Err("metadata must be nil, int, float, String, PackedByteArray, bool, Vector2/3/4, Rect2, Plane, Quaternion, AABB, Color, Dictionary, Array, or a packed array")
+}
+
+pub(crate) fn metadata_to_variant(value: &MetadataValue) -> Variant {
+    match value {
+        MetadataValue::Nil => Variant::nil(),
+        MetadataValue::Int(v) => v.to_variant(),
+        MetadataValue::Float(v) => v.to_variant(),
+        MetadataValue::Text(v) => GString::from(v.as_str()).to_variant(),
+        MetadataValue::Bytes(v) => PackedByteArray::from(v.as_slice()).to_variant(),
+        MetadataValue::Variant(v) => variant_wire_to_godot(v),
+    }
+}
+
+fn variant_wire_to_godot(value: &voxel_core::streams::variant_wire::VariantWireValue) -> Variant {
+    use godot::builtin::{Aabb as GAabb, Plane as GPlane, Rect2};
+    use voxel_core::streams::variant_wire::VariantWireValue as V;
+    match value {
+        V::Nil => Variant::nil(),
+        V::Bool(b) => b.to_variant(),
+        V::Int(i) => i.to_variant(),
+        V::Float(f) => f.to_variant(),
+        V::Text(s) => GString::from(s.as_str()).to_variant(),
+        V::Vector2(v) => godot::builtin::Vector2::new(v[0] as f32, v[1] as f32).to_variant(),
+        V::Vector2i(v) => godot::builtin::Vector2i::new(v[0], v[1]).to_variant(),
+        V::Rect2(v) => {
+            Rect2::from_components(v[0] as f32, v[1] as f32, v[2] as f32, v[3] as f32).to_variant()
+        }
+        V::Rect2i(v) => {
+            godot::builtin::Rect2i::from_components(v[0], v[1], v[2], v[3]).to_variant()
+        }
+        V::Vector3(v) => {
+            godot::builtin::Vector3::new(v[0] as f32, v[1] as f32, v[2] as f32).to_variant()
+        }
+        V::Vector3i(v) => godot::builtin::Vector3i::new(v[0], v[1], v[2]).to_variant(),
+        V::Vector4(v) => {
+            godot::builtin::Vector4::new(v[0] as f32, v[1] as f32, v[2] as f32, v[3] as f32)
+                .to_variant()
+        }
+        V::Vector4i(v) => godot::builtin::Vector4i::new(v[0], v[1], v[2], v[3]).to_variant(),
+        V::Plane(v) => GPlane::new(
+            godot::builtin::Vector3::new(v[0] as f32, v[1] as f32, v[2] as f32),
+            v[3] as f32,
+        )
+        .to_variant(),
+        V::Quaternion(v) => {
+            godot::builtin::Quaternion::new(v[0] as f32, v[1] as f32, v[2] as f32, v[3] as f32)
+                .to_variant()
+        }
+        V::Aabb(v) => GAabb::new(
+            godot::builtin::Vector3::new(v[0] as f32, v[1] as f32, v[2] as f32),
+            godot::builtin::Vector3::new(v[3] as f32, v[4] as f32, v[5] as f32),
+        )
+        .to_variant(),
+        V::Color(v) => godot::builtin::Color::from_rgba(v[0], v[1], v[2], v[3]).to_variant(),
+        V::Array(items) => {
+            let mut arr = VarArray::new();
+            for item in items {
+                arr.push(&variant_wire_to_godot(item));
+            }
+            arr.to_variant()
+        }
+        V::Dictionary(pairs) => {
+            let mut dict = VarDictionary::new();
+            for (key, value) in pairs {
+                let key = variant_wire_to_godot(key);
+                let value = variant_wire_to_godot(value);
+                dict.set(&key, &value);
+            }
+            dict.to_variant()
+        }
+        V::ByteArray(bytes) => PackedByteArray::from(bytes.as_slice()).to_variant(),
+        V::Int32Array(items) => PackedInt32Array::from(items.as_slice()).to_variant(),
+        V::Int64Array(items) => PackedInt64Array::from(items.as_slice()).to_variant(),
+        V::Float32Array(items) => PackedFloat32Array::from(items.as_slice()).to_variant(),
+        V::Float64Array(items) => PackedFloat64Array::from(items.as_slice()).to_variant(),
+        V::StringArray(items) => {
+            PackedStringArray::from_iter(items.iter().map(|s| GString::from(s.as_str())))
+                .to_variant()
+        }
+        V::Vector2Array(items) => PackedVector2Array::from_iter(
+            items
+                .iter()
+                .map(|v| godot::builtin::Vector2::new(v[0] as f32, v[1] as f32)),
+        )
+        .to_variant(),
+        V::Vector3Array(items) => PackedVector3Array::from_iter(
+            items
+                .iter()
+                .map(|v| godot::builtin::Vector3::new(v[0] as f32, v[1] as f32, v[2] as f32)),
+        )
+        .to_variant(),
+        V::ColorArray(items) => PackedColorArray::from_iter(
+            items
+                .iter()
+                .map(|c| godot::builtin::Color::from_rgba(c[0], c[1], c[2], c[3])),
+        )
+        .to_variant(),
+    }
+}
+
+/// Convert a Godot Variant into the wide wire representation. Returns None
+/// for types outside the supported metadata subset.
+fn variant_wire_from_godot(
+    value: &Variant,
+) -> Option<voxel_core::streams::variant_wire::VariantWireValue> {
+    variant_wire_from_godot_depth(value, 0)
+}
+
+/// Max nesting accepted from GDScript — matches the wire decoder's
+/// DecodeLimits::max_variant_depth default.
+const VARIANT_CONVERSION_MAX_DEPTH: u32 = 64;
+
+fn variant_wire_from_godot_depth(
+    value: &Variant,
+    depth: u32,
+) -> Option<voxel_core::streams::variant_wire::VariantWireValue> {
+    if depth > VARIANT_CONVERSION_MAX_DEPTH {
+        return None; // cyclic or absurdly nested — reject whole-value
+    }
+    use voxel_core::streams::variant_wire::VariantWireValue as V;
+    // Scalars must map too: the canonical C++ metadata dictionary is
+    // string keys with int/float/string/null values.
+    if value.is_nil() {
+        return Some(V::Nil);
+    }
+    if let Ok(v) = value.try_to::<i64>() {
+        return Some(V::Int(v));
+    }
+    if let Ok(v) = value.try_to::<f64>() {
+        return Some(V::Float(v));
+    }
+    if let Ok(v) = value.try_to::<GString>() {
+        return Some(V::Text(v.to_string()));
+    }
+    if let Ok(b) = value.try_to::<bool>() {
+        return Some(V::Bool(b));
+    }
+    if let Ok(v) = value.try_to::<godot::builtin::Vector2>() {
+        return Some(V::Vector2([v.x as f64, v.y as f64]));
+    }
+    if let Ok(v) = value.try_to::<godot::builtin::Vector2i>() {
+        return Some(V::Vector2i([v.x, v.y]));
+    }
+    if let Ok(v) = value.try_to::<godot::builtin::Rect2>() {
+        return Some(V::Rect2([
+            v.position.x as f64,
+            v.position.y as f64,
+            v.size.x as f64,
+            v.size.y as f64,
+        ]));
+    }
+    if let Ok(v) = value.try_to::<godot::builtin::Rect2i>() {
+        return Some(V::Rect2i([v.position.x, v.position.y, v.size.x, v.size.y]));
+    }
+    if let Ok(v) = value.try_to::<godot::builtin::Vector3>() {
+        return Some(V::Vector3([v.x as f64, v.y as f64, v.z as f64]));
+    }
+    if let Ok(v) = value.try_to::<godot::builtin::Vector3i>() {
+        return Some(V::Vector3i([v.x, v.y, v.z]));
+    }
+    if let Ok(v) = value.try_to::<godot::builtin::Vector4>() {
+        return Some(V::Vector4([v.x as f64, v.y as f64, v.z as f64, v.w as f64]));
+    }
+    if let Ok(v) = value.try_to::<godot::builtin::Vector4i>() {
+        return Some(V::Vector4i([v.x, v.y, v.z, v.w]));
+    }
+    if let Ok(v) = value.try_to::<godot::builtin::Plane>() {
+        return Some(V::Plane([
+            v.normal.x as f64,
+            v.normal.y as f64,
+            v.normal.z as f64,
+            v.d as f64,
+        ]));
+    }
+    if let Ok(v) = value.try_to::<godot::builtin::Quaternion>() {
+        return Some(V::Quaternion([
+            v.x as f64, v.y as f64, v.z as f64, v.w as f64,
+        ]));
+    }
+    if let Ok(v) = value.try_to::<godot::builtin::Aabb>() {
+        return Some(V::Aabb([
+            v.position.x as f64,
+            v.position.y as f64,
+            v.position.z as f64,
+            v.size.x as f64,
+            v.size.y as f64,
+            v.size.z as f64,
+        ]));
+    }
+    if let Ok(v) = value.try_to::<godot::builtin::Color>() {
+        return Some(V::Color([v.r, v.g, v.b, v.a]));
+    }
+    if let Ok(dict) = value.try_to::<VarDictionary>() {
+        let mut pairs = Vec::new();
+        for (key, value) in dict.iter_shared() {
+            // Nested keys: wide types only; unsupported key types reject the
+            // whole conversion (None) rather than half-converting.
+            let key = variant_wire_from_godot_depth(&key, depth + 1)?;
+            let value = variant_wire_from_godot_depth(&value, depth + 1)?;
+            pairs.push((key, value));
+        }
+        return Some(V::Dictionary(pairs));
+    }
+    if let Ok(arr) = value.try_to::<VarArray>() {
+        let mut items = Vec::new();
+        for item in arr.iter_shared() {
+            items.push(variant_wire_from_godot_depth(&item, depth + 1)?);
+        }
+        return Some(V::Array(items));
+    }
+    if let Ok(v) = value.try_to::<PackedInt32Array>() {
+        return Some(V::Int32Array(v.as_slice().to_vec()));
+    }
+    if let Ok(v) = value.try_to::<PackedInt64Array>() {
+        return Some(V::Int64Array(v.as_slice().to_vec()));
+    }
+    if let Ok(v) = value.try_to::<PackedFloat32Array>() {
+        return Some(V::Float32Array(v.as_slice().to_vec()));
+    }
+    if let Ok(v) = value.try_to::<PackedFloat64Array>() {
+        return Some(V::Float64Array(v.as_slice().to_vec()));
+    }
+    if let Ok(v) = value.try_to::<PackedStringArray>() {
+        return Some(V::StringArray(
+            v.as_slice().iter().map(|s| s.to_string()).collect(),
+        ));
+    }
+    if let Ok(v) = value.try_to::<PackedVector2Array>() {
+        return Some(V::Vector2Array(
+            v.as_slice()
+                .iter()
+                .map(|v| [v.x as f64, v.y as f64])
+                .collect(),
+        ));
+    }
+    if let Ok(v) = value.try_to::<PackedVector3Array>() {
+        return Some(V::Vector3Array(
+            v.as_slice()
+                .iter()
+                .map(|v| [v.x as f64, v.y as f64, v.z as f64])
+                .collect(),
+        ));
+    }
+    if let Ok(v) = value.try_to::<PackedColorArray>() {
+        return Some(V::ColorArray(
+            v.as_slice().iter().map(|c| [c.r, c.g, c.b, c.a]).collect(),
+        ));
+    }
+    None
 }
 
 pub(crate) fn validate_finite_f64(value: f64) -> Result<f32, &'static str> {
@@ -728,74 +1006,118 @@ impl VoxelBufferGD {
     }
 
     // ---- Block metadata (C++ `VoxelBuffer::set_block_metadata` family) ----
-    // The voxel-core port does not model block metadata yet, so these are
-    // no-op stubs that log once. They keep the GDScript API surface intact.
+    // Persisted through the v4 block serializer metadata section (R7 narrow).
+    // Supported payloads: nil/int/float/String/PackedByteArray. C++ Variant
+    // (Dictionary/Object) payloads need the wide R7 codec.
 
-    /// Sets opaque block metadata. Stubbed (voxel-core has no metadata yet).
+    /// Sets opaque block metadata on this buffer.
     #[func]
-    fn set_block_metadata(&mut self, _metadata: Variant) {
-        godot_error!("VoxelBuffer.set_block_metadata: not implemented in this port");
+    fn set_block_metadata(&mut self, metadata: Variant) {
+        match metadata_from_variant(&metadata) {
+            Ok(value) => self.buffer.set_block_metadata(value),
+            Err(error) => godot_error!("VoxelBuffer.set_block_metadata: {error}"),
+        }
     }
 
-    /// Returns opaque block metadata. Stubbed (voxel-core has no metadata yet).
+    /// Returns opaque block metadata, or `nil` when none is set.
     #[func]
     fn get_block_metadata(&self) -> Variant {
-        godot_error!("VoxelBuffer.get_block_metadata: not implemented in this port");
-        Variant::nil()
+        metadata_to_variant(self.buffer.block_metadata())
     }
 
     // ---- Per-voxel metadata (C++ `VoxelBuffer::set_voxel_metadata` family) ----
 
-    /// Sets the metadata entry for a single voxel. Stubbed.
+    /// Sets the metadata entry for a single voxel. `nil` clears the entry.
     #[func]
-    fn set_voxel_metadata(&mut self, _position: godot::builtin::Vector3i, _metadata: Variant) {
-        godot_error!("VoxelBuffer.set_voxel_metadata: not implemented in this port");
+    fn set_voxel_metadata(&mut self, position: godot::builtin::Vector3i, metadata: Variant) {
+        let pos = Vector3i::new(position.x, position.y, position.z);
+        let Ok(pos) = validate_position(pos, self.buffer.size()) else {
+            godot_error!("VoxelBuffer.set_voxel_metadata: position is outside the buffer");
+            return;
+        };
+        match metadata_from_variant(&metadata) {
+            Ok(value) => self.buffer.set_voxel_metadata(pos, value),
+            Err(error) => godot_error!("VoxelBuffer.set_voxel_metadata: {error}"),
+        }
     }
 
-    /// Returns the metadata entry for a single voxel. Stubbed.
+    /// Returns the metadata entry for a single voxel, or `nil` when none.
     #[func]
-    fn get_voxel_metadata(&self, _position: godot::builtin::Vector3i) -> Variant {
-        godot_error!("VoxelBuffer.get_voxel_metadata: not implemented in this port");
-        Variant::nil()
+    fn get_voxel_metadata(&self, position: godot::builtin::Vector3i) -> Variant {
+        let pos = Vector3i::new(position.x, position.y, position.z);
+        match self.buffer.voxel_metadata(pos) {
+            Some(value) => metadata_to_variant(value),
+            None => Variant::nil(),
+        }
     }
 
-    /// Clears the metadata entry for a single voxel. Stubbed.
+    /// Clears the metadata entry for a single voxel.
     #[func]
-    fn clear_voxel_metadata(&mut self, _position: godot::builtin::Vector3i) {
-        godot_error!("VoxelBuffer.clear_voxel_metadata: not implemented in this port");
+    fn clear_voxel_metadata(&mut self, position: godot::builtin::Vector3i) {
+        let size = self.buffer.size();
+        let pos = Vector3i::new(position.x, position.y, position.z);
+        if validate_position(pos, size).is_err() {
+            godot_error!("VoxelBuffer.clear_voxel_metadata: position is outside the buffer");
+            return;
+        }
+        self.buffer.clear_voxel_metadata(pos);
     }
 
-    /// Returns the next voxel position carrying metadata, or
-    /// `(0,0,0)` if there is none (stubbed — always reports empty). Matches
-    /// the C++ `for_each_voxel_metadata_in_area` iterator pattern by
-    /// returning zero positions in this port.
+    /// Returns the next voxel position carrying metadata in `[min, max)`
+    /// after `start` (ZXY order), or `(0,0,0)` if there is none. Pass
+    /// `Vector3i(INT32_MIN, …)` to obtain the first entry, including one at
+    /// the origin.
     #[func]
     fn next_voxel_metadata_pos_in_area(
         &self,
-        _min: godot::builtin::Vector3i,
-        _max: godot::builtin::Vector3i,
-        _start: godot::builtin::Vector3i,
+        min: godot::builtin::Vector3i,
+        max: godot::builtin::Vector3i,
+        start: godot::builtin::Vector3i,
     ) -> godot::builtin::Vector3i {
-        godot::builtin::Vector3i::ZERO
+        match self.buffer.next_voxel_metadata_pos_in_area(
+            Vector3i::new(min.x, min.y, min.z),
+            Vector3i::new(max.x, max.y, max.z),
+            Vector3i::new(start.x, start.y, start.z),
+        ) {
+            Some(pos) => godot::builtin::Vector3i::new(pos.x, pos.y, pos.z),
+            None => godot::builtin::Vector3i::ZERO,
+        }
     }
 
-    /// Iterate every voxel metadata entry in an area, invoking `callback`
-    /// with `(position, metadata)`. Stubbed (voxel-core has no metadata yet).
+    /// Iterate every voxel metadata entry in `[min, max)`, invoking `callback`
+    /// with `(position, metadata)`.
     #[func]
     fn for_each_voxel_metadata_in_area(
-        &mut self,
-        _min: godot::builtin::Vector3i,
-        _max: godot::builtin::Vector3i,
-        _callback: Callable,
+        &self,
+        min: godot::builtin::Vector3i,
+        max: godot::builtin::Vector3i,
+        callback: Callable,
     ) {
-        // No metadata storage in this port; the C++ overload iterates an
-        // internal map, but we have nothing to iterate. Stubbed to a no-op.
+        if !callback.is_valid() {
+            godot_error!("VoxelBuffer.for_each_voxel_metadata_in_area: callback is invalid");
+            return;
+        }
+        self.buffer.for_each_voxel_metadata_in_area(
+            Vector3i::new(min.x, min.y, min.z),
+            Vector3i::new(max.x, max.y, max.z),
+            |pos, value| {
+                let gpos = godot::builtin::Vector3i::new(pos.x, pos.y, pos.z);
+                callback.call(&[gpos.to_variant(), metadata_to_variant(value)]);
+            },
+        );
     }
 
-    /// Iterate every voxel metadata entry in the whole buffer. Stubbed.
+    /// Iterate every voxel metadata entry in the whole buffer.
     #[func]
-    fn for_each_voxel_metadata(&mut self, _callback: Callable) {
-        // No metadata storage in this port; stubbed to a no-op.
+    fn for_each_voxel_metadata(&self, callback: Callable) {
+        if !callback.is_valid() {
+            godot_error!("VoxelBuffer.for_each_voxel_metadata: callback is invalid");
+            return;
+        }
+        self.buffer.for_each_voxel_metadata(|pos, value| {
+            let gpos = godot::builtin::Vector3i::new(pos.x, pos.y, pos.z);
+            callback.call(&[gpos.to_variant(), metadata_to_variant(value)]);
+        });
     }
 
     // ---- 3D texture helpers (C++ SDF-ZXY texture bridge) ----
@@ -954,6 +1276,8 @@ impl VoxelBufferGD {
 #[cfg(test)]
 mod validation_tests {
     use super::*;
+    use std::f32::consts::FRAC_1_SQRT_2;
+    use voxel_core::instancing::InstanceLibraryItem;
     use voxel_core::storage::voxel_buffer::{MAX_CHANNELS, MAX_SIZE};
 
     #[test]
@@ -987,6 +1311,63 @@ mod validation_tests {
     fn script_item_count_rejects_oversized_allocations() {
         assert!(validate_script_item_count((MAX_SCRIPT_ITEMS + 1) as i32).is_err());
     }
+
+    #[test]
+    fn instance_transform_applies_rotation_scale_and_position() {
+        // Identity rotation, scale 2, at (1, 2, 3).
+        let identity = BlockInstanceData {
+            position: Vector3f::new(1.0, 2.0, 3.0),
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            scale: 2.0,
+            item_index: 0,
+        };
+        let t = instance_transform(&identity);
+        assert_eq!(t.origin, Vector3::new(1.0, 2.0, 3.0));
+        assert_eq!(t.basis.col_a(), Vector3::new(2.0, 0.0, 0.0));
+        assert_eq!(t.basis.col_b(), Vector3::new(0.0, 2.0, 0.0));
+        assert_eq!(t.basis.col_c(), Vector3::new(0.0, 0.0, 2.0));
+
+        // 90-degree yaw around +Y: quaternion (0, sqrt(2)/2, 0, sqrt(2)/2).
+        let yawed = BlockInstanceData {
+            position: Vector3f::zero(),
+            rotation: [0.0, FRAC_1_SQRT_2, 0.0, FRAC_1_SQRT_2],
+            scale: 1.0,
+            item_index: 0,
+        };
+        let t = instance_transform(&yawed);
+        let close = |a: Vector3, b: Vector3| {
+            (a.x - b.x).abs() < 1e-6 && (a.y - b.y).abs() < 1e-6 && (a.z - b.z).abs() < 1e-6
+        };
+        assert!(close(t.basis.col_a(), Vector3::new(0.0, 0.0, -1.0)));
+        assert!(close(t.basis.col_c(), Vector3::new(1.0, 0.0, 0.0)));
+    }
+
+    #[test]
+    fn item_is_scene_routes_only_scene_typed_items() {
+        let mut library = InstanceLibrary::new();
+        library.add_item(InstanceLibraryItem::default());
+        library.add_item(InstanceLibraryItem {
+            mesh_type: InstanceMeshType::Scene,
+            ..Default::default()
+        });
+        assert!(!item_is_scene(&library, 0));
+        assert!(item_is_scene(&library, 1));
+        assert!(!item_is_scene(&library, 2), "out of range is never a scene");
+    }
+
+    #[test]
+    fn bucket_instances_by_item_splits_and_drops_out_of_range() {
+        let make = |item_index: u32| BlockInstanceData {
+            position: Vector3f::new(item_index as f32, 0.0, 0.0),
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            scale: 1.0,
+            item_index,
+        };
+        let buckets = bucket_instances_by_item(&[make(0), make(1), make(0), make(9)], 2);
+        assert_eq!(buckets.len(), 2);
+        assert_eq!(buckets[0].len(), 2);
+        assert_eq!(buckets[1].len(), 1);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1004,9 +1385,38 @@ pub struct VoxelInstancerGD {
     library: InstanceLibrary,
     /// Scatter config.
     config: ScatterConfig,
+    /// Optional per-item mesh used when uploading MultiMeshes.
+    item_meshes: Vec<Option<Gd<godot::classes::Mesh>>>,
+    /// Optional per-item scene; items with one are scene-typed and spawn
+    /// real `Node3D`s instead of a MultiMesh (R5 scene instancing).
+    item_scenes: Vec<Option<Gd<PackedScene>>>,
+    /// Live MultiMeshInstance3D children created by the last one-shot scatter.
+    uploaded_instances: Vec<Gd<MultiMeshInstance3D>>,
+    /// Live scene-instance `Node3D` children created by the last one-shot
+    /// scatter.
+    uploaded_scene_nodes: Vec<Gd<Node3D>>,
+    /// Resident per-block instance data, streamed with terrain paging.
+    instance_blocks: voxel_core::instancing::InstanceBlockMap,
+    /// Nodes keyed by streamed block `(x, y, z, lod)`.
+    streamed_nodes: HashMap<(i32, i32, i32, u8), Vec<StreamedInstanceNode>>,
     /// Density multiplier.
     #[var]
     density_multiplier: f32,
+    /// Whether the no-surface-points warning has fired (one-shot).
+    warned_no_surface: bool,
+    /// Last parent `mesh_revision` seen. When it advances, terrain edits
+    /// remeshed existing blocks (same keys), so every instance block is
+    /// dropped and rescattered — otherwise instances would float over dug
+    /// ground or stay buried under raised terrain.
+    mesh_revision_seen: i64,
+}
+
+/// A node spawned for one streamed instance block: one `MultiMeshInstance3D`
+/// per MultiMesh-typed item, or one `Node3D` per instance for scene-typed
+/// items.
+enum StreamedInstanceNode {
+    MultiMesh(Gd<MultiMeshInstance3D>),
+    Scene(Gd<Node3D>),
 }
 
 #[godot_api]
@@ -1016,12 +1426,30 @@ impl INode3D for VoxelInstancerGD {
             base,
             library: InstanceLibrary::new(),
             config: ScatterConfig::default(),
+            item_meshes: Vec::new(),
+            item_scenes: Vec::new(),
+            uploaded_instances: Vec::new(),
+            uploaded_scene_nodes: Vec::new(),
+            instance_blocks: voxel_core::instancing::InstanceBlockMap::new(),
+            streamed_nodes: HashMap::new(),
             density_multiplier: 1.0,
+            warned_no_surface: false,
+            mesh_revision_seen: -1,
         }
     }
 
     fn ready(&mut self) {
         godot_print!("VoxelInstancerGD ready");
+        self.base_mut().set_process(true);
+    }
+
+    fn process(&mut self, _delta: f64) {
+        // Editor hint: no streaming work unless the scene is running (the
+        // parent terrain is likewise gated by `run_stream_in_editor`).
+        if godot::classes::Engine::singleton().is_editor_hint() {
+            return;
+        }
+        let _ = self.sync_stream();
     }
 }
 
@@ -1046,9 +1474,14 @@ impl VoxelInstancerGD {
             );
             return -1;
         };
+        if density > 1.0 {
+            godot_warn!(
+                "VoxelInstancer.add_item: density is a probability per surface cell in 0..=1 (upstream uses per-square-meter density); clamping {density}"
+            );
+        }
         let item = voxel_core::instancing::InstanceLibraryItem {
             name: name.to_string(),
-            density,
+            density: density.min(1.0),
             min_scale,
             max_scale,
             ..Default::default()
@@ -1058,7 +1491,73 @@ impl VoxelInstancerGD {
             return -1;
         };
         self.library.add_item(item);
+        self.item_meshes.push(None);
+        self.item_scenes.push(None);
         index
+    }
+
+    /// Assign the mesh used when this item is uploaded as a MultiMesh.
+    /// Assigning a mesh switches the item back to the MultiMesh type and
+    /// clears any previously assigned scene.
+    #[func]
+    fn set_item_mesh(&mut self, index: i32, mesh: Gd<godot::classes::Mesh>) {
+        let Ok(index) = usize::try_from(index) else {
+            godot_error!("VoxelInstancer.set_item_mesh: index must be non-negative");
+            return;
+        };
+        if index >= self.item_meshes.len() {
+            godot_error!("VoxelInstancer.set_item_mesh: index is out of range");
+            return;
+        }
+        self.item_meshes[index] = Some(mesh);
+        self.item_scenes[index] = None;
+        if let Some(item) = self.library.items.get_mut(index) {
+            item.mesh_type = InstanceMeshType::MultiMesh;
+        }
+    }
+
+    /// Assign the scene instantiated per instance of this item. Items with a
+    /// scene are scene-typed: every scattered instance spawns a real `Node3D`
+    /// (the scene's root, placed at the instance transform) instead of being
+    /// packed into a MultiMesh. Assigning a scene clears any previously
+    /// assigned mesh. Rejected (with one error) when the scene cannot be
+    /// instantiated or its root is not a `Node3D`.
+    #[func]
+    fn set_item_scene(&mut self, index: i32, scene: Gd<PackedScene>) {
+        let Ok(index) = usize::try_from(index) else {
+            godot_error!("VoxelInstancer.set_item_scene: index must be non-negative");
+            return;
+        };
+        if index >= self.item_scenes.len() {
+            godot_error!("VoxelInstancer.set_item_scene: index is out of range");
+            return;
+        }
+        if !scene_root_is_node3d(&scene) {
+            godot_error!(
+                "VoxelInstancer.set_item_scene: scene root must be a Node3D; assignment rejected"
+            );
+            return;
+        }
+        self.item_scenes[index] = Some(scene);
+        self.item_meshes[index] = None;
+        if let Some(item) = self.library.items.get_mut(index) {
+            item.mesh_type = InstanceMeshType::Scene;
+        }
+    }
+
+    /// The scene assigned to an item, or `null` when the item has no scene
+    /// (MultiMesh-typed items never have one — assigning a mesh clears it).
+    #[func]
+    fn get_item_scene(&self, index: i32) -> Option<Gd<PackedScene>> {
+        let Ok(index) = usize::try_from(index) else {
+            godot_error!("VoxelInstancer.get_item_scene: index must be non-negative");
+            return None;
+        };
+        let scene = self.item_scenes.get(index).cloned().flatten();
+        if scene.is_none() && index >= self.item_scenes.len() {
+            godot_error!("VoxelInstancer.get_item_scene: index is out of range");
+        }
+        scene
     }
 
     /// Get the number of items in the library.
@@ -1080,6 +1579,9 @@ impl VoxelInstancerGD {
     /// Generate instances from a VoxelBufferGD's surface.
     /// Extracts surface points where solid meets air, runs the scatter
     /// generator for each library item, returns total instance count.
+    /// The result replaces this node's children: MultiMesh items upload one
+    /// `MultiMeshInstance3D` each, scene items spawn one `Node3D` per
+    /// instance.
     #[func]
     fn scatter_from_buffer(&mut self, buffer: Gd<RefCounted>) -> i32 {
         if self.library.is_empty() {
@@ -1092,32 +1594,25 @@ impl VoxelInstancerGD {
         // Try to cast to VoxelBufferGD for direct field access.
         if let Ok(buf_gd) = buffer.clone().try_cast::<VoxelBufferGD>() {
             let bound = buf_gd.bind();
-            let sx = bound.get_size_x();
-            let sy = bound.get_size_y();
-            let sz = bound.get_size_z();
-
-            let mut positions = Vec::new();
-            let mut normals = Vec::new();
-            for z in 1..sz {
-                for y in 1..sy {
-                    for x in 1..sx {
-                        let vt = bound.get_voxel(x, y, z, 0);
-                        let vt_below = bound.get_voxel(x, y - 1, z, 0);
-                        if vt != 0 && vt_below == 0 {
-                            positions.push(Vector3f::new(x as f32, y as f32, z as f32));
-                            normals.push(Vector3f::new(0.0, 1.0, 0.0));
-                        }
-                    }
-                }
-            }
+            let (positions, normals) = voxel_core::instancing::extract_surface_points(
+                bound.core_buffer(),
+                Vector3f::zero(),
+                0,
+            );
             drop(bound);
             drop(buf_gd);
 
             if positions.is_empty() {
+                // The contract says the result replaces this node's children:
+                // an emptied surface must clear the previous scatter, not
+                // keep it rendering.
+                self.clear_uploads();
                 return 0;
             }
 
             let mut total = 0i64;
+            let mut by_item: Vec<Vec<voxel_core::instancing::scatter::BlockInstanceData>> =
+                Vec::new();
             for (idx, item) in self.library.items.iter().enumerate() {
                 let Ok(seed_offset) = u32::try_from(idx) else {
                     godot_error!("VoxelInstancer.scatter_from_buffer: too many scatter items");
@@ -1141,16 +1636,19 @@ impl VoxelInstancerGD {
                     return 0;
                 };
                 total = next_total;
+                by_item.push(result);
             }
+            self.upload_scatter_instances(&by_item);
             return i32::try_from(total).unwrap_or(i32::MAX);
         }
+        godot_error!("VoxelInstancer.scatter_from_buffer: argument must be a VoxelBuffer");
         0
     }
 
     /// Generate instances from dummy surface positions (test/debug).
     /// Returns the total instance count.
     #[func]
-    fn scatter_test(&self, count: i32) -> i32 {
+    fn scatter_test(&mut self, count: i32) -> i32 {
         let Ok(count) = validate_script_item_count(count) else {
             godot_error!("VoxelInstancer.scatter_test: count must fit the script allocation limit");
             return 0;
@@ -1173,8 +1671,414 @@ impl VoxelInstancerGD {
             snap_to_normal: true,
         };
         let result = gen.generate(&positions, &normals, 0, &self.config);
+        self.upload_scatter_instances(std::slice::from_ref(&result));
         i32::try_from(result.len()).unwrap_or(i32::MAX)
     }
+
+    /// Stream instances for every currently paged mesh block of a parent
+    /// `VoxelTerrain` / `VoxelLodTerrain`. Called from `_process`; also
+    /// available as a one-shot from GDScript.
+    #[func]
+    fn sync_stream(&mut self) -> i32 {
+        if self.library.is_empty() || !self.density_multiplier.is_finite() {
+            return i32::try_from(self.instance_blocks.instance_count()).unwrap_or(i32::MAX);
+        }
+        let Some(locations) = self.parent_mesh_locations() else {
+            return i32::try_from(self.instance_blocks.instance_count()).unwrap_or(i32::MAX);
+        };
+        // Rescatter on terrain edits: remeshes keep the same mesh-block
+        // keys, so the wanted-set diff below alone would never notice.
+        let revision = self.parent_mesh_revision();
+        if revision != self.mesh_revision_seen {
+            if self.mesh_revision_seen >= 0 && !self.instance_blocks.is_empty() {
+                let stale: Vec<(Vector3i, u8)> = self.instance_blocks.keys().collect();
+                for (pos, lod) in stale {
+                    self.unload_instance_block(pos, lod);
+                }
+            }
+            self.mesh_revision_seen = revision;
+        }
+        let block_size = self.parent_block_size();
+        let wanted: HashSet<(i32, i32, i32, u8)> = locations.iter().copied().collect();
+        // Deterministic order for both lists: HashMap iteration would leak
+        // random ordering into the scene-tree child order.
+        let mut stale: Vec<(Vector3i, u8)> = self
+            .instance_blocks
+            .keys()
+            .filter(|(pos, lod)| !wanted.contains(&(pos.x, pos.y, pos.z, *lod)))
+            .collect();
+        stale.sort_unstable_by_key(|(pos, lod)| (pos.x, pos.y, pos.z, *lod));
+        for (pos, lod) in stale {
+            self.unload_instance_block(pos, lod);
+        }
+        let mut ordered: Vec<(i32, i32, i32, u8)> = wanted.into_iter().collect();
+        ordered.sort_unstable();
+        for (x, y, z, lod) in ordered {
+            if lod != 0 {
+                continue;
+            }
+            let pos = Vector3i::new(x, y, z);
+            if self.instance_blocks.contains(pos, lod) {
+                continue;
+            }
+            self.load_instance_block(pos, lod, block_size);
+        }
+        i32::try_from(self.instance_blocks.instance_count()).unwrap_or(i32::MAX)
+    }
+
+    /// Number of resident streamed instance blocks.
+    #[func]
+    fn get_streamed_block_count(&self) -> i32 {
+        i32::try_from(self.instance_blocks.len()).unwrap_or(i32::MAX)
+    }
+
+    /// Number of instances across all streamed blocks.
+    #[func]
+    fn get_streamed_instance_count(&self) -> i32 {
+        i32::try_from(self.instance_blocks.instance_count()).unwrap_or(i32::MAX)
+    }
+}
+
+impl VoxelInstancerGD {
+    /// Free the children created by the last one-shot scatter. Nodes are
+    /// removed from the tree before `queue_free` so same-frame re-scatters
+    /// never present two generations as siblings (Godot would otherwise
+    /// auto-mangle the new children's names for the rest of the frame).
+    fn clear_uploads(&mut self) {
+        let mut instances = std::mem::take(&mut self.uploaded_instances);
+        let mut scenes = std::mem::take(&mut self.uploaded_scene_nodes);
+        for mut old in instances.drain(..) {
+            self.base_mut().remove_child(&old);
+            old.queue_free();
+        }
+        for mut old in scenes.drain(..) {
+            self.base_mut().remove_child(&old);
+            old.queue_free();
+        }
+    }
+
+    fn upload_scatter_instances(&mut self, by_item: &[Vec<BlockInstanceData>]) {
+        self.clear_uploads();
+        let default_mesh = BoxMesh::new_gd().upcast::<godot::classes::Mesh>();
+        for (item_index, instances) in by_item.iter().enumerate() {
+            if instances.is_empty() {
+                continue;
+            }
+            if self.item_is_scene(item_index) {
+                let Some(scene) = self.item_scenes.get(item_index).and_then(|s| s.clone()) else {
+                    continue;
+                };
+                for node in instantiate_scene_nodes(
+                    &scene,
+                    &format!("scatter_scene_{item_index}"),
+                    instances,
+                ) {
+                    self.base_mut().add_child(&node);
+                    self.uploaded_scene_nodes.push(node);
+                }
+                continue;
+            }
+            let mesh = self
+                .item_meshes
+                .get(item_index)
+                .and_then(|mesh| mesh.clone())
+                .unwrap_or_else(|| default_mesh.clone());
+            let mut multimesh = MultiMesh::new_gd();
+            multimesh.set_transform_format(TransformFormat::TRANSFORM_3D);
+            let Ok(count) = i32::try_from(instances.len()) else {
+                continue;
+            };
+            multimesh.set_mesh(&mesh);
+            multimesh.set_instance_count(count);
+            for (i, instance) in instances.iter().enumerate() {
+                let Ok(index) = i32::try_from(i) else {
+                    break;
+                };
+                multimesh.set_instance_transform(index, instance_transform(instance));
+            }
+            let mut node = MultiMeshInstance3D::new_alloc();
+            node.set_multimesh(&multimesh);
+            node.set_name(&format!("scatter_item_{item_index}"));
+            self.base_mut().add_child(&node);
+            self.uploaded_instances.push(node);
+        }
+    }
+
+    fn parent_mesh_locations(&self) -> Option<Vec<(i32, i32, i32, u8)>> {
+        let parent = self.base().get_parent()?;
+        if let Ok(terrain) = parent.clone().try_cast::<crate::terrain::VoxelTerrain>() {
+            return Some(unpack_mesh_locations(
+                terrain.bind().get_mesh_block_locations(),
+            ));
+        }
+        if let Ok(terrain) = parent.try_cast::<crate::resources2::VoxelLodTerrainGD>() {
+            return Some(unpack_mesh_locations(
+                terrain.bind().get_mesh_block_locations(),
+            ));
+        }
+        None
+    }
+
+    fn parent_mesh_revision(&self) -> i64 {
+        let Some(parent) = self.base().get_parent() else {
+            return 0;
+        };
+        if let Ok(terrain) = parent.clone().try_cast::<crate::terrain::VoxelTerrain>() {
+            return terrain.bind().get_mesh_revision();
+        }
+        if let Ok(terrain) = parent.try_cast::<crate::resources2::VoxelLodTerrainGD>() {
+            return terrain.bind().get_mesh_revision();
+        }
+        0
+    }
+
+    fn parent_block_size(&self) -> i32 {
+        let Some(parent) = self.base().get_parent() else {
+            return 16;
+        };
+        if let Ok(terrain) = parent.clone().try_cast::<crate::terrain::VoxelTerrain>() {
+            return terrain.bind().get_mesh_block_size().max(1);
+        }
+        if let Ok(terrain) = parent.try_cast::<crate::resources2::VoxelLodTerrainGD>() {
+            return terrain.bind().get_mesh_block_size().max(1);
+        }
+        16
+    }
+
+    fn parent_surface_points(
+        &self,
+        position: Vector3i,
+        block_size: i32,
+    ) -> (Vec<Vector3f>, Vec<Vector3f>) {
+        let Some(parent) = self.base().get_parent() else {
+            return (Vec::new(), Vec::new());
+        };
+        if let Ok(terrain) = parent.clone().try_cast::<crate::terrain::VoxelTerrain>() {
+            return terrain
+                .bind()
+                .surface_points_for_block(position, block_size);
+        }
+        if let Ok(terrain) = parent.try_cast::<crate::resources2::VoxelLodTerrainGD>() {
+            return terrain
+                .bind()
+                .surface_points_for_block(position, block_size);
+        }
+        (Vec::new(), Vec::new())
+    }
+
+    fn load_instance_block(&mut self, position: Vector3i, lod_index: u8, block_size: i32) {
+        let (positions, normals) = self.parent_surface_points(position, block_size);
+        if positions.is_empty() && !self.warned_no_surface {
+            self.warned_no_surface = true;
+            godot_warn!(
+                "VoxelInstancer: a mesh block produced zero surface points. Surface extraction \
+                 reads the TYPE channel and looks for air cells resting on solid ground; \
+                 SDF-only terrain (nothing in the TYPE channel) yields no instances."
+            );
+        }
+        let instances = voxel_core::instancing::scatter_block_instances(
+            &self.library,
+            &self.config,
+            self.density_multiplier,
+            &positions,
+            &normals,
+        );
+        let by_item = bucket_instances_by_item(&instances, self.library.len());
+        let nodes = self.upload_block_instances(position, lod_index, &by_item);
+        self.streamed_nodes
+            .insert((position.x, position.y, position.z, lod_index), nodes);
+        self.instance_blocks
+            .upsert(voxel_core::instancing::InstanceBlock::new(
+                position, lod_index, instances,
+            ));
+    }
+
+    fn unload_instance_block(&mut self, position: Vector3i, lod_index: u8) {
+        self.instance_blocks.remove(position, lod_index);
+        if let Some(nodes) = self
+            .streamed_nodes
+            .remove(&(position.x, position.y, position.z, lod_index))
+        {
+            for node in nodes {
+                match node {
+                    StreamedInstanceNode::MultiMesh(mut old) => {
+                        self.base_mut().remove_child(&old);
+                        old.queue_free();
+                    }
+                    StreamedInstanceNode::Scene(mut old) => {
+                        self.base_mut().remove_child(&old);
+                        old.queue_free();
+                    }
+                }
+            }
+        }
+    }
+
+    fn item_is_scene(&self, item_index: usize) -> bool {
+        item_is_scene(&self.library, item_index)
+    }
+
+    fn upload_block_instances(
+        &mut self,
+        position: Vector3i,
+        lod_index: u8,
+        by_item: &[Vec<BlockInstanceData>],
+    ) -> Vec<StreamedInstanceNode> {
+        let default_mesh = BoxMesh::new_gd().upcast::<godot::classes::Mesh>();
+        let mut nodes = Vec::new();
+        for (item_index, instances) in by_item.iter().enumerate() {
+            if instances.is_empty() {
+                continue;
+            }
+            if self.item_is_scene(item_index) {
+                let Some(scene) = self.item_scenes.get(item_index).and_then(|s| s.clone()) else {
+                    // A scene-typed item without a scene has nothing to
+                    // instantiate; skip it like upstream skips empty items.
+                    continue;
+                };
+                let prefix = format!(
+                    "scene_lod{lod_index}_{}_{}_{}_{item_index}",
+                    position.x, position.y, position.z
+                );
+                for node in instantiate_scene_nodes(&scene, &prefix, instances) {
+                    self.base_mut().add_child(&node);
+                    nodes.push(StreamedInstanceNode::Scene(node));
+                }
+                continue;
+            }
+            let mesh = self
+                .item_meshes
+                .get(item_index)
+                .and_then(|mesh| mesh.clone())
+                .unwrap_or_else(|| default_mesh.clone());
+            let mut multimesh = MultiMesh::new_gd();
+            multimesh.set_transform_format(TransformFormat::TRANSFORM_3D);
+            let Ok(count) = i32::try_from(instances.len()) else {
+                continue;
+            };
+            multimesh.set_mesh(&mesh);
+            multimesh.set_instance_count(count);
+            for (i, instance) in instances.iter().enumerate() {
+                let Ok(index) = i32::try_from(i) else {
+                    break;
+                };
+                multimesh.set_instance_transform(index, instance_transform(instance));
+            }
+            let mut node = MultiMeshInstance3D::new_alloc();
+            node.set_multimesh(&multimesh);
+            node.set_name(&format!(
+                "inst_lod{lod_index}_{}_{}_{}_{item_index}",
+                position.x, position.y, position.z
+            ));
+            self.base_mut().add_child(&node);
+            nodes.push(StreamedInstanceNode::MultiMesh(node));
+        }
+        nodes
+    }
+}
+
+/// Whether the library item at `item_index` is scene-typed. Out-of-range
+/// indices are never scene items.
+fn item_is_scene(library: &InstanceLibrary, item_index: usize) -> bool {
+    library
+        .items
+        .get(item_index)
+        .is_some_and(|item| matches!(item.mesh_type, InstanceMeshType::Scene))
+}
+
+/// Split scattered instances into one bucket per library item, dropping
+/// instances whose item index is out of range.
+fn bucket_instances_by_item(
+    instances: &[BlockInstanceData],
+    library_len: usize,
+) -> Vec<Vec<BlockInstanceData>> {
+    let mut by_item = vec![Vec::new(); library_len];
+    for instance in instances {
+        if let Some(slot) = by_item.get_mut(instance.item_index as usize) {
+            slot.push(*instance);
+        }
+    }
+    by_item
+}
+
+/// Whether `scene` can back a scene-typed item: it instantiates and its root
+/// is a `Node3D`. The probe instance is never parented, so it is freed
+/// explicitly.
+fn scene_root_is_node3d(scene: &Gd<PackedScene>) -> bool {
+    let Some(probe) = scene.instantiate() else {
+        return false;
+    };
+    match probe.try_cast::<Node3D>() {
+        Ok(root) => {
+            root.free();
+            true
+        }
+        Err(orphan) => {
+            orphan.free();
+            false
+        }
+    }
+}
+
+/// Build the Godot transform of one scattered instance: quaternion rotation,
+/// uniform scale, world-space position.
+fn instance_transform(instance: &BlockInstanceData) -> Transform3D {
+    let [qx, qy, qz, qw] = instance.rotation;
+    let quat = Quaternion::new(qx, qy, qz, qw);
+    let basis = Basis::from_quaternion(quat).scaled(Vector3::splat(instance.scale));
+    Transform3D::new(
+        basis,
+        Vector3::new(
+            instance.position.x,
+            instance.position.y,
+            instance.position.z,
+        ),
+    )
+}
+
+/// Instantiate `scene` once per instance data entry, naming each root
+/// `{prefix}_{i}`. Scenes whose root is not a `Node3D` are reported and
+/// skipped, matching upstream's requirement that instance roots are 3D.
+fn instantiate_scene_nodes(
+    scene: &Gd<PackedScene>,
+    prefix: &str,
+    instances: &[BlockInstanceData],
+) -> Vec<Gd<Node3D>> {
+    let mut nodes = Vec::new();
+    for (i, instance) in instances.iter().enumerate() {
+        let Some(instantiated) = scene.instantiate() else {
+            godot_error!("VoxelInstancer: scene failed to instantiate; instance {i} skipped");
+            continue;
+        };
+        // The skipped subtree was never parented, so it must be freed
+        // explicitly — dropping a manually-managed `Gd` alone would leak it.
+        let mut node = match instantiated.try_cast::<Node3D>() {
+            Ok(node) => node,
+            Err(orphan) => {
+                godot_error!(
+                    "VoxelInstancer: scene root of item must be a Node3D; instance {i} skipped"
+                );
+                orphan.free();
+                continue;
+            }
+        };
+        node.set_transform(instance_transform(instance));
+        node.set_name(&format!("{prefix}_{i}"));
+        nodes.push(node);
+    }
+    nodes
+}
+
+fn unpack_mesh_locations(packed: PackedInt32Array) -> Vec<(i32, i32, i32, u8)> {
+    let slice = packed.as_slice();
+    let mut out = Vec::new();
+    let mut index = 0;
+    while index + 3 < slice.len() {
+        let lod = u8::try_from(slice[index + 3].max(0)).unwrap_or(0);
+        out.push((slice[index], slice[index + 1], slice[index + 2], lod));
+        index += 4;
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -1190,8 +2094,11 @@ pub struct VoxelToolTerrainGD {
     /// Weak reference to the terrain node path (canonical inspector field).
     terrain_path: GString,
     terrain: Option<Gd<crate::terrain::VoxelTerrain>>,
+    lod_terrain: Option<Gd<crate::resources2::VoxelLodTerrainGD>>,
     channel: usize,
     value: u64,
+    /// Seed for random-tick draws (see `run_blocky_random_tick`).
+    random_seed: u32,
 }
 
 #[godot_api]
@@ -1201,8 +2108,10 @@ impl IRefCounted for VoxelToolTerrainGD {
             base,
             terrain_path: "..".to_godot(),
             terrain: None,
+            lod_terrain: None,
             channel: ChannelId::Sdf.index(),
             value: 1,
+            random_seed: 0,
         }
     }
 }
@@ -1233,6 +2142,35 @@ impl VoxelToolTerrainGD {
         i32::try_from(self.channel).unwrap_or(0)
     }
 
+    /// Add mode for `do_sphere`/`do_box` (solidify in SDF terms).
+    #[constant]
+    const MODE_ADD: i64 = 0;
+    /// Remove mode for `do_sphere`/`do_box`.
+    #[constant]
+    const MODE_REMOVE: i64 = 1;
+
+    /// Value written by Set-mode operations (blocky-style channels).
+    #[func]
+    fn get_value(&self) -> i64 {
+        i64::try_from(self.value).unwrap_or(0)
+    }
+
+    /// Seed for `run_blocky_random_tick` draws. Same seed + same candidates
+    /// produce the same ticks; different seeds cover different subsets.
+    #[func]
+    fn set_seed(&mut self, seed: i64) {
+        let Ok(seed) = u32::try_from(seed) else {
+            godot_error!("VoxelToolTerrain.set_seed: seed must be between zero and u32::MAX");
+            return;
+        };
+        self.random_seed = seed;
+    }
+
+    #[func]
+    fn get_seed(&self) -> i64 {
+        i64::from(self.random_seed)
+    }
+
     #[func]
     fn set_value(&mut self, value: i64) {
         let Ok(value) = validate_voxel_value(value) else {
@@ -1256,10 +2194,6 @@ impl VoxelToolTerrainGD {
             godot_error!("VoxelToolTerrain.do_sphere: radius must be non-negative");
             return;
         }
-        let Some(mut terrain) = self.terrain.clone() else {
-            godot_error!("VoxelToolTerrain.do_sphere: no terrain is bound");
-            return;
-        };
         let edit_mode = match mode {
             0 => voxel_core::edition::EditMode::Add,
             1 => voxel_core::edition::EditMode::Remove,
@@ -1267,22 +2201,24 @@ impl VoxelToolTerrainGD {
         };
         let channel = self.channel;
         let value = self.value;
-        let mut bound = terrain.bind_mut();
-        bound.edit_sphere(
-            voxel_core::math::Vector3f::new(center.x, center.y, center.z),
-            radius,
-            channel,
-            edit_mode,
-            value,
-        );
+        let core_center = voxel_core::math::Vector3f::new(center.x, center.y, center.z);
+        if let Some(mut terrain) = self.terrain.clone() {
+            terrain
+                .bind_mut()
+                .edit_sphere(core_center, radius, channel, edit_mode, value);
+            return;
+        }
+        if let Some(mut terrain) = self.lod_terrain.clone() {
+            terrain
+                .bind_mut()
+                .edit_sphere(core_center, radius, channel, edit_mode, value);
+            return;
+        }
+        godot_error!("VoxelToolTerrain.do_sphere: no terrain is bound");
     }
 
     #[func]
     fn do_box(&mut self, min: godot::builtin::Vector3i, max: godot::builtin::Vector3i, mode: i32) {
-        let Some(mut terrain) = self.terrain.clone() else {
-            godot_error!("VoxelToolTerrain.do_box: no terrain is bound");
-            return;
-        };
         let edit_mode = match mode {
             0 => voxel_core::edition::EditMode::Add,
             1 => voxel_core::edition::EditMode::Remove,
@@ -1290,14 +2226,21 @@ impl VoxelToolTerrainGD {
         };
         let channel = self.channel;
         let value = self.value;
-        let mut bound = terrain.bind_mut();
-        bound.edit_box(
-            Vector3i::new(min.x, min.y, min.z),
-            Vector3i::new(max.x, max.y, max.z),
-            channel,
-            edit_mode,
-            value,
-        );
+        let core_min = Vector3i::new(min.x, min.y, min.z);
+        let core_max = Vector3i::new(max.x, max.y, max.z);
+        if let Some(mut terrain) = self.terrain.clone() {
+            terrain
+                .bind_mut()
+                .edit_box(core_min, core_max, channel, edit_mode, value);
+            return;
+        }
+        if let Some(mut terrain) = self.lod_terrain.clone() {
+            terrain
+                .bind_mut()
+                .edit_box(core_min, core_max, channel, edit_mode, value);
+            return;
+        }
+        godot_error!("VoxelToolTerrain.do_box: no terrain is bound");
     }
 
     #[func]
@@ -1306,87 +2249,379 @@ impl VoxelToolTerrainGD {
             godot_error!("VoxelToolTerrain.set_voxel: invalid voxel value");
             return;
         };
-        let Some(mut terrain) = self.terrain.clone() else {
-            godot_error!("VoxelToolTerrain.set_voxel: no terrain is bound");
-            return;
-        };
+        let pos = Vector3i::new(position.x, position.y, position.z);
         let channel = self.channel;
-        terrain.bind_mut().edit_world_voxel(
-            Vector3i::new(position.x, position.y, position.z),
-            channel,
-            value,
-        );
+        if let Some(mut terrain) = self.terrain.clone() {
+            terrain.bind_mut().edit_world_voxel(pos, channel, value);
+            return;
+        }
+        if let Some(mut terrain) = self.lod_terrain.clone() {
+            terrain.bind_mut().edit_world_voxel(pos, channel, value);
+            return;
+        }
+        godot_error!("VoxelToolTerrain.set_voxel: no terrain is bound");
     }
 
     #[func]
     fn get_voxel(&self, position: godot::builtin::Vector3i) -> i64 {
-        let Some(terrain) = self.terrain.as_ref() else {
-            return 0;
-        };
-        i64::try_from(terrain.bind().read_world_voxel(
-            Vector3i::new(position.x, position.y, position.z),
-            self.channel,
-        ))
-        .unwrap_or_default()
+        let pos = Vector3i::new(position.x, position.y, position.z);
+        if let Some(terrain) = self.terrain.as_ref() {
+            return i64::try_from(terrain.bind().read_world_voxel(pos, self.channel))
+                .unwrap_or_default();
+        }
+        if let Some(terrain) = self.lod_terrain.as_ref() {
+            return i64::try_from(terrain.bind().read_world_voxel(pos, self.channel))
+                .unwrap_or_default();
+        }
+        0
     }
 
     // -----------------------------------------------------------------
     // Pinned VoxelToolTerrain methods
     // (upstream 5828cbeb: VoxelToolTerrain.xml).
     //
-    // The Rust binding wraps a terrain by node path and does not yet expose
-    // the live terrain data; these methods are faithful no-op stubs that
-    // round-trip the GDScript contract without panicking.
+    // The Rust binding wraps a live terrain core and edits it directly
+    // (sphere/box/hemisphere/smooth/paste, per-voxel metadata, blocky
+    // random-tick). Each brush runs as one storage transaction per
+    // overlapping data block.
     // -----------------------------------------------------------------
 
     /// Operates on a hemisphere, where `flat_direction` points away from the
     /// flat surface (like a normal). `smoothness` blends the flat part with
-    /// the rounded part (higher = softer edge). Matches upstream's pinned
-    /// `do_hemisphere`. Faithful stub: the live terrain edit is deferred.
+    /// the rounded part (higher = softer edge).
     #[func]
     #[allow(clippy::too_many_arguments)]
     fn do_hemisphere(
         &mut self,
-        _center: Vector3,
-        _radius: f32,
-        _flat_direction: Vector3,
-        _smoothness: f32,
+        center: Vector3,
+        radius: f32,
+        flat_direction: Vector3,
+        smoothness: f32,
+        mode: i32,
     ) {
-        // TODO(port): route the hemisphere edit into the bound terrain.
+        if !center.x.is_finite()
+            || !center.y.is_finite()
+            || !center.z.is_finite()
+            || !radius.is_finite()
+            || radius < 0.0
+            || !flat_direction.x.is_finite()
+            || !flat_direction.y.is_finite()
+            || !flat_direction.z.is_finite()
+            || !smoothness.is_finite()
+            || smoothness < 0.0
+        {
+            godot_error!(
+                "VoxelToolTerrain.do_hemisphere: center, radius, direction and smoothness must be finite; radius and smoothness non-negative"
+            );
+            return;
+        }
+        let core_center = voxel_core::math::Vector3f::new(center.x, center.y, center.z);
+        let core_dir =
+            voxel_core::math::Vector3f::new(flat_direction.x, flat_direction.y, flat_direction.z);
+        let channel = self.channel;
+        let value = self.value;
+        let edit_mode = match mode {
+            1 => voxel_core::edition::EditMode::Remove,
+            _ => voxel_core::edition::EditMode::Add,
+        };
+        if let Some(mut terrain) = self.terrain.clone() {
+            terrain.bind_mut().edit_hemisphere(
+                core_center,
+                radius,
+                core_dir,
+                smoothness,
+                channel,
+                edit_mode,
+                value,
+            );
+            return;
+        }
+        if let Some(mut terrain) = self.lod_terrain.clone() {
+            terrain.bind_mut().edit_hemisphere(
+                core_center,
+                radius,
+                core_dir,
+                smoothness,
+                channel,
+                edit_mode,
+                value,
+            );
+            return;
+        }
+        godot_error!("VoxelToolTerrain.do_hemisphere: no terrain is bound");
+    }
+
+    /// Smooth the SDF channel inside a sphere of influence using a box blur.
+    #[func]
+    fn do_smooth(&mut self, center: Vector3, radius: f32, blur_radius: i32) {
+        if !center.x.is_finite()
+            || !center.y.is_finite()
+            || !center.z.is_finite()
+            || !radius.is_finite()
+            || radius < 0.0
+            || blur_radius < 0
+        {
+            godot_error!(
+                "VoxelToolTerrain.do_smooth: center and radius must be finite; radius and blur_radius non-negative"
+            );
+            return;
+        }
+        let core_center = voxel_core::math::Vector3f::new(center.x, center.y, center.z);
+        let channel = self.channel;
+        if let Some(mut terrain) = self.terrain.clone() {
+            terrain
+                .bind_mut()
+                .edit_smooth(core_center, radius, blur_radius, channel);
+            return;
+        }
+        if let Some(mut terrain) = self.lod_terrain.clone() {
+            terrain
+                .bind_mut()
+                .edit_smooth(core_center, radius, blur_radius, channel);
+            return;
+        }
+        godot_error!("VoxelToolTerrain.do_smooth: no terrain is bound");
+    }
+
+    /// Set per-voxel metadata at a world-space position. `nil` clears it.
+    #[func]
+    fn set_voxel_metadata(&mut self, position: godot::builtin::Vector3i, metadata: Variant) {
+        let pos = Vector3i::new(position.x, position.y, position.z);
+        let value = match metadata_from_variant(&metadata) {
+            Ok(value) => value,
+            Err(error) => {
+                godot_error!("VoxelToolTerrain.set_voxel_metadata: {error}");
+                return;
+            }
+        };
+        let stored = if value.is_nil() { None } else { Some(value) };
+        if let Some(mut terrain) = self.terrain.clone() {
+            terrain.bind_mut().edit_world_voxel_metadata(pos, stored);
+            return;
+        }
+        if let Some(mut terrain) = self.lod_terrain.clone() {
+            terrain.bind_mut().edit_world_voxel_metadata(pos, stored);
+            return;
+        }
+        godot_error!("VoxelToolTerrain.set_voxel_metadata: no terrain is bound");
+    }
+
+    /// Get per-voxel metadata at a world-space position, or `nil`.
+    #[func]
+    fn get_voxel_metadata(&self, position: godot::builtin::Vector3i) -> Variant {
+        let pos = Vector3i::new(position.x, position.y, position.z);
+        let value = if let Some(terrain) = self.terrain.as_ref() {
+            terrain.bind().read_world_voxel_metadata(pos)
+        } else if let Some(terrain) = self.lod_terrain.as_ref() {
+            terrain.bind().read_world_voxel_metadata(pos)
+        } else {
+            return Variant::nil();
+        };
+        match value {
+            Some(metadata) => metadata_to_variant(&metadata),
+            None => Variant::nil(),
+        }
     }
 
     /// Executes a function for each voxel holding metadata in the given area.
     /// The callback takes two arguments: voxel position (`Vector3i`) and voxel
-    /// metadata (`Variant`). Matches upstream's pinned
-    /// `for_each_voxel_metadata_in_area`. Faithful stub: no metadata store is
-    /// bound yet, so the callback is never invoked.
+    /// metadata (`Variant`).
     #[func]
-    fn for_each_voxel_metadata_in_area(&self, _voxel_area: Aabb, _callback: Callable) {
-        // TODO(port): iterate the bound terrain's per-voxel metadata.
+    fn for_each_voxel_metadata_in_area(&self, voxel_area: Aabb, callback: Callable) {
+        if !callback.is_valid() {
+            godot_error!("VoxelToolTerrain.for_each_voxel_metadata_in_area: callback is invalid");
+            return;
+        }
+        if !voxel_area.position.x.is_finite()
+            || !voxel_area.position.y.is_finite()
+            || !voxel_area.position.z.is_finite()
+            || !voxel_area.size.x.is_finite()
+            || !voxel_area.size.y.is_finite()
+            || !voxel_area.size.z.is_finite()
+        {
+            godot_error!("VoxelToolTerrain.for_each_voxel_metadata_in_area: area must be finite");
+            return;
+        }
+        let min = Vector3i::new(
+            voxel_area.position.x.floor() as i32,
+            voxel_area.position.y.floor() as i32,
+            voxel_area.position.z.floor() as i32,
+        );
+        let max = Vector3i::new(
+            (voxel_area.position.x + voxel_area.size.x).ceil() as i32,
+            (voxel_area.position.y + voxel_area.size.y).ceil() as i32,
+            (voxel_area.position.z + voxel_area.size.z).ceil() as i32,
+        );
+        if let Some(terrain) = self.terrain.as_ref() {
+            terrain
+                .bind()
+                .for_each_world_voxel_metadata(min, max, |pos, value| {
+                    let gpos = godot::builtin::Vector3i::new(pos.x, pos.y, pos.z);
+                    callback.call(&[gpos.to_variant(), metadata_to_variant(value)]);
+                });
+            return;
+        }
+        if let Some(terrain) = self.lod_terrain.as_ref() {
+            terrain
+                .bind()
+                .for_each_world_voxel_metadata(min, max, |pos, value| {
+                    let gpos = godot::builtin::Vector3i::new(pos.x, pos.y, pos.z);
+                    callback.call(&[gpos.to_variant(), metadata_to_variant(value)]);
+                });
+            return;
+        }
+        godot_error!("VoxelToolTerrain.for_each_voxel_metadata_in_area: no terrain is bound");
     }
 
-    /// Picks random voxels within `area` and executes a function on those
-    /// whose model is `random_tickable` and whose `tags_mask` matches. The
-    /// callback takes voxel position (`Vector3i`) and voxel value (`int`).
-    /// `batch_count` tunes the internal picking strategy; `tags_mask` filters
-    /// models. Matches upstream's pinned `run_blocky_random_tick`. Faithful
-    /// stub: no live terrain is bound, so no ticks are produced.
+    /// Paste a `VoxelBuffer` into the bound terrain so `src(0,0,0)` lands at
+    /// `origin`. `channel_mask` is a bitset of channels to copy.
+    #[func]
+    fn do_paste(
+        &mut self,
+        origin: godot::builtin::Vector3i,
+        source: Gd<RefCounted>,
+        channel_mask: i64,
+    ) {
+        let Ok(buffer) = source.try_cast::<VoxelBufferGD>() else {
+            godot_error!("VoxelToolTerrain.do_paste: source must be a VoxelBuffer");
+            return;
+        };
+        let mask = u8::try_from(channel_mask).unwrap_or(u8::MAX);
+        let pos = Vector3i::new(origin.x, origin.y, origin.z);
+        let bound = buffer.bind();
+        if let Some(mut terrain) = self.terrain.clone() {
+            terrain
+                .bind_mut()
+                .paste_buffer(pos, bound.core_buffer(), mask);
+            return;
+        }
+        if let Some(mut terrain) = self.lod_terrain.clone() {
+            terrain
+                .bind_mut()
+                .paste_buffer(pos, bound.core_buffer(), mask);
+            return;
+        }
+        godot_error!("VoxelToolTerrain.do_paste: no terrain is bound");
+    }
+
+    /// Picks voxels within `area` and calls `callback(position, value)` on a
+    /// strided subset. `voxel_count` is the maximum number of callbacks;
+    /// `batch_count` controls the stride. When a `VoxelMesherBlocky` library
+    /// is attached, only `random_tickable` models whose `tags_mask` intersects
+    /// `tags_mask` are candidates (`tags_mask == 0` means any tag). Without a
+    /// library, non-zero voxels on the tool channel are candidates and a
+    /// non-zero `tags_mask` filters by `(value & tags_mask) != 0`.
     #[func]
     fn run_blocky_random_tick(
         &mut self,
-        _area: Aabb,
-        _voxel_count: i32,
-        _callback: Callable,
-        _batch_count: i32,
-        _tags_mask: i32,
+        area: Aabb,
+        voxel_count: i32,
+        callback: Callable,
+        batch_count: i32,
+        tags_mask: i32,
     ) {
-        // TODO(port): drive the blocky random-tick loop against the terrain.
+        if !callback.is_valid() {
+            godot_error!("VoxelToolTerrain.run_blocky_random_tick: callback is invalid");
+            return;
+        }
+        let Ok(limit) = usize::try_from(voxel_count.max(0)) else {
+            return;
+        };
+        let limit = limit.min(MAX_SCRIPT_ITEMS);
+        if limit == 0 {
+            return;
+        }
+        let batch = usize::try_from(batch_count.max(1)).unwrap_or(1);
+        let min = Vector3i::new(
+            area.position.x.floor() as i32,
+            area.position.y.floor() as i32,
+            area.position.z.floor() as i32,
+        );
+        let max = Vector3i::new(
+            (area.position.x + area.size.x).ceil() as i32 - 1,
+            (area.position.y + area.size.y).ceil() as i32 - 1,
+            (area.position.z + area.size.z).ceil() as i32 - 1,
+        );
+        if !area.position.x.is_finite()
+            || !area.position.y.is_finite()
+            || !area.position.z.is_finite()
+            || !area.size.x.is_finite()
+            || !area.size.y.is_finite()
+            || !area.size.z.is_finite()
+        {
+            godot_error!("VoxelToolTerrain.run_blocky_random_tick: area must be finite");
+            return;
+        }
+        // Bound the scan, not just the results: the box is iterated per
+        // voxel on the main thread, so a giant AABB must be rejected up
+        // front instead of hanging the frame.
+        let span = |lo: i64, hi: i64| (hi - lo + 1).max(0);
+        let volume = span(min.x as i64, max.x as i64)
+            .saturating_mul(span(min.y as i64, max.y as i64))
+            .saturating_mul(span(min.z as i64, max.z as i64));
+        if volume > MAX_SCRIPT_VOXELS as i64 {
+            godot_error!(
+                "VoxelToolTerrain.run_blocky_random_tick: area volume {volume} exceeds the scan budget {MAX_SCRIPT_VOXELS}"
+            );
+            return;
+        }
+        let channel = self.channel;
+        let mask = tags_mask as u32;
+        // The candidate filter runs during the scan: collecting any non-zero
+        // voxel first and filtering afterwards let dense untickable material
+        // (e.g. stone) fill the scan cap and starve tickable voxels later in
+        // ZYX order.
+        let is_candidate = |library: Option<&voxel_core::meshers::blocky::BakedLibrary>,
+                            value: u64| {
+            voxel_core::edition::ops::voxel_is_random_tick_candidate(value, mask, library)
+        };
+        let candidates = if let Some(terrain) = self.terrain.as_ref() {
+            let bound = terrain.bind();
+            let library = bound.blocky_library();
+            bound.collect_voxels_in_box(min, max, channel, MAX_SCRIPT_ITEMS, |value| {
+                is_candidate(library.as_ref(), value)
+            })
+        } else if let Some(terrain) = self.lod_terrain.as_ref() {
+            let bound = terrain.bind();
+            let library = bound.blocky_library();
+            bound.collect_voxels_in_box(min, max, channel, MAX_SCRIPT_ITEMS, |value| {
+                is_candidate(library.as_ref(), value)
+            })
+        } else {
+            godot_error!("VoxelToolTerrain.run_blocky_random_tick: no terrain is bound");
+            return;
+        };
+        if candidates.is_empty() {
+            return;
+        }
+        // Draw uniformly random candidates per call (upstream semantics):
+        // a fixed stride would re-tick the same positions every call and
+        // permanently starve the rest. `batch` spreads the draws across
+        // invocations for statistical coverage; `voxel_count` caps total
+        // callbacks this call. Deterministic under a fixed seed.
+        let mut rng = voxel_core::instancing::scatter::SimpleRng::new(self.random_seed);
+        let draws = batch.min(limit).min(candidates.len());
+        let mut picked: Vec<usize> = (0..candidates.len()).collect();
+        for i in 0..draws {
+            let j = i + (rng.next_u32() as usize) % (picked.len() - i);
+            picked.swap(i, j);
+            let (pos, value) = &candidates[picked[i]];
+            let gpos = godot::builtin::Vector3i::new(pos.x, pos.y, pos.z);
+            let gval = i64::try_from(*value).unwrap_or(0);
+            callback.call(&[gpos.to_variant(), gval.to_variant()]);
+        }
     }
 }
 
 impl VoxelToolTerrainGD {
     pub(crate) fn bind_terrain(&mut self, terrain: Gd<crate::terrain::VoxelTerrain>) {
         self.terrain = Some(terrain);
+        self.lod_terrain = None;
+    }
+
+    pub(crate) fn bind_lod_terrain(&mut self, terrain: Gd<crate::resources2::VoxelLodTerrainGD>) {
+        self.lod_terrain = Some(terrain);
+        self.terrain = None;
     }
 }
 
@@ -1739,7 +2974,9 @@ pub struct VoxelGeneratorGraphGD {
     base: Base<Resource>,
     /// Graph nodes serialized as a JSON string (for save/load).
     graph_json: GString,
-    /// The lazily-built engine-agnostic graph generator.
+    /// The graph under construction. Assigned generators compile this graph.
+    graph: voxel_core::generators::graph::Graph,
+    /// Cached compiled generator matching `graph`.
     generator: Option<voxel_core::generators::graph::GraphGenerator>,
 }
 
@@ -1749,6 +2986,7 @@ impl IResource for VoxelGeneratorGraphGD {
         Self {
             base,
             graph_json: "{}".to_godot(),
+            graph: voxel_core::generators::graph::Graph::new(),
             generator: None,
         }
     }
@@ -1756,17 +2994,130 @@ impl IResource for VoxelGeneratorGraphGD {
 
 #[godot_api]
 impl VoxelGeneratorGraphGD {
+    /// Remove every node from the graph under construction.
     #[func]
-    fn get_graph_json(&self) -> GString {
-        self.graph_json.clone()
+    fn clear_graph(&mut self) {
+        self.graph.clear();
+        self.generator = None;
+        self.graph_json = "{}".to_godot();
     }
 
-    /// Replace the graph JSON. Resets the cached generator (it will rebuild on
-    /// the next `sample_*` call).
+    /// Append a node. Port arguments are node ids; `-1` means unconnected.
+    /// Returns the new node id, or `-1` for an unknown kind.
+    #[func]
+    fn add_node(&mut self, kind: GString, a: i64, b: i64, c: i64, d: i64, value: f32) -> i64 {
+        if !value.is_finite() {
+            godot_error!("VoxelGeneratorGraph.add_node: value must be finite");
+            return -1;
+        }
+        let Some(node_kind) = voxel_core::generators::graph::node_kind_from_spec(
+            &kind.to_string(),
+            a,
+            b,
+            c,
+            d,
+            value,
+        ) else {
+            godot_error!("VoxelGeneratorGraph.add_node: unknown kind '{kind}'");
+            return -1;
+        };
+        let id = self.graph.push(node_kind);
+        self.generator = None;
+        i64::from(id)
+    }
+
+    /// Append an `Expression` node. Variables `x`/`y`/`z` bind to the given
+    /// port ids (`-1` = 0.0). Returns the new node id, or `-1` on parse error.
+    #[func]
+    fn add_expression_node(&mut self, expression: GString, x: i64, y: i64, z: i64) -> i64 {
+        match voxel_core::generators::graph::expression_node::ExpressionNode::new(
+            &expression.to_string(),
+            &[("x", 0), ("y", 1), ("z", 2)],
+        ) {
+            Ok(expr) => {
+                let id = self
+                    .graph
+                    .push(voxel_core::generators::graph::NodeKind::Expression {
+                        x: voxel_core::generators::graph::optional_graph_port(x),
+                        y: voxel_core::generators::graph::optional_graph_port(y),
+                        z: voxel_core::generators::graph::optional_graph_port(z),
+                        expr: std::sync::Arc::new(expr),
+                    });
+                self.generator = None;
+                i64::from(id)
+            }
+            Err(message) => {
+                godot_error!("VoxelGeneratorGraph.add_expression_node: {message}");
+                -1
+            }
+        }
+    }
+
+    /// Append an `Image2D` node filled with `fill`, sampled at ports `x`/`y`.
+    #[func]
+    fn add_image2d_node(&mut self, width: i32, height: i32, fill: f32, x: i64, y: i64) -> i64 {
+        if width <= 0 || height <= 0 || width > 4096 || height > 4096 || !fill.is_finite() {
+            godot_error!(
+                "VoxelGeneratorGraph.add_image2d_node: width/height must be in 1..=4096 and fill finite"
+            );
+            return -1;
+        }
+        let image = voxel_core::generators::graph::image::Image2D::new_filled(
+            width as u32,
+            height as u32,
+            fill,
+        );
+        let id = self
+            .graph
+            .push(voxel_core::generators::graph::NodeKind::Image2D {
+                x: voxel_core::generators::graph::optional_graph_port(x),
+                y: voxel_core::generators::graph::optional_graph_port(y),
+                image: std::sync::Arc::new(image),
+            });
+        self.generator = None;
+        i64::from(id)
+    }
+
+    /// Number of nodes in the graph under construction.
+    #[func]
+    fn get_graph_node_count(&self) -> i32 {
+        i32::try_from(self.graph.nodes().len()).unwrap_or(i32::MAX)
+    }
+
+    /// `true` if the current graph compiles (no cycles / dangling ports).
+    #[func]
+    fn compile_graph(&self) -> bool {
+        voxel_core::generators::graph::CompiledGraph::compile(&self.graph).is_ok()
+    }
+
+    #[func]
+    fn get_graph_json(&self) -> GString {
+        if self.graph.nodes().is_empty() {
+            return self.graph_json.clone();
+        }
+        voxel_core::generators::graph::graph_to_json(&self.graph).to_godot()
+    }
+
+    /// Replace the graph JSON interchange string. A non-empty document that is
+    /// not `{}` is parsed as a compact node list (`{"nodes":[...]}`). Parse
+    /// failures log an error and leave the previous graph in place.
     #[func]
     fn set_graph_json(&mut self, json: GString) {
+        let text = json.to_string();
         self.graph_json = json;
-        self.generator = None;
+        let trimmed = text.trim();
+        if trimmed.is_empty() || trimmed == "{}" {
+            return;
+        }
+        match parse_graph_json(trimmed) {
+            Ok(graph) => {
+                self.graph = graph;
+                self.generator = None;
+            }
+            Err(message) => {
+                godot_error!("VoxelGeneratorGraph.set_graph_json: {message}");
+            }
+        }
     }
 
     /// Build a sphere-SDF graph (center `(cx,cy,cz)`, radius `r`), compile it,
@@ -1856,13 +3207,187 @@ impl VoxelGeneratorGraphGD {
             .unwrap_or(f32::NAN)
     }
 
-    /// Returns the number of nodes in the currently-cached generator's graph,
-    /// or 0 if no graph has been built yet.
+    /// Returns the number of nodes in the graph under construction.
     #[func]
     fn get_node_count(&self) -> i32 {
-        self.generator
-            .as_ref()
-            .map(|g| i32::try_from(g.graph().nodes().len()).unwrap_or(i32::MAX))
-            .unwrap_or(0)
+        self.get_graph_node_count()
+    }
+
+    /// Compile the current graph and sample the SDF at `(x, y, z)`.
+    /// Returns `NaN` if the graph is empty or does not compile.
+    #[func]
+    fn compile_and_sample(&self, x: f32, y: f32, z: f32) -> f32 {
+        if !x.is_finite() || !y.is_finite() || !z.is_finite() {
+            godot_error!("VoxelGeneratorGraph.compile_and_sample: coordinates must be finite");
+            return f32::NAN;
+        }
+        if self.graph.nodes().is_empty() {
+            return f32::NAN;
+        }
+        use voxel_core::generators::graph::{
+            CompiledGraph, CompiledScratch, GraphInputs, GraphOutput,
+        };
+        let Ok(compiled) = CompiledGraph::compile(&self.graph) else {
+            return f32::NAN;
+        };
+        let xs = [x];
+        let zs = [z];
+        let inputs = GraphInputs { x: &xs, y, z: &zs };
+        let mut scratch = CompiledScratch::new();
+        let mut out = Vec::new();
+        compiled.generate_slice(&inputs, 1, &mut scratch, &mut out, false);
+        out.into_iter()
+            .find(|(kind, _)| *kind == GraphOutput::Sdf)
+            .and_then(|(_, values)| values.into_iter().next())
+            .unwrap_or(f32::NAN)
+    }
+}
+
+impl VoxelGeneratorGraphGD {
+    /// Build the engine-agnostic generator assigned to terrain. An empty graph
+    /// becomes a default origin sphere so assigning this resource never
+    /// silently turns into Waves.
+    pub(crate) fn create_core_generator(&self) -> voxel_core::storage::SharedVoxelGenerator {
+        let graph = if self.graph.nodes().is_empty() {
+            default_sphere_graph()
+        } else {
+            self.graph.clone()
+        };
+        Arc::new(voxel_core::generators::graph::GraphGenerator::new(graph))
+    }
+}
+
+fn default_sphere_graph() -> voxel_core::generators::graph::Graph {
+    use voxel_core::generators::graph::{Graph, GraphPort, NodeKind};
+    let mut graph = Graph::new();
+    let nx = graph.push(NodeKind::InputX);
+    let ny = graph.push(NodeKind::InputY);
+    let nz = graph.push(NodeKind::InputZ);
+    let nr = graph.push(NodeKind::Constant(32.0));
+    let sphere = graph.push(NodeKind::SdfSphere {
+        x: Some(GraphPort::new(nx)),
+        y: Some(GraphPort::new(ny)),
+        z: Some(GraphPort::new(nz)),
+        radius: Some(GraphPort::new(nr)),
+    });
+    graph.push(NodeKind::OutputSdf {
+        a: Some(GraphPort::new(sphere)),
+    });
+    graph
+}
+
+/// Parse the compact interchange produced / accepted by `set_graph_json`.
+/// Format: `{"nodes":[{"kind":"InputX"},{"kind":"Constant","value":10},
+/// {"kind":"SdfSphere","a":0,"b":1,"c":2,"d":3},{"kind":"OutputSdf","a":4}]}`.
+fn parse_graph_json(text: &str) -> Result<voxel_core::generators::graph::Graph, String> {
+    use voxel_core::generators::graph::{node_kind_from_spec, Graph};
+    let mut graph = Graph::new();
+    let Some(nodes_start) = text.find('[') else {
+        return Err("expected a JSON object with a nodes array".to_owned());
+    };
+    let Some(nodes_end) = text.rfind(']') else {
+        return Err("nodes array is not closed".to_owned());
+    };
+    if nodes_end < nodes_start {
+        return Err("nodes array is malformed".to_owned());
+    }
+    let body = &text[nodes_start + 1..nodes_end];
+    for raw_object in body.split('}') {
+        let object = raw_object.trim().trim_start_matches(',').trim();
+        if object.is_empty() {
+            continue;
+        }
+        let object = object.trim_start_matches('{').trim();
+        let Some(kind) = json_string_field(object, "kind") else {
+            return Err("each node must have a kind".to_owned());
+        };
+        let a = json_i64_field(object, "a").unwrap_or(-1);
+        let b = json_i64_field(object, "b").unwrap_or(-1);
+        let c = json_i64_field(object, "c").unwrap_or(-1);
+        let d = json_i64_field(object, "d").unwrap_or(-1);
+        let value = json_f32_field(object, "value").unwrap_or(0.0);
+        if kind == "Expression" {
+            let expr = json_string_field(object, "expr").unwrap_or_default();
+            match voxel_core::generators::graph::expression_node::ExpressionNode::new(
+                &expr,
+                &[("x", 0), ("y", 1), ("z", 2)],
+            ) {
+                Ok(parsed) => {
+                    graph.push(voxel_core::generators::graph::NodeKind::Expression {
+                        x: voxel_core::generators::graph::optional_graph_port(a),
+                        y: voxel_core::generators::graph::optional_graph_port(b),
+                        z: voxel_core::generators::graph::optional_graph_port(c),
+                        expr: std::sync::Arc::new(parsed),
+                    });
+                    continue;
+                }
+                Err(message) => return Err(message),
+            }
+        }
+        let Some(node_kind) = node_kind_from_spec(&kind, a, b, c, d, value) else {
+            return Err(format!("unknown node kind '{kind}'"));
+        };
+        graph.push(node_kind);
+    }
+    if graph.nodes().is_empty() {
+        return Err("nodes array is empty".to_owned());
+    }
+    Ok(graph)
+}
+
+fn json_string_field(object: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{key}\"");
+    let rest = object.split_once(&needle)?.1;
+    let rest = rest.trim_start_matches(|c: char| c == ':' || c.is_whitespace());
+    let rest = rest.strip_prefix('"')?;
+    let end = rest.find('"')?;
+    Some(rest[..end].to_owned())
+}
+
+fn json_i64_field(object: &str, key: &str) -> Option<i64> {
+    json_number_token(object, key)?.parse().ok()
+}
+
+fn json_f32_field(object: &str, key: &str) -> Option<f32> {
+    json_number_token(object, key)?.parse().ok()
+}
+
+fn json_number_token<'a>(object: &'a str, key: &str) -> Option<&'a str> {
+    let needle = format!("\"{key}\"");
+    let rest = object.split_once(&needle)?.1;
+    let rest = rest.trim_start_matches(|c: char| c == ':' || c.is_whitespace());
+    let end = rest
+        .find(|c: char| {
+            !(c.is_ascii_digit() || c == '-' || c == '+' || c == '.' || c == 'e' || c == 'E')
+        })
+        .unwrap_or(rest.len());
+    let token = rest[..end].trim();
+    if token.is_empty() {
+        None
+    } else {
+        Some(token)
+    }
+}
+
+#[cfg(test)]
+mod graph_json_tests {
+    use super::parse_graph_json;
+    use voxel_core::generators::graph::NodeKind;
+
+    #[test]
+    fn parse_graph_json_reads_documented_node_list() {
+        let graph = parse_graph_json(
+            r#"{"nodes":[
+                {"kind":"InputY"},
+                {"kind":"SdfPlane","a":0},
+                {"kind":"Constant","value":10},
+                {"kind":"OutputSdf","a":1}
+            ]}"#,
+        )
+        .expect("valid interchange");
+        assert_eq!(graph.nodes().len(), 4);
+        assert!(matches!(graph.nodes()[0].kind, NodeKind::InputY));
+        assert!(matches!(graph.nodes()[2].kind, NodeKind::Constant(v) if v == 10.0));
+        assert!(parse_graph_json(r#"{"nodes":[{"kind":"Nope"}]}"#).is_err());
     }
 }

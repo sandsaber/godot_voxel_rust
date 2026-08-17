@@ -24,6 +24,7 @@
 pub mod bake;
 pub mod baked_library;
 pub mod lod_skirts;
+pub mod mesh_geometry;
 pub mod mesher;
 pub mod shadow_occluders;
 
@@ -35,6 +36,9 @@ pub use baked_library::{
     NULL_FLUID_INDEX,
 };
 pub use lod_skirts::append_skirts;
+pub use mesh_geometry::{
+    apply_ortho_rotation, bake_mesh_model, MeshGeometry, DEFAULT_SIDE_VERTEX_TOLERANCE,
+};
 pub use mesher::{generate_mesh, BlockyArrays};
 pub use shadow_occluders::{
     generate_occluders_geometry, generate_shadow_occluders, ShadowOccluderArrays,

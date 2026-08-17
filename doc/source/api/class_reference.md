@@ -49,16 +49,19 @@ A voxel editing tool over an owned `VoxelBuffer`, providing sphere, box and sing
 
 ### VoxelToolTerrain
 
-Inherits: `RefCounted`
+Returned by `VoxelTerrain.get_voxel_tool()` / `VoxelLodTerrain.get_voxel_tool()`. Live editing tool bound to the terrain core; edits are batched per overlapping data block.
 
-Terrain editing tool that holds a node-path reference to a `VoxelTerrain` for GDScript-callable editing.
-
-*Stub: not equivalent to the upstream C++ class.* Only stores a terrain path; no voxel editing is implemented.
-
-**Methods**
-
-- `set_terrain_path(path: GString)`
-- `get_terrain_path() -> GString`
+- `do_sphere(center: Vector3, radius: f32, mode: i32)` — use `VoxelToolTerrain.MODE_ADD` / `MODE_REMOVE` constants (upstream is `do_sphere(position, radius)` with a `mode` property; ours takes the mode inline)
+- `do_box(min: Vector3i, max: Vector3i, mode: i32)`
+- `do_hemisphere(center: Vector3, radius: f32, flat_direction: Vector3, smoothness: f32, mode: i32)`
+- `do_smooth(center: Vector3, radius: f32, blur_radius: i32)`
+- `do_paste(position: Vector3i, buffer: VoxelBuffer, channel_mask: i32)` — pastes channels and per-voxel metadata (upstream argument order)
+- `set_voxel(position: Vector3i, value: i64)`
+- `get_value() -> i64` — value used by Set-mode operations
+- `set_seed(seed: i64)` / `get_seed()` — random-tick draw seed
+- `set_voxel_metadata(position: Vector3i, value: Variant)` / `get_voxel_metadata(position: Vector3i) -> Variant`
+- `for_each_voxel_metadata_in_area(aabb: Aabb, callback: Callable)`
+- `run_blocky_random_tick(aabb: Aabb, count: i32, callback: Callable, batch_count: i32, tags_mask: i32)`
 
 ### VoxelBlockSerializer
 
@@ -318,6 +321,11 @@ A flat terrain generator filling the SDF as a horizontal plane at a given height
 
 ### VoxelGeneratorNoise
 
+- `seed: int` — generation seed
+- `set_frequency(f)` / `set_height_start(f)` / `set_height_range(f)`
+- `set_channel(i)` — 0 = TYPE, 1 = SDF (default)
+- `noise` — stored but not consumed; configure `seed`/`frequency` directly
+
 Inherits: `Resource`
 
 A 3D noise terrain generator producing caves and overhangs via 3D FastNoiseLite.
@@ -377,7 +385,8 @@ A graph-based terrain generator: build a node graph programmatically, compile it
 - `get_graph_node_count() -> i32`
 - `compile_graph() -> bool` — whether the graph compiles (no cycles / dangling ports)
 - `get_graph_json() -> GString`
-- `set_graph_json(json: GString)` — stored as an interchange string (not parsed back)
+- `set_graph_json(json: GString)` — parses a compact `{"nodes":[...]}` list (`kind`/`a`/`b`/`c`/`d`/`value`/`expr`); invalid JSON logs an error and keeps the previous graph
+- `compile_and_sample(x: f32, y: f32, z: f32) -> f32` — compile the current graph and sample SDF at a world point (`NaN` on failure)
 - `sample_sphere_sdf(cx: f32, cy: f32, cz: f32, r: f32, px: f32, py: f32, pz: f32) -> f32` — standalone helper; returns the signed distance (negative = inside), or `NaN` if the graph fails to compile
 - `get_node_count() -> i32`
 
@@ -561,6 +570,8 @@ A library of baked blocky models, maintaining the real model table consumed by t
 **Methods**
 
 - `add_solid_model(r: f32, g: f32, b: f32) -> i32`
+- `add_model(model: Resource) -> i32` — stores the resource; `get_model` returns the same instance
+- `get_model(index: i32) -> Variant`
 - `get_model_count() -> i32`
 - `is_empty() -> bool`
 
@@ -764,6 +775,12 @@ Scatters instances (trees, rocks, grass) on a parent `VoxelTerrain` using an ins
 - `set_seed(seed: i64)`
 - `scatter_from_buffer(buffer: Gd<RefCounted>) -> i32` — extracts surface points from a `VoxelBuffer` and returns the total instance count
 - `scatter_test(count: i32) -> i32`
+- `set_item_mesh(index: i32, mesh: Mesh)` — switches the item to MultiMesh mode and clears its scene
+- `set_item_scene(index: i32, scene: PackedScene)` — scene mode: instantiate the scene's `Node3D` root per instance (rejected when the root is not a `Node3D`); clears the mesh
+- `get_item_scene(index: i32) -> PackedScene?` — the assigned scene, or null
+- `sync_stream() -> i32` — load/unload instance blocks to match parent terrain mesh blocks
+- `get_streamed_block_count() -> i32`
+- `get_streamed_instance_count() -> i32`
 
 ### VoxelInstanceLibrary
 
@@ -815,14 +832,10 @@ A MultiMesh-based instance library item.
 
 ### VoxelInstanceLibrarySceneItem
 
-Inherits: `Resource`
+Holds a real `PackedScene` slot, paralleling the instancer's scene mode; not yet attachable to the node's internal library.
 
-A scene-based instance library item (places PackedScenes, not multimesh).
-
-*Stub: not equivalent to the upstream C++ class.* Only records a scene path; no scene instantiation.
-
-**Methods**
-
+- `get_scene() -> PackedScene?`
+- `set_scene(scene: PackedScene)`
 - `has_scene() -> bool`
 
 ### VoxelInstanceComponent

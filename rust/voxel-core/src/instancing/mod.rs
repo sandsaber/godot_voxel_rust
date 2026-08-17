@@ -4,11 +4,13 @@
 //! `VoxelInstancer` Node3D wrapper lives in `voxel-gdext`.
 //!
 //! ## Status
-//! MVP: `InstanceLibrary`, `InstanceGenerator` trait, and `BlockInstanceData`
-//! (the data carrier between engine-agnostic scatter and Godot multimesh upload).
+//! Instance blocks stream with terrain paging: generate per data block, drop
+//! when the block leaves the viewer box.
 
+pub mod block;
 pub mod library;
 pub mod scatter;
 
+pub use block::{extract_surface_points, scatter_block_instances, InstanceBlock, InstanceBlockMap};
 pub use library::{InstanceLibrary, InstanceLibraryItem, InstanceMeshType};
 pub use scatter::{BlockInstanceData, InstanceGenerator, ScatterConfig};

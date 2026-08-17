@@ -39,6 +39,11 @@ Rolling wave terrain.
 
 ## VoxelGeneratorNoise
 
+!!! note
+    The `noise` resource property is stored but not consumed: generation is
+    driven by the class's own `seed` and `frequency` properties. Configure
+    those directly.
+
 3D noise terrain (caves and overhangs) over a vertical slab.
 
 | Property | Type | Default | Notes |
@@ -78,18 +83,23 @@ the SDF channel. Graphs are built programmatically with `add_node()` and can
 drive `VoxelTerrain` like any other generator (the graph is compiled once,
 then evaluated per block on worker threads).
 
-!!! note "Status: partially implemented"
-    There is no visual graph editor yet (the editor plugin only hosts an
-    empty panel), and the JSON interchange (`set_graph_json`) stores the
-    string without parsing it back. Build graphs with `add_node()`.
+!!! note "Status: editor is a GraphEdit addon"
+    Enable `addons/voxel_graph_editor` in the smoke-test project, select a
+    `VoxelGeneratorGraph`, and use the **Voxel Graph** bottom panel. Apply
+    writes the canvas through `add_node`; Compile samples SDF at a point.
+    `set_graph_json` / `get_graph_json` use the compact `{"nodes":[...]}`
+    list. Assigning the resource to `VoxelTerrain.generator` uses
+    `GraphGenerator` — it does not silently become Waves.
 
 | Method | Notes |
 |---|---|
 | `clear_graph()` | Remove all nodes. |
 | `add_node(kind, a, b, c, d, value)` | Append a node; returns its id (pass ids as ports of later nodes, `-1` = unconnected). Kinds: `InputX`, `InputY`, `InputZ`, `Constant` (uses `value`), `Add`/`Subtract`/`Multiply`/`Divide`/`Min`/`Max`, `Sin`/`Cos`/`Abs`/`Sqrt`/`Floor`/`Fract`, `SdfPlane`, `SdfSphere` (`a`=x, `b`=y, `c`=z, `d`=radius), `SdfBox` (`value` = cube half-extent), `SdfUnion`/`SdfSubtract`, `SdfSmoothUnion`/`SdfSmoothSubtract` (`value` = smoothness), `Noise2D`/`Noise3D`, `OutputSdf`. Returns `-1` for unknown kinds. |
+| `add_expression_node(expr, x, y, z)` | Expression node; variables `x`/`y`/`z` bind to the given port ids. |
+| `add_image2d_node(width, height, fill, x, y)` | Image2D node filled with `fill`, sampled at ports `x`/`y`. |
 | `get_graph_node_count()` | Nodes in the graph under construction. |
 | `compile_graph()` | `true` if the graph compiles (no cycles / dangling ports). |
-| `get_graph_json()` / `set_graph_json(json)` | Interchange string (stored, not parsed). |
+| `get_graph_json()` / `set_graph_json(json)` | Compact interchange. `set_graph_json` parses `{"nodes":[{"kind":...,"a":...,"value":...}]}`. |
 | `sample_sphere_sdf(cx, cy, cz, r, px, py, pz)` | Standalone helper: builds a sphere-SDF graph and samples it. Negative = inside, `NaN` on compile failure. |
 
 ```gdscript
