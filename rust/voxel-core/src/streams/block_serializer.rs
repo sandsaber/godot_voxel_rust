@@ -85,8 +85,8 @@ pub enum Error {
     /// inconsistent section length) or an invalid buffer handed to
     /// [`serialize`] (e.g. a metadata position outside the buffer).
     InvalidFormat(String),
-    /// Unsupported on-disk version (v2/v3 migration needs the Godot Variant
-    /// codec, which is not yet ported).
+    /// Unsupported on-disk version (v2/v3 are migrated automatically;
+    /// anything older or newer is rejected).
     UnsupportedVersion(u8),
     /// The stream declared a metadata section whose contents this build cannot
     /// decode (foreign C++ custom/Variant entries, or a corrupt section). The
@@ -110,7 +110,7 @@ impl std::fmt::Display for Error {
             ),
             Error::InvalidFormat(m) => write!(f, "block_serializer: invalid format ({m})"),
             Error::UnsupportedVersion(v) => {
-                write!(f, "block_serializer: unsupported version {v} (legacy migration needs Godot Variant codec)")
+                write!(f, "block_serializer: unsupported version {v}")
             }
             Error::MetadataSkipped => write!(
                 f,
@@ -1140,6 +1140,125 @@ mod tests {
         }
         bytes.extend_from_slice(&BLOCK_TRAILING_MAGIC.to_le_bytes());
         bytes
+    }
+
+    /// A v2/v3 block with RAW (Compression::None) channels — the shape real
+    /// edited terrain blocks have on disk.
+    fn legacy_block_raw_channels(version: u8) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.push(version);
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.push(0x00); // ch0: None + Bit8
+        for i in 0..8u8 {
+            bytes.push(i + 1);
+        }
+        bytes.push(0x01);
+        bytes.push(128); // ch1 SDF: Uniform+Bit8
+        for _ in 2..8 {
+            bytes.push(0x01);
+            bytes.push(0);
+        }
+        bytes.extend_from_slice(&BLOCK_TRAILING_MAGIC.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn v2_raw_channels_migrate_and_load() {
+        let bytes = legacy_block_raw_channels(2);
+        let mut dst = VoxelBuffer::new(Allocator::Default);
+        deserialize(&bytes, &mut dst).unwrap();
+        // All 8 distinct values survive (set check — exact position depends
+        // on the buffer's internal ZXY ordering).
+        let mut values: Vec<u64> = Vec::new();
+        for x in 0..2 {
+            for y in 0..2 {
+                for z in 0..2 {
+                    values.push(dst.get_voxel(x, y, z, 0));
+                }
+            }
+        }
+        values.sort_unstable();
+        assert_eq!(values, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn v3_raw_channels_migrate_and_load() {
+        let bytes = legacy_block_raw_channels(3);
+        let mut dst = VoxelBuffer::new(Allocator::Default);
+        deserialize(&bytes, &mut dst).unwrap();
+        assert_eq!(dst.get_voxel(0, 0, 0, 0), 1);
+        assert_eq!(dst.get_voxel(1, 1, 1, 0), 8);
+    }
+
+    #[test]
+    fn v2_v3_through_lz4_compressed_envelope() {
+        for version in [2u8, 3u8] {
+            let raw = if version == 2 {
+                legacy_block(2, 0, &[200], None)
+            } else {
+                legacy_block(3, 0, &[100], None)
+            };
+            let mut compressed = Vec::new();
+            compressed_data::compress(&raw, &mut compressed, compressed_data::Compression::Lz4)
+                .unwrap();
+            let mut dst = VoxelBuffer::new(Allocator::Default);
+            decompress_and_deserialize(&compressed, &mut dst)
+                .unwrap_or_else(|e| panic!("v{version} through LZ4: {e:?}"));
+            assert_eq!(dst.size(), Vector3i::new(2, 2, 2));
+        }
+    }
+
+    #[test]
+    fn v2_sdf_depth_32_passes_through() {
+        let f32_bits = 0.5f32.to_bits().to_le_bytes();
+        let bytes = legacy_block(2, 2, &f32_bits, None);
+        let mut dst = VoxelBuffer::new(Allocator::Default);
+        deserialize(&bytes, &mut dst).unwrap();
+        let raw = dst.get_voxel(0, 0, 0, crate::storage::ChannelId::Sdf.index());
+        let expected = u32::from_le_bytes([f32_bits[0], f32_bits[1], f32_bits[2], f32_bits[3]]);
+        assert_eq!(raw, expected as u64);
+    }
+
+    #[test]
+    fn v3_foreign_after_prefix_keeps_decoded_entries() {
+        use crate::streams::variant_wire::{encode_variant, VariantWireValue as V};
+        let mut meta = Vec::new();
+        encode_variant(&V::Int(1), &mut meta);
+        meta.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
+        encode_variant(&V::Int(42), &mut meta);
+        meta.extend_from_slice(&[1, 0, 0, 0, 0, 0]);
+        meta.extend_from_slice(&18u32.to_le_bytes());
+        meta.extend_from_slice(&[0u8; 16]);
+
+        let bytes = legacy_block(3, 0, &[128], Some(&meta));
+        let mut dst = VoxelBuffer::new(Allocator::Default);
+        deserialize(&bytes, &mut dst).unwrap_or_else(|e| panic!("block must load: {e:?}"));
+        assert_eq!(*dst.block_metadata(), MetadataValue::Variant(V::Int(1)));
+        assert_eq!(
+            dst.voxel_metadata(Vector3i::zero()),
+            Some(&MetadataValue::Variant(V::Int(42)))
+        );
+    }
+
+    #[test]
+    fn v2_over_declared_volume_does_not_silely_succeed() {
+        // Over-declaring volume (claiming 4×2×4 but providing 2³ data)
+        // must either error or produce a buffer whose channel data doesn't
+        // silently overrun into the magic.
+        let mut bytes = legacy_block(2, 0, &[200], None);
+        bytes[3] = 4; // size_y = 4
+        bytes[5] = 4; // size_z = 4
+        let mut dst = VoxelBuffer::new(Allocator::Default);
+        let _ = deserialize(&bytes, &mut dst);
+        // Whatever happened, the buffer size must match what was declared
+        // (or the call errored and left it empty).
+        let size = dst.size();
+        assert!(
+            size == Vector3i::new(2, 4, 4) || size == Vector3i::zero(),
+            "buffer must either match declared size or be empty, got {size:?}"
+        );
     }
 
     #[test]

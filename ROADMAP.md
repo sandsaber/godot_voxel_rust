@@ -141,11 +141,13 @@ transforms) are skipped non-fatally, matching upstream's
       vectors/rects/plane/quaternion/AABB/color, Dictionary, Array, packed
       arrays) now round-trip; engine-only payloads are skipped non-fatally.
       `DecodeLimits`-guarded (depth + count budgets).
-- [x] **v2/v3 block migration:** old-format block payloads (inside v3
-      region containers) load transparently — v2→v3 remaps the SDF channel
-      from legacy unsigned snorm; v3→v4 converts raw Variant metadata to
-      tagged VoxelMetadata entries. Both migrations run in-memory on
-      deserialization, no rewrite path needed.
+- [x] **v2/v3 block-payload migration:** old-format block payloads (inside
+      v3 region containers) load transparently — v2→v3 remaps the SDF
+      channel from legacy unsigned snorm; v3→v4 converts raw Variant
+      metadata to tagged VoxelMetadata entries. Both migrations run
+      in-memory on deserialization. Leftover: region CONTAINERS older than
+      v3 are still rejected (`RegionError::UnsupportedVersion`); only the
+      block payloads inside v3 containers migrate.
 
 ## R8 — CI rework ✅
 
