@@ -17,7 +17,7 @@ use crate::storage::funcs;
 use crate::storage::voxel_buffer::{
     QUANTIZED_SDF_16_BITS_SCALE_INV, QUANTIZED_SDF_8_BITS_SCALE_INV,
 };
-use crate::storage::{ChannelData, ChannelDepth, ChannelId, VoxelBuffer};
+use crate::storage::{ChannelData, ChannelDepth, ChannelId, Compression, VoxelBuffer};
 #[cfg(test)]
 use std::cell::Cell;
 use std::cell::RefCell;
@@ -33,13 +33,15 @@ thread_local! {
 
 /// Resolved, depth-dispatched SDF sampler over a materialised [`ChannelData`].
 ///
-/// The variant + depth-specific decode are resolved **once** in
+/// This is the **fallback adapter** used when a monomorphized typed input
+/// ([`TypedSdfInput`]) is not available (Bit64 channels, typed-cast misses):
+/// the variant + depth-specific decode are resolved **once** in
 /// [`TransvoxelMesher::build`] before the core loop, so
-/// [`RegularMesherInput::sample_f32`] collapses to a single typed slice index
-/// (`slice[data_index]`) plus one decode — no per-voxel `match` on depth, no
-/// `(x,y,z)` div/mod reconstruction, and no second pass through
-/// `raw_voxel_to_real`. This is the B1 fix (audit §9.6-B1): the C++ mesher
-/// settles data types up-front to rid the hot loop of abstraction layers.
+/// [`RegularMesherInput::sample_f32`] still collapses to a single typed slice
+/// index (`slice[data_index]`) plus one decode — no per-voxel `match` on
+/// depth, no `(x,y,z)` div/mod reconstruction, and no second pass through
+/// `raw_voxel_to_real` (mirroring how the C++ mesher settles data types
+/// up-front to rid the hot loop of abstraction layers).
 ///
 /// The channel must be `Compression::None` (callers guard with `is_uniform`),
 /// so the typed slice is guaranteed non-empty.
@@ -148,6 +150,74 @@ fn checked_regular_collision_prefix_ends(
     ))
 }
 
+/// Per-type SDF sample → float conversion. Mirrors C++ `sdf_as_float` overloads
+/// (`transvoxel.cpp:133-147`), but uses the **clamp** snorm forms to match
+/// `VoxelBuffer::get_voxel_f` → `raw_voxel_to_real` (which clamps) exactly, so
+/// the typed path produces byte-identical output to the dyn-dispatch path.
+///
+/// The conversion is applied once per sample inside [`TypedSdfInput`], with the
+/// depth branch hoisted out of the per-voxel loop by the monomorphized
+/// `build_regular_mesh<TypedSdfInput<T>>`.
+trait SdfSample {
+    /// `f32` equivalent of this raw sample, negated (engine SDF sign convention).
+    fn to_sdf_f32(raw: Self) -> f32;
+}
+
+impl SdfSample for i8 {
+    #[inline]
+    fn to_sdf_f32(raw: Self) -> f32 {
+        -(funcs::s8_to_snorm(raw) * QUANTIZED_SDF_8_BITS_SCALE_INV)
+    }
+}
+
+impl SdfSample for i16 {
+    #[inline]
+    fn to_sdf_f32(raw: Self) -> f32 {
+        -(funcs::s16_to_snorm(raw) * QUANTIZED_SDF_16_BITS_SCALE_INV)
+    }
+}
+
+impl SdfSample for f32 {
+    #[inline]
+    fn to_sdf_f32(raw: Self) -> f32 {
+        -raw
+    }
+}
+
+/// Zero-copy typed SDF input over a flat channel slice. This is the
+/// monomorphization target for [`build_regular_mesh`]: the per-type conversion
+/// and the `block_size` strides are known to the compiler, so the inner cell
+/// loop indexes the slice directly with no vtable call, no div/mod index
+/// re-derivation, and no per-sample depth branch.
+///
+/// Obtained from [`VoxelBuffer::channel_typed_slice`] once per mesh build (the
+/// adapter's depth dispatch). Falls back to [`VoxelBufferTransvoxelInput`] when
+/// a typed slice is unavailable (uniform channel or alignment mismatch).
+struct TypedSdfInput<'a, T: SdfSample> {
+    slice: &'a [T],
+    block_size: Vector3i,
+}
+
+impl<'a, T: SdfSample + bytemuck::Pod> RegularMesherInput for TypedSdfInput<'a, T> {
+    #[inline]
+    fn len(&self) -> usize {
+        self.slice.len()
+    }
+
+    #[inline]
+    fn block_size(&self) -> Vector3i {
+        self.block_size
+    }
+
+    #[inline]
+    fn sample_f32(&self, data_index: usize) -> f32 {
+        #[cfg(test)]
+        TRANSVOXEL_SAMPLE_COUNT.with(|samples| samples.set(samples.get() + 1));
+
+        T::to_sdf_f32(self.slice[data_index])
+    }
+}
+
 /// Smooth (SDF) terrain mesher wrapping the transvoxel regular-cell path.
 ///
 /// Produces one [`Surface`] per `build` call (single material, index 0).
@@ -178,6 +248,31 @@ impl TransvoxelMesher {
     }
 }
 
+/// Resolve a typed SDF slice and run the monomorphized transvoxel mesher on it.
+/// Returns `false` (without touching `arrays`) when a zero-copy typed cast is
+/// not possible, so the caller can fall back to the dyn-dispatch adapter. This
+/// is the Rust analogue of C++ `build_regular_mesh_dispatch_sd<T>` +
+/// `Span::reinterpret_cast_to<T>()`: one depth branch + one cast before the
+/// hot loop, no per-sample abstraction.
+fn run_typed_mesher<T: SdfSample + bytemuck::Pod>(
+    voxels: &VoxelBuffer,
+    sdf_channel: usize,
+    params: &BuildRegularMeshParams,
+    arrays: &mut MeshArrays,
+) -> bool {
+    let Some(slice) = voxels.channel_typed_slice::<T>(sdf_channel) else {
+        return false;
+    };
+    let typed_input = TypedSdfInput {
+        slice,
+        block_size: voxels.size(),
+    };
+    TRANSVOXEL_CACHE.with(|cache| {
+        build_regular_mesh(&typed_input, params, &mut cache.borrow_mut(), arrays);
+    });
+    true
+}
+
 impl VoxelMesher for TransvoxelMesher {
     fn build(&self, output: &mut MesherOutput, input: &MesherInput<'_>) {
         if input.voxels.is_uniform(self.sdf_channel) {
@@ -188,11 +283,11 @@ impl VoxelMesher for TransvoxelMesher {
             return;
         }
 
-        let transvoxel_input = VoxelBufferTransvoxelInput::new(input.voxels, self.sdf_channel);
         let params = BuildRegularMeshParams {
             lod_index: u32::from(input.lod_index),
             edge_clamp_margin: 0.0,
         };
+        let transvoxel_input = VoxelBufferTransvoxelInput::new(input.voxels, self.sdf_channel);
         // B3 (audit §9.6-B3): reuse a pooled `MeshArrays` when the terrain core
         // supplies a free-list. The pool returns a cleared buffer, and
         // `build_regular_mesh` appends into it, so reuse is safe. When no pool
@@ -201,13 +296,38 @@ impl VoxelMesher for TransvoxelMesher {
             Some(pool) => pool.acquire(),
             None => MeshArrays::default(),
         };
+        // B1: depth-dispatch up-front — resolve a typed slice once (mirroring
+        // C++ `build_regular_mesh_dispatch_sd` /
+        // `Span::reinterpret_cast_to<T>()`) and feed it to a monomorphized
+        // `build_regular_mesh`. Falls back to the enum-dispatched typed-slice
+        // adapter (Bit64 / cast miss) when a typed cast isn't available.
+        // Transition meshes stay on that adapter via `&dyn`: they are six
+        // small passes appended after the regular mesh, not the per-voxel hot
+        // loop.
+        let depth = input.voxels.channel_depth(self.sdf_channel);
+        let compression = input.voxels.channel_compression(self.sdf_channel);
+        let typed_ok = compression == Compression::None
+            && match depth {
+                ChannelDepth::Bit8 => {
+                    run_typed_mesher::<i8>(input.voxels, self.sdf_channel, &params, &mut arrays)
+                }
+                ChannelDepth::Bit16 => {
+                    run_typed_mesher::<i16>(input.voxels, self.sdf_channel, &params, &mut arrays)
+                }
+                ChannelDepth::Bit32 => {
+                    run_typed_mesher::<f32>(input.voxels, self.sdf_channel, &params, &mut arrays)
+                }
+                ChannelDepth::Bit64 => false,
+            };
         TRANSVOXEL_CACHE.with(|cache| {
-            build_regular_mesh(
-                &transvoxel_input,
-                &params,
-                &mut cache.borrow_mut(),
-                &mut arrays,
-            );
+            if !typed_ok {
+                build_regular_mesh(
+                    &transvoxel_input,
+                    &params,
+                    &mut cache.borrow_mut(),
+                    &mut arrays,
+                );
+            }
             // Collision uses only the regular mesh prefix. Transition geometry
             // is appended below for rendering, but must never enter physics.
             // Keep the default -1 sentinels if the prefix is empty or cannot be
@@ -348,12 +468,26 @@ impl CubesMesher {
             ChannelData::U64(v) => v.iter().map(|&x| x as u32).collect(),
         }
     }
+
+    /// Resolve the voxel slice the cubes free function consumes (`&[u32]`).
+    /// When the channel is materialized 32-bit, returns a zero-copy borrow of
+    /// the backing store (mirrors C++ `raw_channel.reinterpret_cast_to<const
+    /// uint32_t>()`, `voxel_mesher_cubes.cpp:844`); otherwise falls back to a
+    /// single-pass widen/copy over the `ChannelData` variants
+    /// ([`Self::extract_voxel_slice`]).
+    fn voxel_slice<'a>(buffer: &'a VoxelBuffer, channel: usize) -> std::borrow::Cow<'a, [u32]> {
+        if let Some(slice) = buffer.channel_typed_slice::<u32>(channel) {
+            std::borrow::Cow::Borrowed(slice)
+        } else {
+            std::borrow::Cow::Owned(Self::extract_voxel_slice(buffer, channel))
+        }
+    }
 }
 
 impl VoxelMesher for CubesMesher {
     fn build(&self, output: &mut MesherOutput, input: &MesherInput<'_>) {
         use crate::meshers::cubes::greedy::MATERIAL_COUNT;
-        let voxels = Self::extract_voxel_slice(input.voxels, self.type_channel);
+        let voxels = Self::voxel_slice(input.voxels, self.type_channel);
         let size = input.voxels.size();
         let block_size = [size.x, size.y, size.z];
 
@@ -463,8 +597,11 @@ impl BlockyMesher {
         self
     }
 
-    /// Extract the typed-channel slice the blocky mesher expects (`&[u16]`).
-    /// Voxels are read as `u64` then narrowed, matching the C++ runtime.
+    /// Fallback per-voxel narrowing (`u64 → u16`) used for the rare Bit32 and
+    /// Bit64 Type channels: `build_blocky_into`'s main path takes zero-copy
+    /// `ChannelData::U8`/`U16` borrows, while these depths narrow through one
+    /// `get_voxel` pass (the blocky mesher only reads the low 16 bits,
+    /// matching C++).
     fn extract_voxel_slice(buffer: &VoxelBuffer, channel: usize) -> Vec<u16> {
         let size = buffer.size();
         let mut out = Vec::with_capacity((size.x as usize) * (size.y as usize) * (size.z as usize));
@@ -659,7 +796,7 @@ fn build_blocky_into(
 mod tests {
     use super::{
         checked_regular_collision_prefix_ends, BlockyMesher, CubesColorMode, CubesMesher,
-        TransvoxelMesher, TRANSVOXEL_SAMPLE_COUNT,
+        MeshArrays, TransvoxelMesher, TRANSVOXEL_SAMPLE_COUNT,
     };
     use crate::constants::cube_tables::{Side, CORNER_POSITION, SIDE_CORNERS, SIDE_QUAD_TRIANGLES};
     use crate::math::{Vector2f, Vector3f, Vector3i};
@@ -770,6 +907,82 @@ mod tests {
     fn transvoxel_mesher_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<TransvoxelMesher>();
+    }
+
+    /// The typed SDF-input path (B1) must produce byte-identical mesh arrays to
+    /// the legacy dyn-dispatch path, for every supported SDF depth. This guards
+    /// against sign-conversion / clamp regressions when the per-type
+    /// `SdfSample::to_sdf_f32` is edited.
+    #[test]
+    fn transvoxel_typed_input_matches_dyn_input_per_depth() {
+        use super::{SdfSample, TypedSdfInput, VoxelBufferTransvoxelInput};
+        use crate::meshers::transvoxel::{build_regular_mesh, BuildRegularMeshParams};
+
+        fn mesh_both<T>(voxels: &VoxelBuffer, channel: usize) -> (MeshArrays, MeshArrays)
+        where
+            T: SdfSample + bytemuck::Pod,
+        {
+            let params = BuildRegularMeshParams::default();
+            let slice = voxels
+                .channel_typed_slice::<T>(channel)
+                .expect("typed slice must be available for a materialized channel");
+            let typed_input = TypedSdfInput {
+                slice,
+                block_size: voxels.size(),
+            };
+            let mut cache_a = crate::meshers::transvoxel::Cache::default();
+            let mut a = MeshArrays::default();
+            build_regular_mesh(&typed_input, &params, &mut cache_a, &mut a);
+
+            let dyn_input = VoxelBufferTransvoxelInput::new(voxels, channel);
+            let mut cache_b = crate::meshers::transvoxel::Cache::default();
+            let mut b = MeshArrays::default();
+            build_regular_mesh(&dyn_input, &params, &mut cache_b, &mut b);
+            (a, b)
+        }
+
+        let channel = ChannelId::Sdf.index();
+        for depth in [ChannelDepth::Bit8, ChannelDepth::Bit16, ChannelDepth::Bit32] {
+            // Build a sphere in a 16³ block (padded) at this depth.
+            let padded = 16 + MIN_PADDING + MAX_PADDING;
+            let mut voxels = VoxelBuffer::with_size(Vector3i::splat(padded));
+            let mut format = VoxelFormat::new();
+            format.depths[channel] = depth;
+            format.configure_buffer(&mut voxels);
+            let centre = 8.0f32;
+            for z in 0..padded {
+                for x in 0..padded {
+                    for y in 0..padded {
+                        let ix = x as f32 - MIN_PADDING as f32;
+                        let iy = y as f32 - MIN_PADDING as f32;
+                        let iz = z as f32 - MIN_PADDING as f32;
+                        let d =
+                            ((ix - centre).powi(2) + (iy - centre).powi(2) + (iz - centre).powi(2))
+                                .sqrt()
+                                - 6.0;
+                        voxels.set_voxel_f(d, x, y, z, channel);
+                    }
+                }
+            }
+            let (typed, dyn_) = match depth {
+                ChannelDepth::Bit8 => mesh_both::<i8>(&voxels, channel),
+                ChannelDepth::Bit16 => mesh_both::<i16>(&voxels, channel),
+                ChannelDepth::Bit32 => mesh_both::<f32>(&voxels, channel),
+                ChannelDepth::Bit64 => unreachable!(),
+            };
+            assert_eq!(
+                typed.vertices, dyn_.vertices,
+                "vertex mismatch at {depth:?}"
+            );
+            assert_eq!(typed.normals, dyn_.normals, "normal mismatch at {depth:?}");
+            assert_eq!(
+                typed.lod_data, dyn_.lod_data,
+                "lod data mismatch at {depth:?}"
+            );
+            assert_eq!(typed.indices, dyn_.indices, "index mismatch at {depth:?}");
+            // And both must produce real geometry (sanity, not empty).
+            assert!(!typed.vertices.is_empty(), "no vertices at {depth:?}");
+        }
     }
 
     #[test]
@@ -1162,5 +1375,101 @@ mod tests {
     fn blocky_mesher_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<BlockyMesher>();
+    }
+
+    /// The zero-copy Type path (B5) must produce identical mesh output to the
+    /// per-voxel fallback. Bit16 dispatches `ChannelData::U16` directly
+    /// (zero-copy); Bit64 narrows through the `extract_voxel_slice` per-voxel
+    /// fallback. Same logical voxel values must mesh identically.
+    #[test]
+    fn blocky_mesher_zero_copy_path_matches_fallback() {
+        let build = |depth: ChannelDepth| -> MesherOutput {
+            let library = full_cube_blocky_library(true);
+            let channel = ChannelId::Type.index();
+            let mut voxels = VoxelBuffer::with_size(Vector3i::splat(4));
+            let mut format = VoxelFormat::new();
+            format.depths[channel] = depth;
+            format.configure_buffer(&mut voxels);
+            for z in 1..3 {
+                for x in 1..3 {
+                    for y in 1..3 {
+                        voxels.set_voxel(1, x, y, z, channel);
+                    }
+                }
+            }
+            let mesher = BlockyMesher::new(library);
+            let mut input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+            input.collision_hint = true;
+            let mut output = MesherOutput::default();
+            mesher.build(&mut output, &input);
+            output
+        };
+
+        let zero_copy = build(ChannelDepth::Bit16);
+        let fallback = build(ChannelDepth::Bit64);
+        assert!(zero_copy.total_triangle_count() > 0);
+        assert_eq!(zero_copy.surfaces.len(), fallback.surfaces.len());
+        for (a, b) in zero_copy.surfaces.iter().zip(fallback.surfaces.iter()) {
+            match (&a.arrays, &b.arrays) {
+                (SurfaceArrays::Blocky(va), SurfaceArrays::Blocky(vb)) => {
+                    assert_eq!(va.positions, vb.positions);
+                    assert_eq!(va.normals, vb.normals);
+                    assert_eq!(va.colors, vb.colors);
+                    assert_eq!(va.indices, vb.indices);
+                }
+                _ => panic!("expected blocky surfaces"),
+            }
+        }
+        assert_eq!(
+            zero_copy.collision_surface.positions,
+            fallback.collision_surface.positions
+        );
+        assert_eq!(
+            zero_copy.collision_surface.indices,
+            fallback.collision_surface.indices
+        );
+    }
+
+    /// Same guard for the cubes path: a materialized 32-bit channel takes the
+    /// zero-copy `Cow::Borrowed` route via `channel_typed_slice::<u32>`, while
+    /// an 8-bit channel widens through the `extract_voxel_slice` fallback.
+    /// Identical logical voxels must produce identical output (B5).
+    #[test]
+    fn cubes_mesher_zero_copy_path_matches_per_voxel_fallback() {
+        let build = |depth: ChannelDepth| -> MesherOutput {
+            let channel = ChannelId::Color.index();
+            let mut voxels = VoxelBuffer::with_size(Vector3i::splat(4));
+            let mut format = VoxelFormat::new();
+            format.depths[channel] = depth;
+            format.configure_buffer(&mut voxels);
+            for z in 1..3 {
+                for x in 1..3 {
+                    for y in 1..3 {
+                        voxels.set_voxel(1, x, y, z, channel);
+                    }
+                }
+            }
+            let mesher = CubesMesher::new().with_color_mode(CubesColorMode::Palette);
+            let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+            let mut output = MesherOutput::default();
+            mesher.build(&mut output, &input);
+            output
+        };
+
+        let zero_copy = build(ChannelDepth::Bit32);
+        let fallback = build(ChannelDepth::Bit8);
+        assert!(zero_copy.total_triangle_count() > 0);
+        assert_eq!(zero_copy.surfaces.len(), fallback.surfaces.len());
+        for (a, b) in zero_copy.surfaces.iter().zip(fallback.surfaces.iter()) {
+            match (&a.arrays, &b.arrays) {
+                (SurfaceArrays::Cubes(va), SurfaceArrays::Cubes(vb)) => {
+                    assert_eq!(va.positions, vb.positions);
+                    assert_eq!(va.normals, vb.normals);
+                    assert_eq!(va.colors, vb.colors);
+                    assert_eq!(va.indices, vb.indices);
+                }
+                _ => panic!("expected cubes surfaces"),
+            }
+        }
     }
 }

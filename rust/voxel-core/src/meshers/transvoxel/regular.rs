@@ -5,9 +5,10 @@
 //! using the regular-cell portion of Eric Lengyel's Transvoxel algorithm.
 //!
 //! Phase 0 implements `TEXTURES_NONE` mode only (no mixel4 / single_s4 material
-//! blending). The dispatch by SDF width (8/16/32-bit) is done via an enum rather
-//! than C++ templates, since Rust monomorphizes through the `RegularMesherInput`
-//! implementations.
+//! blending). The kernel is generic over `RegularMesherInput + ?Sized`: the
+//! regular path is monomorphized per SDF width (8/16/32-bit typed inputs,
+//! mirroring the C++ template dispatch); `&dyn` remains only where callers
+//! pass the enum-dispatched adapter (transition passes, Bit64 fallback).
 
 // `RegularMesherInput::len` mirrors `Span::len` and intentionally has no
 // `is_empty`; the indexing loop in `cell_samples` is clearer than an iterator.
@@ -146,8 +147,8 @@ fn scale_for_lod(v: Vector3i, lod_index: u32) -> Vector3i {
 /// LOD data and triangle indices into `output`. The vertex-reuse cache `cache`
 /// is reset and used internally; pass a thread-local `Cache` for reuse across
 /// calls.
-pub fn build_regular_mesh(
-    input: &dyn RegularMesherInput,
+pub fn build_regular_mesh<S: RegularMesherInput + ?Sized>(
+    input: &S,
     params: &BuildRegularMeshParams,
     cache: &mut Cache,
     output: &mut MeshArrays,
@@ -486,7 +487,7 @@ pub fn build_regular_mesh(
 // ---------------------------------------------------------------------------
 
 /// Central-difference gradient at a corner. Matches `get_corner_gradient`.
-fn get_corner_gradient(input: &dyn RegularMesherInput, data_index: usize) -> Vector3f {
+fn get_corner_gradient<S: RegularMesherInput + ?Sized>(input: &S, data_index: usize) -> Vector3f {
     // We need the block strides; pull them from the input's block size.
     let bs = input.block_size();
     let n010 = 1usize;

@@ -9,7 +9,7 @@ use crate::math::Vector3f;
 
 /// Per-vertex LOD data, matching C++ `LodAttrib`. `#[repr(C)]` so the whole
 /// mesh can be uploaded to the GPU as a struct-of-arrays buffer.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 #[repr(C)]
 pub struct LodAttrib {
     /// Secondary position used for LOD transition meshes.

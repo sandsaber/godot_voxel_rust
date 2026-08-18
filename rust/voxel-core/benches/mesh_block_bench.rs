@@ -12,6 +12,9 @@
 //!   threading + perf fixes).
 //!
 //! Run: `cargo bench --bench mesh_block_bench`
+//! (See `block_task_bench` for the complementary variant: generator gap-fill
+//! in the loop, a shared `MeshArraysPool`, and raw scoped-thread scaling
+//! instead of the `ThreadedTaskRunner`.)
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use std::sync::Arc;

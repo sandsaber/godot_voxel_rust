@@ -19,7 +19,9 @@ lz4_flex = "0.11"
 # Android/WASM-safe — used by `ChannelData::as_bytes` for wire-format parity
 # (the block serializer treats channel payloads as opaque LE bytes, and
 # `bytemuck::cast_slice` over a `Vec<u{16,32,64}>` reproduces the exact LE byte
-# layout the previous `Vec<u8>` storage held).
+# layout the previous `Vec<u8>` storage held), and by the mesher hot path
+# (`VoxelBuffer::channel_typed_slice`) for zero-copy typed SDF slices,
+# mirroring the C++ `Span::reinterpret_cast_to<T>()` depth-dispatch pattern.
 bytemuck = "1"
 
 # Pure-Rust port of FastNoiseLite (no C, no FFI) — used by
@@ -68,4 +70,12 @@ harness = false
 # enter-burst tick, packed-array voxel access, buffer lifecycle).
 [[bench]]
 name = "variable_lod_bench"
+harness = false
+
+# End-to-end mesh-block-task benchmark (generator gap-fill + gather + build)
+# and a multi-threaded worker-scaling scenario. Measures the MeshBlockTask
+# level with a shared MeshArraysPool — raw thread scaling, unlike
+# mesh_block_bench which goes through the ThreadedTaskRunner.
+[[bench]]
+name = "block_task_bench"
 harness = false
