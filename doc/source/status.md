@@ -65,14 +65,22 @@ Wave 3 perf work (originally on the `rust/pilot` branch) lives here after an
 explicit port; the pilot branch is retired.
 
 - **`block_task_bench`** measures the pipeline the terrain actually drives
-  (`MeshBlockTask::run_meshing` = 3×3×3 gather + mesher build, shared
-  `MeshArraysPool`): a 16³ SDF sphere block meshes in **~53 µs**
-  (~76 Melem/s) single-threaded on macOS arm64. The MT group scales
-  **1.95× / 3.88× / 7.79×** on 2/4/8 scoped threads with flat wall-time —
-  the pipeline genuinely uses many cores.
+  (`MeshBlockTask::run_meshing` = generator gap-fill + 3×3×3 gather + mesher
+  build, shared `MeshArraysPool`): a 16³ SDF sphere block meshes in **~58 µs**
+  (~70 Melem/s) single-threaded on macOS arm64 (central block resident,
+  26 neighbours gap-filled). The MT group meshes round-robin over in-bounds
+  positions with no residency (27 neighbours generated per block, ~151 µs per
+  block single-threaded) and asserts every task is real work (never dropped,
+  non-empty output): throughput scales **1.8× / 3.2× / 4.3×** on 2/4/8 scoped
+  threads (16 blocks per thread, spawn included) — genuine parallelism,
+  sublinear at this batch size (shared pool, allocator, memory bandwidth).
+  Sibling benches: `mesh_block_bench` (all-resident data through the real
+  `ThreadedTaskRunner`), `transvoxel_bench` (kernel only).
 - **`transvoxel_bench`** (kernel only): sphere_16 ~25 µs (~162 Melem/s),
-  sphere_32 ~147 µs, sphere_64 ~891 µs — unchanged by the Wave 3 port
-  (the kernel bench bypasses the adapter where B1 lands).
+  sphere_32 ~147 µs, sphere_64 ~909 µs on the same machine — within noise of
+  the pre-port values. Since the Wave 3 genericization of
+  `build_regular_mesh`, this bench measures the monomorphized typed path too;
+  no measurable kernel-level win or regression from it.
 - Port decisions: **B1** typed SDF input kept (hybrid: typed fast path for
   the regular mesh, adapter fallback + transition meshes); **B3** TLS
   free-list dropped as superseded — master's `MeshArraysPool` recycles via

@@ -72,9 +72,10 @@ harness = false
 name = "variable_lod_bench"
 harness = false
 
-# End-to-end mesh-block-task benchmark (gather + build) and a multi-threaded
-# scaling scenario. Measures H2 at the MeshBlockTask::run level, not just the
-# transvoxel kernel — closes AUDIT.md §9.4.
+# End-to-end mesh-block-task benchmark (generator gap-fill + gather + build)
+# and a multi-threaded worker-scaling scenario. Measures the MeshBlockTask
+# level with a shared MeshArraysPool — raw thread scaling, unlike
+# mesh_block_bench which goes through the ThreadedTaskRunner.
 [[bench]]
 name = "block_task_bench"
 harness = false

@@ -306,16 +306,13 @@ impl VoxelMesher for TransvoxelMesher {
         let typed_ok = compression == Compression::None
             && match depth {
                 ChannelDepth::Bit8 => {
-                    run_typed_mesher::<i8>(input.voxels, self.sdf_channel, &params, &mut arrays);
-                    true
+                    run_typed_mesher::<i8>(input.voxels, self.sdf_channel, &params, &mut arrays)
                 }
                 ChannelDepth::Bit16 => {
-                    run_typed_mesher::<i16>(input.voxels, self.sdf_channel, &params, &mut arrays);
-                    true
+                    run_typed_mesher::<i16>(input.voxels, self.sdf_channel, &params, &mut arrays)
                 }
                 ChannelDepth::Bit32 => {
-                    run_typed_mesher::<f32>(input.voxels, self.sdf_channel, &params, &mut arrays);
-                    true
+                    run_typed_mesher::<f32>(input.voxels, self.sdf_channel, &params, &mut arrays)
                 }
                 ChannelDepth::Bit64 => false,
             };
@@ -1372,35 +1369,99 @@ mod tests {
         assert_send_sync::<BlockyMesher>();
     }
 
-    /// The zero-copy 16-bit Type path (B5) must produce identical mesh output
-    /// to the per-voxel fallback. Guards against a divergence between the
-    /// `channel_typed_slice::<u16>` borrow and the `extract_voxel_slice` copy.
+    /// The zero-copy Type path (B5) must produce identical mesh output to the
+    /// per-voxel fallback. Bit16 dispatches `ChannelData::U16` directly
+    /// (zero-copy); Bit64 narrows through the `extract_voxel_slice` per-voxel
+    /// fallback. Same logical voxel values must mesh identically.
     #[test]
     fn blocky_mesher_zero_copy_path_matches_fallback() {
-        let library = full_cube_blocky_library(true);
-        let channel = ChannelId::Type.index();
-        // Build a 16-bit Type channel block (the zero-copy-capable depth).
-        let mut voxels = VoxelBuffer::with_size(Vector3i::splat(4));
-        let mut format = VoxelFormat::new();
-        format.depths[channel] = ChannelDepth::Bit16;
-        format.configure_buffer(&mut voxels);
-        for z in 1..3 {
-            for x in 1..3 {
-                for y in 1..3 {
-                    voxels.set_voxel(1, x, y, z, channel);
+        let build = |depth: ChannelDepth| -> MesherOutput {
+            let library = full_cube_blocky_library(true);
+            let channel = ChannelId::Type.index();
+            let mut voxels = VoxelBuffer::with_size(Vector3i::splat(4));
+            let mut format = VoxelFormat::new();
+            format.depths[channel] = depth;
+            format.configure_buffer(&mut voxels);
+            for z in 1..3 {
+                for x in 1..3 {
+                    for y in 1..3 {
+                        voxels.set_voxel(1, x, y, z, channel);
+                    }
                 }
             }
-        }
-        // The zero-copy borrow must be available for a materialized 16-bit channel.
-        assert!(voxels.channel_typed_slice::<u16>(channel).is_some());
+            let mesher = BlockyMesher::new(library);
+            let mut input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+            input.collision_hint = true;
+            let mut output = MesherOutput::default();
+            mesher.build(&mut output, &input);
+            output
+        };
 
-        let mesher = BlockyMesher::new(library);
-        let mut input = MesherInput::new(&voxels, Vector3i::zero(), 0);
-        input.collision_hint = true;
-        let mut output = MesherOutput::default();
-        mesher.build(&mut output, &input);
-        // Non-empty geometry confirms the zero-copy slice reached the mesher.
-        assert!(output.total_triangle_count() > 0);
-        assert!(!output.collision_surface.positions.is_empty());
+        let zero_copy = build(ChannelDepth::Bit16);
+        let fallback = build(ChannelDepth::Bit64);
+        assert!(zero_copy.total_triangle_count() > 0);
+        assert_eq!(zero_copy.surfaces.len(), fallback.surfaces.len());
+        for (a, b) in zero_copy.surfaces.iter().zip(fallback.surfaces.iter()) {
+            match (&a.arrays, &b.arrays) {
+                (SurfaceArrays::Blocky(va), SurfaceArrays::Blocky(vb)) => {
+                    assert_eq!(va.positions, vb.positions);
+                    assert_eq!(va.normals, vb.normals);
+                    assert_eq!(va.colors, vb.colors);
+                    assert_eq!(va.indices, vb.indices);
+                }
+                _ => panic!("expected blocky surfaces"),
+            }
+        }
+        assert_eq!(
+            zero_copy.collision_surface.positions,
+            fallback.collision_surface.positions
+        );
+        assert_eq!(
+            zero_copy.collision_surface.indices,
+            fallback.collision_surface.indices
+        );
+    }
+
+    /// Same guard for the cubes path: a materialized 32-bit channel takes the
+    /// zero-copy `Cow::Borrowed` route via `channel_typed_slice::<u32>`, while
+    /// an 8-bit channel widens through the `extract_voxel_slice` fallback.
+    /// Identical logical voxels must produce identical output (B5).
+    #[test]
+    fn cubes_mesher_zero_copy_path_matches_per_voxel_fallback() {
+        let build = |depth: ChannelDepth| -> MesherOutput {
+            let channel = ChannelId::Color.index();
+            let mut voxels = VoxelBuffer::with_size(Vector3i::splat(4));
+            let mut format = VoxelFormat::new();
+            format.depths[channel] = depth;
+            format.configure_buffer(&mut voxels);
+            for z in 1..3 {
+                for x in 1..3 {
+                    for y in 1..3 {
+                        voxels.set_voxel(1, x, y, z, channel);
+                    }
+                }
+            }
+            let mesher = CubesMesher::new().with_color_mode(CubesColorMode::Palette);
+            let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+            let mut output = MesherOutput::default();
+            mesher.build(&mut output, &input);
+            output
+        };
+
+        let zero_copy = build(ChannelDepth::Bit32);
+        let fallback = build(ChannelDepth::Bit8);
+        assert!(zero_copy.total_triangle_count() > 0);
+        assert_eq!(zero_copy.surfaces.len(), fallback.surfaces.len());
+        for (a, b) in zero_copy.surfaces.iter().zip(fallback.surfaces.iter()) {
+            match (&a.arrays, &b.arrays) {
+                (SurfaceArrays::Cubes(va), SurfaceArrays::Cubes(vb)) => {
+                    assert_eq!(va.positions, vb.positions);
+                    assert_eq!(va.normals, vb.normals);
+                    assert_eq!(va.colors, vb.colors);
+                    assert_eq!(va.indices, vb.indices);
+                }
+                _ => panic!("expected cubes surfaces"),
+            }
+        }
     }
 }
