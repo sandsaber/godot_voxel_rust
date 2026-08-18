@@ -33,13 +33,15 @@ thread_local! {
 
 /// Resolved, depth-dispatched SDF sampler over a materialised [`ChannelData`].
 ///
-/// The variant + depth-specific decode are resolved **once** in
+/// This is the **fallback adapter** used when a monomorphized typed input
+/// ([`TypedSdfInput`]) is not available (Bit64 channels, typed-cast misses):
+/// the variant + depth-specific decode are resolved **once** in
 /// [`TransvoxelMesher::build`] before the core loop, so
-/// [`RegularMesherInput::sample_f32`] collapses to a single typed slice index
-/// (`slice[data_index]`) plus one decode — no per-voxel `match` on depth, no
-/// `(x,y,z)` div/mod reconstruction, and no second pass through
-/// `raw_voxel_to_real`. This is the B1 fix (audit §9.6-B1): the C++ mesher
-/// settles data types up-front to rid the hot loop of abstraction layers.
+/// [`RegularMesherInput::sample_f32`] still collapses to a single typed slice
+/// index (`slice[data_index]`) plus one decode — no per-voxel `match` on
+/// depth, no `(x,y,z)` div/mod reconstruction, and no second pass through
+/// `raw_voxel_to_real` (mirroring how the C++ mesher settles data types
+/// up-front to rid the hot loop of abstraction layers).
 ///
 /// The channel must be `Compression::None` (callers guard with `is_uniform`),
 /// so the typed slice is guaranteed non-empty.
@@ -294,13 +296,14 @@ impl VoxelMesher for TransvoxelMesher {
             Some(pool) => pool.acquire(),
             None => MeshArrays::default(),
         };
-        // B1 (audit §9.6-B1): depth-dispatch up-front — resolve a typed slice
-        // once (mirroring C++ `build_regular_mesh_dispatch_sd` /
+        // B1: depth-dispatch up-front — resolve a typed slice once (mirroring
+        // C++ `build_regular_mesh_dispatch_sd` /
         // `Span::reinterpret_cast_to<T>()`) and feed it to a monomorphized
-        // `build_regular_mesh`. Falls back to the per-voxel dyn-dispatch
-        // adapter when a typed cast isn't available. Transition meshes stay on
-        // the adapter path: they are six small passes appended after the
-        // regular mesh, not the per-voxel hot loop.
+        // `build_regular_mesh`. Falls back to the enum-dispatched typed-slice
+        // adapter (Bit64 / cast miss) when a typed cast isn't available.
+        // Transition meshes stay on that adapter via `&dyn`: they are six
+        // small passes appended after the regular mesh, not the per-voxel hot
+        // loop.
         let depth = input.voxels.channel_depth(self.sdf_channel);
         let compression = input.voxels.channel_compression(self.sdf_channel);
         let typed_ok = compression == Compression::None
@@ -470,7 +473,8 @@ impl CubesMesher {
     /// When the channel is materialized 32-bit, returns a zero-copy borrow of
     /// the backing store (mirrors C++ `raw_channel.reinterpret_cast_to<const
     /// uint32_t>()`, `voxel_mesher_cubes.cpp:844`); otherwise falls back to a
-    /// per-voxel copy that narrows `u64 → u32` (B5).
+    /// single-pass widen/copy over the `ChannelData` variants
+    /// ([`Self::extract_voxel_slice`]).
     fn voxel_slice<'a>(buffer: &'a VoxelBuffer, channel: usize) -> std::borrow::Cow<'a, [u32]> {
         if let Some(slice) = buffer.channel_typed_slice::<u32>(channel) {
             std::borrow::Cow::Borrowed(slice)
@@ -593,11 +597,11 @@ impl BlockyMesher {
         self
     }
 
-    /// Fallback per-voxel extraction used when a zero-copy typed slice is not
-    /// available (non-16-bit depth, uniform channel, or alignment mismatch).
-    /// The main path dispatches over [`ChannelData`] variants directly in
-    /// `build_blocky_into` (zero-copy for every depth); this covers the odd
-    /// mixed cases.
+    /// Fallback per-voxel narrowing (`u64 → u16`) used for the rare Bit32 and
+    /// Bit64 Type channels: `build_blocky_into`'s main path takes zero-copy
+    /// `ChannelData::U8`/`U16` borrows, while these depths narrow through one
+    /// `get_voxel` pass (the blocky mesher only reads the low 16 bits,
+    /// matching C++).
     fn extract_voxel_slice(buffer: &VoxelBuffer, channel: usize) -> Vec<u16> {
         let size = buffer.size();
         let mut out = Vec::with_capacity((size.x as usize) * (size.y as usize) * (size.z as usize));
@@ -971,6 +975,10 @@ mod tests {
                 "vertex mismatch at {depth:?}"
             );
             assert_eq!(typed.normals, dyn_.normals, "normal mismatch at {depth:?}");
+            assert_eq!(
+                typed.lod_data, dyn_.lod_data,
+                "lod data mismatch at {depth:?}"
+            );
             assert_eq!(typed.indices, dyn_.indices, "index mismatch at {depth:?}");
             // And both must produce real geometry (sanity, not empty).
             assert!(!typed.vertices.is_empty(), "no vertices at {depth:?}");

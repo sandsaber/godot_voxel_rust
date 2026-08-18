@@ -1350,9 +1350,10 @@ mod tests {
     #[test]
     fn generate_missing_regions_fills_every_missing_neighbour_with_one_scratch() {
         // Only the central block is resident; all 26 neighbours are missing
-        // and must be generated. Each call writes a distinct SDF, so a stale
-        // scratch buffer (B4 regression) would show duplicated values across
-        // neighbour regions instead of the per-call ramp.
+        // and must be generated. The per-call distinct SDF guards against
+        // generated values mixing across neighbour regions; the scratch-reset
+        // regression itself is caught by the Type-channel marker below
+        // (written by the first generator call only).
         let mut data = VoxelData::new();
         let bs = data.block_size() as i32;
         data.set_bounds(Box3i::new(

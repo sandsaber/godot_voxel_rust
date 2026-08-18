@@ -68,12 +68,13 @@ explicit port; the pilot branch is retired.
   (`MeshBlockTask::run_meshing` = generator gap-fill + 3×3×3 gather + mesher
   build, shared `MeshArraysPool`): a 16³ SDF sphere block meshes in **~58 µs**
   (~70 Melem/s) single-threaded on macOS arm64 (central block resident,
-  26 neighbours gap-filled). The MT group meshes round-robin over in-bounds
-  positions with no residency (27 neighbours generated per block, ~151 µs per
-  block single-threaded) and asserts every task is real work (never dropped,
-  non-empty output): throughput scales **1.8× / 3.2× / 4.3×** on 2/4/8 scoped
-  threads (16 blocks per thread, spawn included) — genuine parallelism,
-  sublinear at this batch size (shared pool, allocator, memory bandwidth).
+  26 neighbours gap-filled). The MT group meshes round-robin over positions
+  inset from the volume faces (every gather queues the full 3×3×3) with no
+  residency — 27 neighbours generated per block, ~280 µs per block
+  single-threaded — and asserts every task is real work (never dropped,
+  non-empty output): throughput scales **2.0× / 4.0× / 4.9×** on 2/4/8 scoped
+  threads (16 blocks per thread, spawn included) — near-linear through 4
+  threads, sublinear at 8 (shared pool, allocator, memory bandwidth).
   Sibling benches: `mesh_block_bench` (all-resident data through the real
   `ThreadedTaskRunner`), `transvoxel_bench` (kernel only).
 - **`transvoxel_bench`** (kernel only): sphere_16 ~25 µs (~162 Melem/s),

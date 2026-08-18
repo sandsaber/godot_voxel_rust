@@ -181,9 +181,11 @@ fn bench_block_task_single(c: &mut Criterion) {
 /// positions. We measure wall-clock time for the whole batch and report
 /// throughput as blocks/sec — the "does it scale past one core?" check.
 ///
-/// Positions exclude the 3×3×3 neighbourhood of the resident origin block,
-/// so every gather generates all 27 neighbours (none copied from residency):
-/// per-block work is identical across threads and the wall-clock comparison
+/// Candidates are inset one block from the volume faces (so no neighbour is
+/// clipped by bounds and every gather queues the full 3×3×3) and exclude the
+/// 3×3×3 neighbourhood of the resident origin block (so no neighbour is
+/// copied from residency): every block generates all 27 neighbours and per-
+/// block work is identical across threads — the wall-clock comparison
 /// measures parallelism, not workload skew.
 fn bench_block_task_mt(c: &mut Criterion) {
     let block_size = 16;
@@ -193,6 +195,7 @@ fn bench_block_task_mt(c: &mut Criterion) {
     let blocks_in_bounds =
         bounds_in_lod_blocks(volume_bounds(block_size), block_size, 0).expect("valid bounds");
     let candidates: Vec<Vector3i> = blocks_in_bounds
+        .padded(-1)
         .iter_cells_zxy()
         .filter(|p| p.x.abs() > 1 || p.y.abs() > 1 || p.z.abs() > 1)
         .collect();

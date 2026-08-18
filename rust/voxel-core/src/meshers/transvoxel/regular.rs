@@ -5,9 +5,10 @@
 //! using the regular-cell portion of Eric Lengyel's Transvoxel algorithm.
 //!
 //! Phase 0 implements `TEXTURES_NONE` mode only (no mixel4 / single_s4 material
-//! blending). The dispatch by SDF width (8/16/32-bit) is done via an enum rather
-//! than C++ templates, since Rust monomorphizes through the `RegularMesherInput`
-//! implementations.
+//! blending). The kernel is generic over `RegularMesherInput + ?Sized`: the
+//! regular path is monomorphized per SDF width (8/16/32-bit typed inputs,
+//! mirroring the C++ template dispatch); `&dyn` remains only where callers
+//! pass the enum-dispatched adapter (transition passes, Bit64 fallback).
 
 // `RegularMesherInput::len` mirrors `Span::len` and intentionally has no
 // `is_empty`; the indexing loop in `cell_samples` is clearer than an iterator.
