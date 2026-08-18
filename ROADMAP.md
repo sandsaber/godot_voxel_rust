@@ -158,6 +158,47 @@ transforms) are skipped non-fatally, matching upstream's
 - [x] Delete leftover C++ scons workflows
 - [x] Make `verify` a required status check on `master`
 
+## R9 — Canonical API completion (machine-checked) 🟡
+
+**The standing goal after the Wave 3 port.** The tracker is
+[`rust/voxel-gdext/api/port_status.json`](rust/voxel-gdext/api/port_status.json):
+raise every non-deferred upstream class from `partial` to `complete`, where
+`complete` = the pinned upstream API surface is exposed **and** its runtime
+behavior is proven by an executable behavioral test. Kickoff state (after PR
+#5): 3/73 `complete`, 56 `partial`, 14 `deferred` (deferred stays deferred —
+out of R9 without an explicit go-ahead).
+
+**Process — every stage is one PR that must pass multi-role review before
+merge** (the Wave 3 protocol): at least upstream-parity (pinned XML surface
+vs binding), runtime correctness, test-quality/evidence, and a verification
+runner (fmt/clippy/tests/smoke executed); findings of REQUEST CHANGES block
+the merge until resolved. Roles rotate per stage.
+
+Stages are themed cohorts; the exact class list is resolved from
+`port_status.json` at stage kickoff (it is the source of truth, this list is
+the plan):
+
+- [ ] **Stage 1 — Generators & noise** (the data source of every scene):
+      `VoxelGenerator` + Flat / Noise / Heightmap / Image / Graph,
+      `VoxelGraphFunction`, `FastNoise2`, `ZN_FastNoiseLite`, `ZN_SpotNoise`
+- [ ] **Stage 2 — Meshers & serialization**: `VoxelMesher`, the cubes /
+      blocky mesher classes, `VoxelBlockSerializer`, `VoxelColorPalette`,
+      `VoxelRaycastResult`
+- [ ] **Stage 3 — Streams**: `VoxelStream` and stream implementations still
+      `partial`
+- [ ] **Stage 4 — Terrain nodes & engine**: `VoxelNode`, the terrain nodes,
+      `VoxelEngine`, block/data callbacks
+- [ ] **Stage 5 — Blocky library surface**: models, attributes, types,
+      the library classes
+- [ ] **Stage 6 — Tools**: remaining `VoxelTool*` variants
+- [ ] **Stage 7 — Instancing**: `VoxelInstancer`, instance-library items,
+      `VoxelMeshSDF`
+- [ ] **Stage 8 — Aux**: `VoxelBoxMover`, `VoxelAStarGrid3D`,
+      `VoxelVoxLoader`, `VoxelSaveCompletionTracker`, plugin hosts
+
+Done for a stage = every cohort class is either `complete` in
+`port_status.json` with cited tests, or `deferred` with a recorded reason.
+
 ## Deferred by design (no ETA)
 
 GPU compute path / detail rendering / shaders, SQLite streams, multipass
