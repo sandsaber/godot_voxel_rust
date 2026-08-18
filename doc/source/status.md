@@ -53,6 +53,7 @@ Tracked in ROADMAP; this is the honest size, not a new queue.
 
 | Item | Size | Notes |
 |---|---|---|
+| **R9 — canonical API completion** (standing goal) | 8 staged cohorts | Machine-tracked in `rust/voxel-gdext/api/port_status.json`: `partial` → `complete` (pinned surface + behavioral test). Every stage PR passes multi-role review. See ROADMAP R9. |
 
 | R3 network product — edit deltas, rejoin reconciliation, sockets/RPCs | Several stages | Transport-agnostic protocol + reference bridge done; the game owns the transport. |
 | Graph editor polish, extra Image2D extras, `VoxelMeshSDF` bake | Small–medium each | Not blocking generate→mesh→page→save. |
