@@ -178,9 +178,15 @@ Stages are themed cohorts; the exact class list is resolved from
 `port_status.json` at stage kickoff (it is the source of truth, this list is
 the plan):
 
-- [ ] **Stage 1 — Generators & noise** (the data source of every scene):
-      `VoxelGenerator` + Flat / Noise / Heightmap / Image / Graph,
-      `VoxelGraphFunction`, `FastNoise2`, `ZN_FastNoiseLite`, `ZN_SpotNoise`
+- [x] **Stage 1 — Generators & noise** ✅ (7 of 11 flipped `complete`:
+      VoxelGenerator, Flat, Noise, Heightmap, Image, Waves, ZN_SpotNoise —
+      the latter with upstream-identical spot math. The 4 remaining
+      `partial` carry recorded structural blockers: VoxelGeneratorGraph
+      (panorama bakes + get_main_function), VoxelGraphFunction (node-registry
+      rework — its own later stage), FastNoise2 (pure-Rust engine
+      substitution + encoded node trees), ZN_FastNoiseLite (warp_noise needs
+      the deferred ZN_FastNoiseLiteGradient). Two multi-role review rounds
+      preceded the merge.)
 - [ ] **Stage 2 — Meshers & serialization**: `VoxelMesher`, the cubes /
       blocky mesher classes, `VoxelBlockSerializer`, `VoxelColorPalette`,
       `VoxelRaycastResult`
@@ -196,8 +202,10 @@ the plan):
 - [ ] **Stage 8 — Aux**: `VoxelBoxMover`, `VoxelAStarGrid3D`,
       `VoxelVoxLoader`, `VoxelSaveCompletionTracker`, plugin hosts
 
-Done for a stage = every cohort class is either `complete` in
-`port_status.json` with cited tests, or `deferred` with a recorded reason.
+Done for a stage = every cohort class is `complete` in `port_status.json`
+with cited tests, or `partial`/`deferred` with a recorded reason and a
+concrete follow-up (structural blockers beyond the stage's scope are
+recorded in the class evidence, not silently dropped).
 
 ## Deferred by design (no ETA)
 

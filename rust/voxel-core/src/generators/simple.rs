@@ -431,20 +431,37 @@ impl Default for Curve {
 /// `FastNoiseLite` instance per `generate_block` call (the crate's
 /// `FastNoiseLite` doesn't implement `Clone`, so we store the settings and
 /// rebuild the sampler).
-#[derive(Debug, Clone, Default)]
+///
+/// The `fractal_*` fields are passthrough settings read from the user-assigned
+/// noise resource (upstream `ZN_FastNoiseLite`): when a generator is driven by
+/// such a resource, its fractal configuration genuinely changes the output.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct NoiseConfig {
     pub seed: Option<i32>,
     pub frequency: Option<f32>,
     pub noise_type: Option<fastnoise_lite::NoiseType>,
+    pub fractal_type: Option<fastnoise_lite::FractalType>,
+    pub fractal_octaves: Option<i32>,
+    pub fractal_lacunarity: Option<f32>,
+    pub fractal_gain: Option<f32>,
+    pub fractal_weighted_strength: Option<f32>,
+    pub fractal_ping_pong_strength: Option<f32>,
 }
 
 impl NoiseConfig {
-    /// Build a configured `FastNoiseLite` from these settings.
+    /// Build a configured `FastNoiseLite` from these settings. `None` fields
+    /// keep the sampler's own defaults.
     pub fn build(&self) -> fastnoise_lite::FastNoiseLite {
         let mut n = fastnoise_lite::FastNoiseLite::new();
         n.set_seed(self.seed);
         n.set_frequency(self.frequency);
         n.set_noise_type(self.noise_type);
+        n.set_fractal_type(self.fractal_type);
+        n.set_fractal_octaves(self.fractal_octaves);
+        n.set_fractal_lacunarity(self.fractal_lacunarity);
+        n.set_fractal_gain(self.fractal_gain);
+        n.set_fractal_weighted_strength(self.fractal_weighted_strength);
+        n.set_fractal_ping_pong_strength(self.fractal_ping_pong_strength);
         n
     }
 }
@@ -534,6 +551,35 @@ pub enum ImageWrapMode {
     Repeat,
 }
 
+/// 5-tap plus/cross blur over a row-major `width * height` grid: the centre
+/// plus its 4 orthogonal neighbours, each weighted `0.2`, with wrap-around
+/// fetches across image borders (modulo indexing). Mirrors upstream
+/// `voxel_generator_image.cpp::get_height_blurred` + `get_height_repeat`
+/// exactly (upstream multiplies the 5-tap sum by `0.2f` and wraps via
+/// `math::wrap`). Sum-preserving, since every pixel contributes its full
+/// value to its own and its four neighbours' outputs. Backing of the pinned
+/// `VoxelGeneratorImage.blur_enabled` property.
+fn blur_heights(values: Vec<f32>, width: i32, height: i32) -> Vec<f32> {
+    let w = width;
+    let h = height;
+    // Wrap-around fetch, mirroring `get_height_repeat` (`math::wrap`).
+    let repeat = |values: &[f32], x: i32, z: i32| -> f32 {
+        values[(funcs::wrap_i32(x, w) + funcs::wrap_i32(z, h) * w) as usize]
+    };
+    let mut blurred = vec![0.0; values.len()];
+    for z in 0..h {
+        for x in 0..w {
+            let sum = repeat(&values, x, z)
+                + repeat(&values, x + 1, z)
+                + repeat(&values, x - 1, z)
+                + repeat(&values, x, z + 1)
+                + repeat(&values, x, z - 1);
+            blurred[(x + z * w) as usize] = sum * 0.2;
+        }
+    }
+    blurred
+}
+
 /// 2D image heightmap generator. Rust port of the `VoxelGeneratorImage`
 /// concept: a stored grayscale image (`values` in `0..1`, row-major with
 /// `x + z * width`) is sampled as the terrain height at world `(x, z)`.
@@ -549,18 +595,29 @@ pub struct Image {
     size: Vector2i,
     /// Sampling behaviour outside the image extent.
     pub wrap: ImageWrapMode,
+    /// Apply the upstream 5-tap plus/cross blur (wrap-around at borders) to
+    /// values as they are loaded (pinned `blur_enabled`; must be set before
+    /// `set_image`).
+    pub blur_enabled: bool,
     /// Shared heightmap parameters (channel, range, iso_scale, offset).
     pub heightmap: HeightmapParams,
 }
 
 impl Image {
     /// Set the image data. `values` must contain exactly `width * height`
-    /// entries; they are clamped to `0..1`. Returns `false` on size mismatch.
+    /// entries; they are clamped to `0..1` (and blurred when
+    /// [`Self::blur_enabled`] is set at load time). Returns `false` on size
+    /// mismatch.
     pub fn set_image(&mut self, values: Vec<f32>, width: i32, height: i32) -> bool {
         if width <= 0 || height <= 0 || values.len() != (width as usize) * (height as usize) {
             return false;
         }
         let clamped: Vec<f32> = values.iter().map(|v| v.clamp(0.0, 1.0)).collect();
+        let clamped = if self.blur_enabled {
+            blur_heights(clamped, width, height)
+        } else {
+            clamped
+        };
         self.values = clamped.into();
         self.size = Vector2i::new(width, height);
         true
@@ -1227,5 +1284,122 @@ mod tests {
         assert_eq!(buf.get_voxel(1, 3, 1, ChannelId::Type.index()), 7);
         let g: &dyn VoxelGenerator = &gen;
         assert_eq!(g.used_channels_mask(), 1 << ChannelId::Type.index());
+    }
+
+    // ---- Image: blur_enabled (pinned VoxelGeneratorImage property) --------
+
+    #[test]
+    fn image_blur_preserves_mean_and_smooths_delta_peak() {
+        // 5x5 field of zeros with a single delta peak at the centre.
+        let mut peak = vec![0.0; 25];
+        peak[2 + 2 * 5] = 1.0;
+
+        let mut blurred = Image::default();
+        blurred.blur_enabled = true;
+        assert!(blurred.set_image(peak.clone(), 5, 5));
+
+        let mut plain = Image::default();
+        assert!(plain.set_image(peak, 5, 5));
+
+        let mean = |image: &Image| -> f32 {
+            let mut sum = 0.0;
+            for z in 0..5 {
+                for x in 0..5 {
+                    sum += image.height_at(x, z);
+                }
+            }
+            sum / 25.0
+        };
+        // The 5-tap kernel is sum-preserving (each pixel's value is spread
+        // over itself and its four neighbours with total weight 1), so the
+        // mean is unchanged.
+        assert!(
+            (mean(&blurred) - mean(&plain)).abs() < 1e-5,
+            "blur changed the mean: {} vs {}",
+            mean(&blurred),
+            mean(&plain)
+        );
+        // The delta peak spreads to exactly the cross neighbours: upstream's
+        // `get_height_blurred` weights the centre and the 4 orthogonal taps by
+        // 0.2 each; diagonal pixels receive nothing.
+        assert!((blurred.height_at(2, 2) - 0.2).abs() < 1e-6);
+        assert!((blurred.height_at(3, 2) - 0.2).abs() < 1e-6);
+        assert!((blurred.height_at(1, 2) - 0.2).abs() < 1e-6);
+        assert!((blurred.height_at(2, 3) - 0.2).abs() < 1e-6);
+        assert!((blurred.height_at(2, 1) - 0.2).abs() < 1e-6);
+        assert_eq!(blurred.height_at(1, 1), 0.0, "diagonals stay untouched");
+        assert_eq!(blurred.height_at(3, 3), 0.0);
+        assert_eq!(blurred.height_at(0, 0), 0.0);
+    }
+
+    #[test]
+    fn image_blur_fetches_wrap_around_across_borders() {
+        // Upstream `get_height_repeat` wraps coordinates modulo the image
+        // size: a peak at the left edge must bleed into the right edge.
+        let mut peak = vec![0.0; 16];
+        peak[2 * 4] = 1.0; // 4x4, peak at (0, 2): index x + z * 4.
+        let mut blurred = Image::default();
+        blurred.blur_enabled = true;
+        assert!(blurred.set_image(peak, 4, 4));
+        // (3, 2) is the left peak's x-1 neighbour via wrap-around.
+        assert!(
+            (blurred.height_at(3, 2) - 0.2).abs() < 1e-6,
+            "peak must wrap to the opposite edge, got {}",
+            blurred.height_at(3, 2)
+        );
+        // Same vertically: peak at (2, 0) bleeds into (2, 3).
+        let mut peak_v = vec![0.0; 16];
+        peak_v[2] = 1.0; // 4x4, peak at (2, 0): index x + z * 4 = 2.
+        let mut blurred_v = Image::default();
+        blurred_v.blur_enabled = true;
+        assert!(blurred_v.set_image(peak_v, 4, 4));
+        assert!((blurred_v.height_at(2, 3) - 0.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn image_blur_keeps_values_clamped_in_unit_range() {
+        let mut blurred = Image::default();
+        blurred.blur_enabled = true;
+        assert!(blurred.set_image(vec![1.0; 16], 4, 4));
+        for z in 0..4 {
+            for x in 0..4 {
+                assert!((0.0..=1.0).contains(&blurred.height_at(x, z)));
+            }
+        }
+    }
+
+    // ---- NoiseConfig: fractal passthrough from noise resources -----------
+
+    #[test]
+    fn noise_config_build_applies_fractal_settings() {
+        use fastnoise_lite::FractalType;
+        let base = NoiseConfig {
+            seed: Some(11),
+            frequency: Some(0.05),
+            ..Default::default()
+        };
+        let fractal = NoiseConfig {
+            fractal_type: Some(FractalType::FBm),
+            fractal_octaves: Some(4),
+            fractal_lacunarity: Some(2.0),
+            fractal_gain: Some(0.5),
+            fractal_weighted_strength: Some(0.3),
+            ..base.clone()
+        };
+        // Deterministic: the same config rebuilds to identical samples.
+        let a = fractal.build().get_noise_3d(1.0, 2.0, 3.0);
+        let b = fractal.build().get_noise_3d(1.0, 2.0, 3.0);
+        assert_eq!(a.to_bits(), b.to_bits());
+        // The fractal settings genuinely change the sampler output.
+        let plain = base.build().get_noise_3d(1.0, 2.0, 3.0);
+        assert_ne!(a.to_bits(), plain.to_bits());
+        // PingPong strength only affects the PingPong fractal.
+        let ping_pong = NoiseConfig {
+            fractal_type: Some(FractalType::PingPong),
+            fractal_ping_pong_strength: Some(4.0),
+            ..fractal.clone()
+        };
+        let c = ping_pong.build().get_noise_3d(1.0, 2.0, 3.0);
+        assert_ne!(c.to_bits(), a.to_bits());
     }
 }

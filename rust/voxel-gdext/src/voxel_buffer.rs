@@ -2978,6 +2978,54 @@ pub struct VoxelGeneratorGraphGD {
     graph: voxel_core::generators::graph::Graph,
     /// Cached compiled generator matching `graph`.
     generator: Option<voxel_core::generators::graph::GraphGenerator>,
+    // -----------------------------------------------------------------
+    // Pinned VoxelGeneratorGraph members (upstream VoxelGeneratorGraph.xml).
+    // Backing fields + validated setters; `use_xz_caching` is wired into the
+    // core generator, the rest are stored faithfully (see setter comments).
+    // -----------------------------------------------------------------
+    /// Pinned `debug_block_clipping` (stored; upstream inverts clipped blocks
+    /// for visualization — the Rust core does not implement block clipping
+    /// inversion yet, so this currently steers nothing).
+    debug_block_clipping_value: bool,
+    /// Pinned `sdf_clip_threshold` (stored; core culling is interval-based and
+    /// always-on, so the threshold does not gate anything yet).
+    sdf_clip_threshold_value: f32,
+    /// Pinned `subdivision_size` (stored; the core does not run range analysis
+    /// on block subdivisions yet).
+    subdivision_size_value: i64,
+    /// Pinned `texture_mode` (stored; texture outputs are not produced by the
+    /// Rust graph runtime yet).
+    texture_mode_value: i64,
+    /// Pinned `use_optimized_execution_map` (stored; the Rust runtime has no
+    /// per-area node-skipping execution map yet).
+    use_optimized_execution_map_value: bool,
+    /// Pinned `use_subdivision` (stored; gates `subdivision_size`, which the
+    /// core does not consume yet).
+    use_subdivision_value: bool,
+    /// Pinned `use_xz_caching` — wired to the core generator's XZ-prefix
+    /// cache (see `create_core_generator`).
+    use_xz_caching_value: bool,
+    /// Pinned `debug_block_clipping` GDScript property.
+    #[var(get = is_debug_clipped_blocks, set = set_debug_clipped_blocks)]
+    debug_block_clipping: PhantomVar<bool>,
+    /// Pinned `sdf_clip_threshold` GDScript property.
+    #[var(get = get_sdf_clip_threshold, set = set_sdf_clip_threshold)]
+    sdf_clip_threshold: PhantomVar<f32>,
+    /// Pinned `subdivision_size` GDScript property.
+    #[var(get = get_subdivision_size, set = set_subdivision_size)]
+    subdivision_size: PhantomVar<i64>,
+    /// Pinned `texture_mode` GDScript property (enum `TextureMode`).
+    #[var(get = get_texture_mode, set = set_texture_mode)]
+    texture_mode: PhantomVar<i64>,
+    /// Pinned `use_optimized_execution_map` GDScript property.
+    #[var(get = is_using_optimized_execution_map, set = set_use_optimized_execution_map)]
+    use_optimized_execution_map: PhantomVar<bool>,
+    /// Pinned `use_subdivision` GDScript property.
+    #[var(get = is_using_subdivision, set = set_use_subdivision)]
+    use_subdivision: PhantomVar<bool>,
+    /// Pinned `use_xz_caching` GDScript property.
+    #[var(get = is_using_xz_caching, set = set_use_xz_caching)]
+    use_xz_caching: PhantomVar<bool>,
 }
 
 #[godot_api]
@@ -2988,12 +3036,320 @@ impl IResource for VoxelGeneratorGraphGD {
             graph_json: "{}".to_godot(),
             graph: voxel_core::generators::graph::Graph::new(),
             generator: None,
+            // Pinned upstream defaults (VoxelGeneratorGraph.xml).
+            debug_block_clipping_value: false,
+            sdf_clip_threshold_value: 1.5,
+            subdivision_size_value: 16,
+            texture_mode_value: 0,
+            use_optimized_execution_map_value: true,
+            use_subdivision_value: true,
+            use_xz_caching_value: true,
+            debug_block_clipping: PhantomVar::default(),
+            sdf_clip_threshold: PhantomVar::default(),
+            subdivision_size: PhantomVar::default(),
+            texture_mode: PhantomVar::default(),
+            use_optimized_execution_map: PhantomVar::default(),
+            use_subdivision: PhantomVar::default(),
+            use_xz_caching: PhantomVar::default(),
         }
     }
 }
 
 #[godot_api]
 impl VoxelGeneratorGraphGD {
+    // Pinned `TextureMode` enum constants (upstream VoxelGeneratorGraph.xml).
+    const TEXTURE_MODE_MIXEL4: i64 = 0;
+    const TEXTURE_MODE_SINGLE: i64 = 1;
+
+    /// Emitted when a graph node is renamed (upstream `node_name_changed`).
+    ///
+    /// Not emitted yet: node names are not editable through this binding —
+    /// they arrive with the `VoxelGraphFunction` rework in a later stage.
+    #[signal]
+    fn node_name_changed(node_id: i64);
+
+    /// Canonical `clear`: erase all nodes and connections from the graph
+    /// (alias of [`Self::clear_graph`]).
+    #[func]
+    fn clear(&mut self) {
+        self.clear_graph();
+    }
+
+    /// Canonical `compile`: compile the graph and return a report dictionary.
+    ///
+    /// Layout: `{"success": bool, "node_id": int, "message": String}`.
+    /// `node_id` is `-1` on success or when the error is not about a
+    /// particular node; otherwise it is the id of the offending node
+    /// (a dangling input port reference, or any node for a cycle).
+    #[func]
+    fn compile(&self) -> VarDictionary {
+        use voxel_core::generators::graph::CompiledGraph;
+        let mut result = VarDictionary::new();
+        match CompiledGraph::compile(&self.graph) {
+            Ok(_) => {
+                result.set("success", true);
+                result.set("node_id", -1_i64);
+                result.set("message", &GString::new());
+            }
+            Err(error) => {
+                let (node_id, message) = graph_compile_error_report(&error);
+                result.set("success", false);
+                result.set("node_id", node_id);
+                result.set("message", &message.to_godot());
+            }
+        }
+        result
+    }
+
+    /// Generates a block of voxels within the specified world area (pinned
+    /// `generate_block`, upstream `VoxelGenerator.xml`). Same pattern as the
+    /// other concrete generators: build the core generator, run it into the
+    /// buffer, truncate the float origin via the shared helper.
+    #[func]
+    fn generate_block(
+        &self,
+        mut out_buffer: Gd<crate::voxel_buffer::VoxelBufferGD>,
+        origin_in_voxels: Vector3,
+        lod: i32,
+    ) {
+        let generator = self.create_core_generator();
+        crate::generators::generate_core_block_into_gd(
+            generator.as_ref(),
+            &mut out_buffer,
+            origin_in_voxels,
+            lod,
+        );
+    }
+
+    /// Canonical `debug_analyze_range`: estimate the SDF output range over the
+    /// axis-aligned box with corners `min_pos`/`max_pos`. Returns
+    /// `Vector2(min, max)`; `Vector2(NAN, NAN)` (with an error log) on invalid
+    /// input or a graph that does not compile.
+    ///
+    /// Note: this is interval analysis over the compiled graph — upstream's
+    /// variant inspects its optimized execution map instead. For a debug
+    /// method the interval estimate is the honest equivalent.
+    #[func]
+    fn debug_analyze_range(&self, min_pos: Vector3, max_pos: Vector3) -> Vector2 {
+        match graph_debug_analyze_range(
+            &self.graph,
+            [min_pos.x, min_pos.y, min_pos.z],
+            [max_pos.x, max_pos.y, max_pos.z],
+        ) {
+            Ok((min, max)) => Vector2::new(min, max),
+            Err(message) => {
+                godot_error!("VoxelGeneratorGraph.debug_analyze_range: {message}");
+                Vector2::new(f32::NAN, f32::NAN)
+            }
+        }
+    }
+
+    /// Canonical `raycast_sdf_approx`: march the ray from `ray_origin` to
+    /// `ray_end` in steps of `stride`, sampling the compiled SDF. Returns the
+    /// distance from the origin at the first sample where the SDF is negative,
+    /// or `-1.0` when the ray never enters matter (or the input is invalid /
+    /// the graph does not compile). The result is accurate up to `stride`.
+    #[func]
+    fn raycast_sdf_approx(&self, ray_origin: Vector3, ray_end: Vector3, stride: f32) -> f32 {
+        match graph_raycast_sdf_approx(
+            &self.graph,
+            [ray_origin.x, ray_origin.y, ray_origin.z],
+            [ray_end.x, ray_end.y, ray_end.z],
+            stride,
+        ) {
+            Ok(Some(distance)) => distance,
+            Ok(None) => -1.0,
+            Err(message) => {
+                godot_error!("VoxelGeneratorGraph.raycast_sdf_approx: {message}");
+                -1.0
+            }
+        }
+    }
+
+    /// Canonical `debug_load_waves_preset`: replace the graph with the
+    /// built-in sin-waves terrain preset
+    /// (`sin(0.1 * x) + cos(0.1 * z)` → SDF).
+    #[func]
+    fn debug_load_waves_preset(&mut self) {
+        self.graph = waves_preset_graph();
+        self.generator = None;
+    }
+
+    /// Canonical `debug_measure_microseconds_per_voxel`: indicative timing of
+    /// the compiled graph. With `use_singular_queries = false` it times whole
+    /// Y-slice generation; with `true` it times the same volume as one query
+    /// per voxel. Returns microseconds per voxel, or `-1.0` if the graph has
+    /// no SDF output or does not compile.
+    #[func]
+    fn debug_measure_microseconds_per_voxel(&self, use_singular_queries: bool) -> f32 {
+        graph_measure_microseconds_per_voxel(&self.graph, use_singular_queries)
+    }
+
+    /// Canonical `generate_image_from_sdf`: sample the compiled SDF on the
+    /// plane spanned by the transform's X/Y axes (span `size` in world units,
+    /// centered on the transform origin) and store each sample into the
+    /// corresponding image pixel (samples centered on pixels). The image
+    /// should have a 32-bit float format and must not be compressed. The
+    /// written pixel count is bounded by the shared
+    /// `MAX_GENERATED_IMAGE_PIXELS` script workload budget.
+    #[func]
+    fn generate_image_from_sdf(
+        &self,
+        mut im: Gd<godot::classes::Image>,
+        transform: Transform3D,
+        size: Vector2,
+    ) {
+        use voxel_core::generators::graph::CompiledGraph;
+        let width = im.get_width();
+        let height = im.get_height();
+        if width <= 0 || height <= 0 {
+            godot_error!("VoxelGeneratorGraph.generate_image_from_sdf: image must not be empty");
+            return;
+        }
+        let pixel_count = i64::from(width) * i64::from(height);
+        if pixel_count > crate::resources3::MAX_GENERATED_IMAGE_PIXELS {
+            godot_error!(
+                "VoxelGeneratorGraph.generate_image_from_sdf: pixel count exceeds the script workload limit"
+            );
+            return;
+        }
+        if !size.x.is_finite() || !size.y.is_finite() || size.x <= 0.0 || size.y <= 0.0 {
+            godot_error!(
+                "VoxelGeneratorGraph.generate_image_from_sdf: size components must be finite and positive"
+            );
+            return;
+        }
+        if im.is_compressed() {
+            godot_error!(
+                "VoxelGeneratorGraph.generate_image_from_sdf: image must not be compressed"
+            );
+            return;
+        }
+        let Ok(compiled) = CompiledGraph::compile(&self.graph) else {
+            godot_error!("VoxelGeneratorGraph.generate_image_from_sdf: graph does not compile");
+            return;
+        };
+        if !compiled.nodes().iter().any(|n| n.kind.is_output()) {
+            godot_error!(
+                "VoxelGeneratorGraph.generate_image_from_sdf: graph has no SDF output node"
+            );
+            return;
+        }
+        let mut scratch = voxel_core::generators::graph::CompiledScratch::new();
+        for py in 0..height {
+            for px in 0..width {
+                // Pixel-center samples; +Y up in the plane like upstream.
+                let u = ((px as f32 + 0.5) / width as f32 - 0.5) * size.x;
+                let v = (0.5 - (py as f32 + 0.5) / height as f32) * size.y;
+                let local = Vector3::new(u, v, 0.0);
+                let world = transform.basis * local + transform.origin;
+                let sdf = sample_compiled_sdf(&compiled, world.x, world.y, world.z, &mut scratch);
+                im.set_pixel(px, py, Color::from_rgb(sdf, sdf, sdf));
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Pinned VoxelGeneratorGraph members (upstream VoxelGeneratorGraph.xml).
+    // -----------------------------------------------------------------
+
+    /// Pinned `debug_block_clipping` getter. Stored faithfully; the core does
+    /// not implement clipped-block inversion yet, so it steers nothing.
+    #[func]
+    fn is_debug_clipped_blocks(&self) -> bool {
+        self.debug_block_clipping_value
+    }
+
+    #[func]
+    fn set_debug_clipped_blocks(&mut self, enabled: bool) {
+        self.debug_block_clipping_value = enabled;
+    }
+
+    /// Pinned `sdf_clip_threshold` getter (any finite real).
+    #[func]
+    fn get_sdf_clip_threshold(&self) -> f32 {
+        self.sdf_clip_threshold_value
+    }
+
+    #[func]
+    fn set_sdf_clip_threshold(&mut self, threshold: f32) {
+        if validate_graph_finite_float(threshold).is_err() {
+            godot_error!("VoxelGeneratorGraph.set_sdf_clip_threshold: value must be finite");
+            return;
+        }
+        self.sdf_clip_threshold_value = threshold;
+    }
+
+    /// Pinned `subdivision_size` getter (positive power of two).
+    #[func]
+    fn get_subdivision_size(&self) -> i64 {
+        self.subdivision_size_value
+    }
+
+    #[func]
+    fn set_subdivision_size(&mut self, size: i64) {
+        if validate_graph_subdivision_size(size).is_err() {
+            godot_error!(
+                "VoxelGeneratorGraph.set_subdivision_size: value must be a power of two >= 2"
+            );
+            return;
+        }
+        self.subdivision_size_value = size;
+    }
+
+    /// Pinned `texture_mode` getter (enum `TextureMode`).
+    #[func]
+    fn get_texture_mode(&self) -> i64 {
+        self.texture_mode_value
+    }
+
+    #[func]
+    fn set_texture_mode(&mut self, mode: i64) {
+        if validate_graph_texture_mode(mode).is_err() {
+            godot_error!(
+                "VoxelGeneratorGraph.set_texture_mode: value must be TEXTURE_MODE_MIXEL4 (0) or TEXTURE_MODE_SINGLE (1)"
+            );
+            return;
+        }
+        self.texture_mode_value = mode;
+    }
+
+    /// Pinned `use_optimized_execution_map` getter. Stored faithfully; the
+    /// Rust runtime has no per-area node-skipping execution map yet.
+    #[func]
+    fn is_using_optimized_execution_map(&self) -> bool {
+        self.use_optimized_execution_map_value
+    }
+
+    #[func]
+    fn set_use_optimized_execution_map(&mut self, enabled: bool) {
+        self.use_optimized_execution_map_value = enabled;
+    }
+
+    /// Pinned `use_subdivision` getter. Gates `subdivision_size`, which the
+    /// core does not consume yet.
+    #[func]
+    fn is_using_subdivision(&self) -> bool {
+        self.use_subdivision_value
+    }
+
+    #[func]
+    fn set_use_subdivision(&mut self, enabled: bool) {
+        self.use_subdivision_value = enabled;
+    }
+
+    /// Pinned `use_xz_caching` getter. Wired to the core generator's
+    /// XZ-prefix cache (see `create_core_generator`).
+    #[func]
+    fn is_using_xz_caching(&self) -> bool {
+        self.use_xz_caching_value
+    }
+
+    #[func]
+    fn set_use_xz_caching(&mut self, enabled: bool) {
+        self.use_xz_caching_value = enabled;
+    }
+
     /// Remove every node from the graph under construction.
     #[func]
     fn clear_graph(&mut self) {
@@ -3246,14 +3602,18 @@ impl VoxelGeneratorGraphGD {
 impl VoxelGeneratorGraphGD {
     /// Build the engine-agnostic generator assigned to terrain. An empty graph
     /// becomes a default origin sphere so assigning this resource never
-    /// silently turns into Waves.
+    /// silently turns into Waves. The pinned `use_xz_caching` property gates
+    /// the core generator's XZ-prefix cache.
     pub(crate) fn create_core_generator(&self) -> voxel_core::storage::SharedVoxelGenerator {
         let graph = if self.graph.nodes().is_empty() {
             default_sphere_graph()
         } else {
             self.graph.clone()
         };
-        Arc::new(voxel_core::generators::graph::GraphGenerator::new(graph))
+        Arc::new(
+            voxel_core::generators::graph::GraphGenerator::new(graph)
+                .with_xz_caching(self.use_xz_caching_value),
+        )
     }
 }
 
@@ -3274,6 +3634,258 @@ fn default_sphere_graph() -> voxel_core::generators::graph::Graph {
         a: Some(GraphPort::new(sphere)),
     });
     graph
+}
+
+/// The built-in sin-waves terrain preset (`debug_load_waves_preset`):
+/// `sdf = sin(0.1 * x) + cos(0.1 * z)`. Built from existing node kinds
+/// (InputX/Z, Constant, Multiply, Sin, Cos, Add, OutputSdf) so it exercises
+/// the ordinary graph pipeline. Engine-free for unit testing.
+fn waves_preset_graph() -> voxel_core::generators::graph::Graph {
+    use voxel_core::generators::graph::{Graph, GraphPort, NodeKind};
+    const FREQUENCY: f32 = 0.1;
+    let mut graph = Graph::new();
+    let nx = graph.push(NodeKind::InputX);
+    let nz = graph.push(NodeKind::InputZ);
+    let frequency = graph.push(NodeKind::Constant(FREQUENCY));
+    let scaled_x = graph.push(NodeKind::Multiply {
+        a: Some(GraphPort::new(nx)),
+        b: Some(GraphPort::new(frequency)),
+    });
+    let scaled_z = graph.push(NodeKind::Multiply {
+        a: Some(GraphPort::new(nz)),
+        b: Some(GraphPort::new(frequency)),
+    });
+    let sin_x = graph.push(NodeKind::Sin {
+        a: Some(GraphPort::new(scaled_x)),
+    });
+    let cos_z = graph.push(NodeKind::Cos {
+        a: Some(GraphPort::new(scaled_z)),
+    });
+    let sum = graph.push(NodeKind::Add {
+        a: Some(GraphPort::new(sin_x)),
+        b: Some(GraphPort::new(cos_z)),
+    });
+    graph.push(NodeKind::OutputSdf {
+        a: Some(GraphPort::new(sum)),
+    });
+    graph
+}
+
+/// Map a core topology error to the pinned `compile()` report fields:
+/// `(node_id, message)`. `node_id` is `-1` when the error is not about a
+/// particular node (cycles). Engine-free for unit testing.
+fn graph_compile_error_report(error: &voxel_core::generators::graph::TopoError) -> (i64, String) {
+    use voxel_core::generators::graph::TopoError;
+    match error {
+        TopoError::Cycle => (
+            -1,
+            "the graph contains a cycle (a node depends on itself)".to_owned(),
+        ),
+        TopoError::DanglingPort(id) => (
+            i64::from(*id),
+            format!("an input references node {id}, which does not exist"),
+        ),
+    }
+}
+
+/// Sample the first SDF output of a compiled graph at a single world point.
+/// Returns `NaN` when the graph produces no SDF output. Engine-free.
+fn sample_compiled_sdf(
+    compiled: &voxel_core::generators::graph::CompiledGraph,
+    x: f32,
+    y: f32,
+    z: f32,
+    scratch: &mut voxel_core::generators::graph::CompiledScratch,
+) -> f32 {
+    use voxel_core::generators::graph::{GraphInputs, GraphOutput};
+    let xs = [x];
+    let zs = [z];
+    let inputs = GraphInputs { x: &xs, y, z: &zs };
+    let mut out = Vec::new();
+    compiled.generate_slice(&inputs, 1, scratch, &mut out, false);
+    out.into_iter()
+        .find(|(kind, _)| *kind == GraphOutput::Sdf)
+        .and_then(|(_, values)| values.into_iter().next())
+        .unwrap_or(f32::NAN)
+}
+
+/// Interval estimate of the graph's SDF output over the axis-aligned box with
+/// corners `min_pos`/`max_pos` (corners may be given in any order). Returns
+/// `(min, max)`; infinite bounds mean "not analysable" (hard nodes such as
+/// noise fall back to a conservative full range). Engine-free for testing.
+fn graph_debug_analyze_range(
+    graph: &voxel_core::generators::graph::Graph,
+    min_pos: [f32; 3],
+    max_pos: [f32; 3],
+) -> Result<(f32, f32), String> {
+    use voxel_core::generators::graph::CompiledGraph;
+    use voxel_core::math::Interval;
+    if min_pos.iter().chain(max_pos.iter()).any(|v| !v.is_finite()) {
+        return Err("box corners must be finite".to_owned());
+    }
+    let compiled =
+        CompiledGraph::compile(graph).map_err(|error| graph_compile_error_report(&error).1)?;
+    let interval = compiled.analyze_range(
+        Interval::from_unordered(min_pos[0], max_pos[0]),
+        Interval::from_unordered(min_pos[1], max_pos[1]),
+        Interval::from_unordered(min_pos[2], max_pos[2]),
+    );
+    Ok((interval.min, interval.max))
+}
+
+/// Upper bound on ray-march samples in [`graph_raycast_sdf_approx`]. Keeps a
+/// degenerate long-ray / tiny-stride combination from hanging the caller;
+/// matching upstream exactly is not attempted.
+const MAX_RAYCAST_SAMPLES: u32 = 65_536;
+
+/// March the ray from `ray_origin` towards `ray_end` in steps of `stride`,
+/// sampling the compiled SDF at each step.
+///
+/// * `Ok(Some(distance))` — first sample along the ray where the SDF is
+///   negative; `distance` is measured from `ray_origin` and is accurate up to
+///   `stride`.
+/// * `Ok(None)` — the ray never entered matter (or the march hit the sample
+///   cap; see [`MAX_RAYCAST_SAMPLES`]).
+/// * `Err(message)` — invalid input (non-finite endpoints, zero-length ray,
+///   non-positive stride) or the graph does not compile / has no SDF output.
+///
+/// Engine-free for unit testing.
+fn graph_raycast_sdf_approx(
+    graph: &voxel_core::generators::graph::Graph,
+    ray_origin: [f32; 3],
+    ray_end: [f32; 3],
+    stride: f32,
+) -> Result<Option<f32>, String> {
+    use voxel_core::generators::graph::CompiledGraph;
+    if ray_origin
+        .iter()
+        .chain(ray_end.iter())
+        .any(|v| !v.is_finite())
+    {
+        return Err("ray endpoints must be finite".to_owned());
+    }
+    if !stride.is_finite() || stride <= 0.0 {
+        return Err("stride must be finite and strictly positive".to_owned());
+    }
+    let delta = [
+        ray_end[0] - ray_origin[0],
+        ray_end[1] - ray_origin[1],
+        ray_end[2] - ray_origin[2],
+    ];
+    let length = (delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]).sqrt();
+    if length == 0.0 {
+        return Err("ray has zero length".to_owned());
+    }
+    if !length.is_finite() {
+        return Err("ray is too long (length is not finite)".to_owned());
+    }
+    let compiled =
+        CompiledGraph::compile(graph).map_err(|error| graph_compile_error_report(&error).1)?;
+    if !compiled.nodes().iter().any(|n| n.kind.is_output()) {
+        return Err("graph has no SDF output node".to_owned());
+    }
+    let direction = [delta[0] / length, delta[1] / length, delta[2] / length];
+    let samples = ((length / stride) + 1.0)
+        .min(MAX_RAYCAST_SAMPLES as f32)
+        .max(1.0) as u32;
+    let mut scratch = voxel_core::generators::graph::CompiledScratch::new();
+    for i in 0..samples {
+        let d = (i as f32) * stride;
+        if d > length {
+            break;
+        }
+        let sdf = sample_compiled_sdf(
+            &compiled,
+            ray_origin[0] + direction[0] * d,
+            ray_origin[1] + direction[1] * d,
+            ray_origin[2] + direction[2] * d,
+            &mut scratch,
+        );
+        if sdf < 0.0 {
+            return Ok(Some(d));
+        }
+    }
+    Ok(None)
+}
+
+/// Indicative microseconds-per-voxel timing of the compiled graph
+/// (`debug_measure_microseconds_per_voxel`). With
+/// `use_singular_queries = false`, times whole Y-slice generation; with
+/// `true`, times one single-voxel query per voxel. Returns `-1.0` when the
+/// graph does not compile or has no SDF output. Engine-free for testing.
+fn graph_measure_microseconds_per_voxel(
+    graph: &voxel_core::generators::graph::Graph,
+    use_singular_queries: bool,
+) -> f32 {
+    use std::time::Instant;
+    use voxel_core::generators::graph::{CompiledGraph, CompiledScratch, GraphInputs};
+    let Ok(compiled) = CompiledGraph::compile(graph) else {
+        return -1.0;
+    };
+    if !compiled.nodes().iter().any(|n| n.kind.is_output()) {
+        return -1.0;
+    }
+    let mut scratch = CompiledScratch::new();
+    let mut outputs = Vec::new();
+    const SLICE_SIDE: usize = 32;
+    const SLICE_VOXELS: usize = SLICE_SIDE * SLICE_SIDE;
+    const SLICE_ITERATIONS: usize = 8;
+    const SINGULAR_QUERIES: usize = 512;
+    let xs: Vec<f32> = (0..SLICE_VOXELS).map(|i| (i % SLICE_SIDE) as f32).collect();
+    let zs: Vec<f32> = (0..SLICE_VOXELS).map(|i| (i / SLICE_SIDE) as f32).collect();
+    let start = Instant::now();
+    let total_voxels = if use_singular_queries {
+        for i in 0..SINGULAR_QUERIES {
+            let x = [i as f32];
+            let z = [(i / 3) as f32];
+            let inputs = GraphInputs {
+                x: &x,
+                y: (i % 5) as f32,
+                z: &z,
+            };
+            compiled.generate_slice(&inputs, 1, &mut scratch, &mut outputs, false);
+        }
+        SINGULAR_QUERIES
+    } else {
+        for _ in 0..SLICE_ITERATIONS {
+            let inputs = GraphInputs {
+                x: &xs,
+                y: 0.0,
+                z: &zs,
+            };
+            compiled.generate_slice(&inputs, SLICE_VOXELS, &mut scratch, &mut outputs, false);
+        }
+        SLICE_VOXELS * SLICE_ITERATIONS
+    };
+    let elapsed = start.elapsed();
+    (elapsed.as_secs_f64() * 1.0e6 / total_voxels as f64) as f32
+}
+
+/// Finite-float validation for the canonical graph float property.
+fn validate_graph_finite_float(value: f32) -> Result<f32, &'static str> {
+    if !value.is_finite() {
+        return Err("value must be finite");
+    }
+    Ok(value)
+}
+
+/// `subdivision_size` must be a positive power of two (upstream rejects other
+/// values so block subdivision stays aligned).
+fn validate_graph_subdivision_size(size: i64) -> Result<i64, &'static str> {
+    if size < 2 || (size & (size - 1)) != 0 {
+        return Err("value must be a power of two >= 2");
+    }
+    Ok(size)
+}
+
+/// `texture_mode` accepts exactly the two pinned `TextureMode` values.
+fn validate_graph_texture_mode(mode: i64) -> Result<i64, &'static str> {
+    if mode == VoxelGeneratorGraphGD::TEXTURE_MODE_MIXEL4
+        || mode == VoxelGeneratorGraphGD::TEXTURE_MODE_SINGLE
+    {
+        return Ok(mode);
+    }
+    Err("value must be TEXTURE_MODE_MIXEL4 (0) or TEXTURE_MODE_SINGLE (1)")
 }
 
 /// Parse the compact interchange produced / accepted by `set_graph_json`.
@@ -3389,5 +4001,239 @@ mod graph_json_tests {
         assert!(matches!(graph.nodes()[0].kind, NodeKind::InputY));
         assert!(matches!(graph.nodes()[2].kind, NodeKind::Constant(v) if v == 10.0));
         assert!(parse_graph_json(r#"{"nodes":[{"kind":"Nope"}]}"#).is_err());
+    }
+}
+
+/// Engine-free tests for the pinned VoxelGeneratorGraph surface. All helpers
+/// under test only touch voxel-core types, so no Godot runtime is needed.
+#[cfg(test)]
+mod graph_generator_tests {
+    use super::{
+        graph_compile_error_report, graph_debug_analyze_range,
+        graph_measure_microseconds_per_voxel, graph_raycast_sdf_approx, sample_compiled_sdf,
+        validate_graph_finite_float, validate_graph_subdivision_size, validate_graph_texture_mode,
+        waves_preset_graph, VoxelGeneratorGraphGD,
+    };
+    use voxel_core::generators::graph::{
+        CompiledGraph, CompiledScratch, Graph, GraphNode, GraphPort, NodeKind, TopoError,
+    };
+
+    /// Sphere SDF of radius `radius` centred at the origin, fed by the world
+    /// coordinate inputs.
+    fn sphere_graph(radius: f32) -> Graph {
+        let mut graph = Graph::new();
+        let nx = graph.push(NodeKind::InputX);
+        let ny = graph.push(NodeKind::InputY);
+        let nz = graph.push(NodeKind::InputZ);
+        let nr = graph.push(NodeKind::Constant(radius));
+        let sphere = graph.push(NodeKind::SdfSphere {
+            x: Some(GraphPort::new(nx)),
+            y: Some(GraphPort::new(ny)),
+            z: Some(GraphPort::new(nz)),
+            radius: Some(GraphPort::new(nr)),
+        });
+        graph.push(NodeKind::OutputSdf {
+            a: Some(GraphPort::new(sphere)),
+        });
+        graph
+    }
+
+    #[test]
+    fn generator_graph_compile_report_maps_topology_errors_to_node_ids() {
+        // A valid graph reports success through compile(), not the error map.
+        assert!(CompiledGraph::compile(&sphere_graph(10.0)).is_ok());
+
+        // Dangling port: node 0 reads from a node that does not exist (id 99).
+        let mut dangling = Graph::new();
+        dangling.push(NodeKind::Add {
+            a: Some(GraphPort::new(99)),
+            b: None,
+        });
+        let error = CompiledGraph::compile(&dangling).unwrap_err();
+        assert_eq!(error, TopoError::DanglingPort(99));
+        let (node_id, message) = graph_compile_error_report(&error);
+        assert_eq!(node_id, 99, "dangling port should blame its node");
+        // {id} in the message is the missing *referenced* node, so the text
+        // must describe it as referenced-not-existing (node 0 is the node
+        // holding the input; 99 is the one that does not exist).
+        assert_eq!(message, "an input references node 99, which does not exist");
+
+        // Cycle: nodes 1 and 2 reference each other; no single node is to
+        // blame, so the pinned report uses -1.
+        let mut cyclic = Graph::new();
+        cyclic.add_node(GraphNode::new(
+            1,
+            NodeKind::Add {
+                a: Some(GraphPort::new(2)),
+                b: None,
+            },
+        ));
+        cyclic.add_node(GraphNode::new(
+            2,
+            NodeKind::Add {
+                a: Some(GraphPort::new(1)),
+                b: None,
+            },
+        ));
+        let error = CompiledGraph::compile(&cyclic).unwrap_err();
+        assert_eq!(error, TopoError::Cycle);
+        let (node_id, message) = graph_compile_error_report(&error);
+        assert_eq!(node_id, -1, "cycle has no single offending node");
+        assert!(!message.is_empty());
+    }
+
+    #[test]
+    fn generator_graph_raycast_sdf_approx_hits_sphere_within_stride() {
+        let graph = sphere_graph(10.0);
+        // Straight through the sphere centre: the surface is at distance 20.
+        let hit = graph_raycast_sdf_approx(&graph, [0.0, 0.0, -30.0], [0.0, 0.0, 30.0], 1.0)
+            .expect("valid input");
+        let distance = hit.expect("ray through the sphere must hit");
+        assert!(
+            (distance - 20.0).abs() <= 1.0,
+            "hit distance {distance} should be within one stride of 20"
+        );
+
+        // Ray starting inside: immediate hit at distance 0.
+        let inside = graph_raycast_sdf_approx(&graph, [0.0, 0.0, 0.0], [0.0, 0.0, 30.0], 1.0)
+            .expect("valid input")
+            .expect("ray starting inside must hit");
+        assert_eq!(inside, 0.0);
+
+        // Parallel ray that never enters the sphere: miss → Ok(None).
+        let miss = graph_raycast_sdf_approx(&graph, [0.0, 0.0, 30.0], [0.0, 0.0, 60.0], 1.0)
+            .expect("valid input");
+        assert!(miss.is_none(), "ray outside the sphere must miss");
+
+        // Invalid input: zero stride, zero-length ray, non-finite endpoints.
+        assert!(
+            graph_raycast_sdf_approx(&graph, [0.0, 0.0, -30.0], [0.0, 0.0, 30.0], 0.0).is_err()
+        );
+        assert!(
+            graph_raycast_sdf_approx(&graph, [1.0, 1.0, 1.0], [1.0, 1.0, 1.0], 1.0).is_err(),
+            "zero-length ray must be rejected"
+        );
+        assert!(
+            graph_raycast_sdf_approx(&graph, [f32::NAN, 0.0, -30.0], [0.0, 0.0, 30.0], 1.0)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn generator_graph_debug_analyze_range_returns_constant_interval() {
+        // Constant(2) → OutputSdf: the interval is exactly (2, 2) everywhere.
+        let mut constant = Graph::new();
+        let two = constant.push(NodeKind::Constant(2.0));
+        constant.push(NodeKind::OutputSdf {
+            a: Some(GraphPort::new(two)),
+        });
+        let (min, max) = graph_debug_analyze_range(&constant, [-1.0, -1.0, -1.0], [1.0, 1.0, 1.0])
+            .expect("constant graph analyses");
+        assert_eq!((min, max), (2.0, 2.0));
+
+        // Plane y = 0 straddling a box that crosses zero: min < 0 < max.
+        let mut plane = Graph::new();
+        let ny = plane.push(NodeKind::InputY);
+        let zero = plane.push(NodeKind::Constant(0.0));
+        let sdf = plane.push(NodeKind::SdfPlane {
+            y: Some(GraphPort::new(ny)),
+            height: Some(GraphPort::new(zero)),
+        });
+        plane.push(NodeKind::OutputSdf {
+            a: Some(GraphPort::new(sdf)),
+        });
+        let (min, max) = graph_debug_analyze_range(&plane, [-5.0, -5.0, -5.0], [5.0, 5.0, 5.0])
+            .expect("plane graph analyses");
+        assert!(min < 0.0, "plane over a straddling box must reach negative");
+        assert!(max > 0.0, "plane over a straddling box must reach positive");
+
+        // Non-finite corners are rejected.
+        assert!(
+            graph_debug_analyze_range(&plane, [f32::INFINITY, 0.0, 0.0], [1.0, 1.0, 1.0]).is_err()
+        );
+    }
+
+    #[test]
+    fn generator_graph_waves_preset_compiles_and_produces_wavy_sdf() {
+        let graph = waves_preset_graph();
+        let compiled = CompiledGraph::compile(&graph).expect("waves preset compiles");
+        let mut scratch = CompiledScratch::new();
+        // Preset: sdf = sin(0.1 * x) + cos(0.1 * z).
+        let cases = [
+            (0.0f32, 0.0f32, 0.0f32),
+            (10.0, 0.0, 0.0),
+            (0.0, 42.0, 10.0),
+            (25.0, -7.0, 40.0),
+        ];
+        for (x, y, z) in cases {
+            let expected = (0.1 * x).sin() + (0.1 * z).cos();
+            let actual = sample_compiled_sdf(&compiled, x, y, z, &mut scratch);
+            assert!(
+                (actual - expected).abs() < 1e-5,
+                "sdf at ({x},{y},{z}): {actual} vs {expected}"
+            );
+        }
+        // The output must actually vary along X and Z (it is wavy, not flat),
+        // and must be independent of Y.
+        let flat = sample_compiled_sdf(&compiled, 0.0, 3.0, 0.0, &mut scratch);
+        assert!((sample_compiled_sdf(&compiled, 15.0, 3.0, 0.0, &mut scratch) - flat).abs() > 0.1);
+        assert!((sample_compiled_sdf(&compiled, 0.0, 3.0, 15.0, &mut scratch) - flat).abs() > 0.1);
+        assert!(
+            (sample_compiled_sdf(&compiled, 7.0, 3.0, 9.0, &mut scratch)
+                - sample_compiled_sdf(&compiled, 7.0, -8.0, 9.0, &mut scratch))
+            .abs()
+                < 1e-6
+        );
+    }
+
+    #[test]
+    fn generator_graph_texture_mode_constants_match_pinned_values() {
+        assert_eq!(VoxelGeneratorGraphGD::TEXTURE_MODE_MIXEL4, 0);
+        assert_eq!(VoxelGeneratorGraphGD::TEXTURE_MODE_SINGLE, 1);
+        // The texture-mode validator accepts exactly those two values.
+        assert_eq!(validate_graph_texture_mode(0), Ok(0));
+        assert_eq!(validate_graph_texture_mode(1), Ok(1));
+        assert!(validate_graph_texture_mode(2).is_err());
+        assert!(validate_graph_texture_mode(-1).is_err());
+    }
+
+    #[test]
+    fn generator_graph_property_round_trips() {
+        // subdivision_size: powers of two >= 2 pass, everything else fails.
+        for valid in [2_i64, 4, 8, 16, 32, 64] {
+            assert_eq!(validate_graph_subdivision_size(valid), Ok(valid));
+        }
+        for invalid in [0_i64, 1, 3, 5, 12, -8] {
+            assert!(
+                validate_graph_subdivision_size(invalid).is_err(),
+                "{invalid} must be rejected"
+            );
+        }
+        // sdf_clip_threshold: any finite real.
+        assert_eq!(validate_graph_finite_float(1.5), Ok(1.5));
+        assert_eq!(validate_graph_finite_float(-3.0), Ok(-3.0));
+        assert!(validate_graph_finite_float(f32::NAN).is_err());
+        assert!(validate_graph_finite_float(f32::INFINITY).is_err());
+
+        // The timing helper returns a positive value for a usable graph and
+        // -1.0 for one without an SDF output.
+        let waves = waves_preset_graph();
+        let slice_mode = graph_measure_microseconds_per_voxel(&waves, false);
+        assert!(
+            slice_mode >= 0.0 && slice_mode.is_finite(),
+            "slice timing should be a finite non-negative float, got {slice_mode}"
+        );
+        let singular_mode = graph_measure_microseconds_per_voxel(&waves, true);
+        assert!(
+            singular_mode >= 0.0 && singular_mode.is_finite(),
+            "singular timing should be a finite non-negative float, got {singular_mode}"
+        );
+        let mut no_output = Graph::new();
+        no_output.push(NodeKind::InputX);
+        assert_eq!(
+            graph_measure_microseconds_per_voxel(&no_output, false),
+            -1.0
+        );
+        assert_eq!(graph_measure_microseconds_per_voxel(&no_output, true), -1.0);
     }
 }

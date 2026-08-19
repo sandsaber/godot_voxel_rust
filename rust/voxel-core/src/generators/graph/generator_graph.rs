@@ -39,6 +39,10 @@ pub struct GraphGenerator {
     /// Optional scaling applied to world coordinates before they're fed into
     /// the graph (mirrors C++ `lod` stride handling). `1.0` is the identity.
     coordinate_scale: f32,
+    /// Whether the compiled path may reuse the XZ-prefix (outer-group) results
+    /// across Y-slices (upstream `use_xz_caching`). When `false`, every slice
+    /// re-evaluates the whole graph. Defaults to `true`.
+    use_xz_caching: bool,
 }
 
 impl GraphGenerator {
@@ -49,12 +53,20 @@ impl GraphGenerator {
             compiled: Mutex::new(None),
             compiled_scratch: Mutex::new(CompiledScratch::new()),
             coordinate_scale: 1.0,
+            use_xz_caching: true,
         }
     }
 
     /// Scales input coordinates by `scale` (useful for LOD: `1 << lod`).
     pub fn with_coordinate_scale(mut self, scale: f32) -> Self {
         self.coordinate_scale = scale;
+        self
+    }
+
+    /// Enables/disables the XZ-prefix cache of the compiled path (upstream
+    /// `use_xz_caching`). Disabling forces full re-evaluation every Y-slice.
+    pub fn with_xz_caching(mut self, enabled: bool) -> Self {
+        self.use_xz_caching = enabled;
         self
     }
 
@@ -101,6 +113,7 @@ impl VoxelGenerator for GraphGenerator {
                 input,
                 &mut cscratch,
                 self.coordinate_scale,
+                self.use_xz_caching,
             );
         } else {
             let mut scratch = self.scratch.lock().unwrap_or_else(|e| e.into_inner());
@@ -180,12 +193,14 @@ pub fn generate_block_with_graph(
 /// the Y-independent prefix is evaluated once on the first Y-slice and cached
 /// across subsequent slices; only the Y-dependent tail re-runs per slice. For
 /// terrain graphs (mostly XZ-driven) this avoids recomputing nearly the entire
-/// graph on each of the block's Y-slices.
+/// graph on each of the block's Y-slices. Pass `use_xz_caching = false` to
+/// force full re-evaluation of every slice (upstream `use_xz_caching = off`).
 pub fn generate_block_with_compiled_graph(
     compiled: &CompiledGraph,
     input: VoxelQueryData<'_>,
     scratch: &mut CompiledScratch,
     coordinate_scale: f32,
+    use_xz_caching: bool,
 ) {
     let size = input.buffer.size();
     let sdf_channel = ChannelId::Sdf.index();
@@ -250,8 +265,15 @@ pub fn generate_block_with_compiled_graph(
             y: world_y,
             z: &zs,
         };
-        // First slice: full eval. Subsequent slices: XZ-prefix cached.
-        compiled.generate_slice(&inputs, slice_size, scratch, &mut outputs, y > 0);
+        // First slice: full eval. Subsequent slices: XZ-prefix cached (unless
+        // the caller disabled the cache).
+        compiled.generate_slice(
+            &inputs,
+            slice_size,
+            scratch,
+            &mut outputs,
+            use_xz_caching && y > 0,
+        );
         if let Some((GraphOutput::Sdf, slice)) = outputs.first() {
             write_sdf_slice(input.buffer, sdf_channel, size, y, slice);
         }
@@ -525,6 +547,56 @@ mod tests {
         let v21 = buffer.get_voxel_f(2, 1, 2, ChannelId::Sdf.index());
         assert!((v00 - (10.0f32.sin() + 1.0)).abs() < 1e-4, "v00={v00}");
         assert!((v21 - (12.0f32.sin() + 1.0)).abs() < 1e-4, "v21={v21}");
+    }
+
+    #[test]
+    fn xz_caching_toggle_preserves_output() {
+        // `with_xz_caching(false)` must produce the same SDF values as the
+        // default (cached) path — it only forces full re-evaluation per
+        // Y-slice. Uses a Y-mixed graph (sin(x) + y) so the XZ prefix and the
+        // Y-dependent tail are both exercised.
+        use crate::storage::{ChannelDepth, VoxelFormat};
+        fn make_generator(xz_caching: bool) -> GraphGenerator {
+            let mut g = Graph::new();
+            let x = g.push(NodeKind::InputX);
+            let sin = g.push(NodeKind::Sin {
+                a: Some(GraphPort::new(x)),
+            });
+            let y = g.push(NodeKind::InputY);
+            let add = g.push(NodeKind::Add {
+                a: Some(GraphPort::new(sin)),
+                b: Some(GraphPort::new(y)),
+            });
+            g.push(NodeKind::OutputSdf {
+                a: Some(GraphPort::new(add)),
+            });
+            GraphGenerator::new(g).with_xz_caching(xz_caching)
+        }
+        let sample = |xz_caching: bool| {
+            let mut buffer = VoxelBuffer::with_size(Vector3i::new(4, 4, 4));
+            let mut format = VoxelFormat::new();
+            format.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+            format.configure_buffer(&mut buffer);
+            make_generator(xz_caching).generate_block(VoxelQueryData {
+                buffer: &mut buffer,
+                origin_in_voxels: Vector3i::new(10, 20, 30),
+                lod: 0,
+            });
+            (0..4)
+                .map(|i| buffer.get_voxel_f(i, i, i, ChannelId::Sdf.index()))
+                .collect::<Vec<_>>()
+        };
+        let cached = sample(true);
+        let uncached = sample(false);
+        assert_eq!(cached.len(), uncached.len());
+        for (a, b) in cached.iter().zip(uncached.iter()) {
+            assert!(
+                (a - b).abs() < 1e-6,
+                "xz caching toggle changed output: {a} vs {b}"
+            );
+        }
+        // Sanity: values actually vary along the diagonal.
+        assert!(cached.iter().any(|v| (*v - cached[0]).abs() > 1e-4));
     }
 
     #[test]

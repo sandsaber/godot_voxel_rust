@@ -170,5 +170,25 @@ func _ready() -> void:
 
 		instancer.queue_free()
 
+	# 10. FastNoise2.generate_image fills an uncompressed Image with
+	#     grayscale noise pixels (R9 smoke coverage).
+	fastnoise2_generate_image_writes_pixels()
+
 	print("=== result: %d failure(s) ===" % failures)
 	get_tree().quit(1 if failures > 0 else 0)
+
+## FastNoise2.generate_image must write grayscale noise into an uncompressed
+## image: pixels change from a sentinel fill and stay gray (r == g == b).
+func fastnoise2_generate_image_writes_pixels() -> void:
+	var noise := ClassDB.instantiate("FastNoise2") as Resource
+	_ok(noise != null, "FastNoise2 instantiated")
+	if noise == null:
+		return
+	noise.set_seed(20260819)
+	var img := Image.create_empty(16, 16, false, Image.FORMAT_RGBA8)
+	var sentinel := Color(1.0, 0.0, 1.0, 1.0)
+	img.fill(sentinel)
+	noise.generate_image(img, false)
+	var c: Color = img.get_pixel(0, 0)
+	_ok(c != sentinel, "generate_image wrote pixel (0,0) (got %s)" % str(c))
+	_ok(c.r == c.g and c.g == c.b, "written pixel is grayscale (r==g==b)")
