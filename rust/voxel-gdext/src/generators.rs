@@ -104,7 +104,15 @@ pub(crate) fn generate_core_block_into_gd(
     origin_in_voxels: Vector3,
     lod: i32,
 ) {
-    let lod = u32::try_from(lod.max(0)).unwrap_or(0);
+    // Upstream errors on out-of-range LOD (`ERR_FAIL_COND(lod < 0 || lod >=
+    // MAX_LOD)`); core generators shift by `1 << lod` unguarded, so a large
+    // value would overflow-panic in debug builds.
+    const MAX_GENERATE_BLOCK_LOD: i32 = 16;
+    if !(0..=MAX_GENERATE_BLOCK_LOD).contains(&lod) {
+        godot_error!("generate_block: lod must be in 0..={MAX_GENERATE_BLOCK_LOD}, got {lod}");
+        return;
+    }
+    let lod = lod as u32;
     let mut bound = out_buffer.bind_mut();
     generator.generate_block(VoxelQueryData {
         buffer: bound.core_buffer_mut(),

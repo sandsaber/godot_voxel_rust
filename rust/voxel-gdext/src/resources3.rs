@@ -2096,12 +2096,15 @@ fn spot_centers_in_rect(
     for cell_y in y_first..=y_last {
         for cell_x in x_first..=x_last {
             let (center_x, center_y) = spot_center_2d(cfg, cell_x, cell_y);
+            // End-exclusive containment, matching upstream's Rect2::has_point
+            // filter in get_spot_positions_in_area_2d: adjacent rects
+            // partitioning an area report each boundary spot exactly once.
             if center_x.is_finite()
                 && center_y.is_finite()
                 && center_x >= min_x
-                && center_x <= max_x
+                && center_x < max_x
                 && center_y >= min_y
-                && center_y <= max_y
+                && center_y < max_y
             {
                 centers.push((center_x, center_y));
             }
@@ -2145,15 +2148,17 @@ fn spot_centers_in_aabb(
         for cell_y in y_first..=y_last {
             for cell_x in x_first..=x_last {
                 let (center_x, center_y, center_z) = spot_center_3d(cfg, cell_x, cell_y, cell_z);
+                // End-exclusive containment, matching upstream's
+                // AABB::has_point filter (see the 2D variant).
                 if center_x.is_finite()
                     && center_y.is_finite()
                     && center_z.is_finite()
                     && center_x >= min_x
-                    && center_x <= max_x
+                    && center_x < max_x
                     && center_y >= min_y
-                    && center_y <= max_y
+                    && center_y < max_y
                     && center_z >= min_z
-                    && center_z <= max_z
+                    && center_z < max_z
                 {
                     positions.push((center_x, center_y, center_z));
                 }
@@ -3766,7 +3771,7 @@ mod noise_behavioral_tests {
         for cell_y in 0..=4i32 {
             for cell_x in 0..=4i32 {
                 let (x, y) = spot_center_2d(cfg, cell_x, cell_y);
-                if x >= rect.0 && x <= rect.2 && y >= rect.1 && y <= rect.3 {
+                if x >= rect.0 && x < rect.2 && y >= rect.1 && y < rect.3 {
                     expected.push((x, y));
                 }
             }
@@ -3797,6 +3802,24 @@ mod noise_behavioral_tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn spot_noise_area_end_edge_is_exclusive_like_upstream_has_point() {
+        // Upstream filters area results with Rect2/AABB `has_point`, which is
+        // end-exclusive: a center exactly on the end edge is NOT inside, so
+        // adjacent rects tiling an area report each boundary spot exactly
+        // once. With jitter 0 the center of cell 0 at cell_size 8 is exactly
+        // (4.0, 4.0) — on the end edge of [0, 4) × [0, 4).
+        let cfg = SpotGridConfig::new(8.0, 0.0, 4.0, 1337).expect("valid config");
+        let centers = spot_centers_in_rect(cfg, (0.0, 0.0, 4.0, 4.0)).expect("bounded workload");
+        assert!(
+            centers.is_empty(),
+            "end-edge centers must be excluded (upstream has_point), got {centers:?}"
+        );
+        // A rect extended past the edge includes it exactly once.
+        let centers = spot_centers_in_rect(cfg, (0.0, 0.0, 4.5, 4.5)).expect("bounded workload");
+        assert_eq!(centers, vec![(4.0, 4.0)]);
     }
 
     #[test]
