@@ -3035,6 +3035,7 @@ mod tests {
                 seed: Some(42),
                 frequency: Some(0.1),
                 noise_type: Some(fastnoise_lite::NoiseType::Value),
+                ..NoiseConfig::default()
             };
             let mut graph = Graph::new();
             let x = graph.push(NodeKind::InputX);

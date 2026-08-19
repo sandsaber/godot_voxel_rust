@@ -4,12 +4,27 @@
 //! see `../api/port_status.json` for the audited compatibility status.
 
 use godot::prelude::*;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Maximum number of baked curve samples accepted from one script call.
 /// Matches the general GDExt script-item allocation budget.
 const MAX_CURVE_POINTS: usize = 65_536;
 /// Maximum number of cells visited synchronously by `count_spots`.
 const MAX_SPOT_GRID_CELLS: u64 = 65_536;
+/// Maximum number of pixels written synchronously by `generate_image`.
+const MAX_GENERATED_IMAGE_PIXELS: i64 = 65_536;
+
+/// Whether the `generate_image` tiling warning has been emitted already.
+static TILING_WARNING_EMITTED: AtomicBool = AtomicBool::new(false);
+
+/// Emit the "tileable is unsupported" warning once per process.
+fn warn_tiling_unsupported_once() {
+    if !TILING_WARNING_EMITTED.swap(true, Ordering::Relaxed) {
+        godot_warn!(
+            "FastNoise2.generate_image: tileable noise is not supported by the pure-Rust backend; the generated image will not tile"
+        );
+    }
+}
 
 fn validate_finite_float(value: f32) -> Result<f32, &'static str> {
     if !value.is_finite() {
@@ -84,6 +99,199 @@ fn validate_spot_coordinate_work(grid_size: i32, radius: f32) -> Result<(), &'st
         return Err("scaled spot coordinate is not finite");
     }
     Ok(())
+}
+
+// === Pure (engine-free) noise helpers ===
+//
+// GD-backed structs cannot be constructed in unit tests (they need a live
+// Godot engine), so every behavior below is extracted into plain functions
+// over plain data. The `#[func]` methods delegate to these so script-visible
+// behavior and tested behavior cannot diverge.
+
+/// Engine-free snapshot of the pinned `ZN_FastNoiseLite` configuration.
+///
+/// Mirrors the class's GDScript-facing properties (enum values use the pinned
+/// integer constants) and knows how to apply them to a fresh
+/// `fastnoise_lite::FastNoiseLite` sampler.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct FastNoiseLiteConfig {
+    /// Deterministic seed.
+    seed: i32,
+    /// Frequency (strictly positive finite; `1 / period`).
+    frequency: f32,
+    /// Noise type (0..=5, see the pinned `NoiseType` constants).
+    noise_type: i32,
+    /// Fractal type (0..=3, see the pinned `FractalType` constants).
+    fractal_type: i32,
+    /// Fractal octaves (>=1).
+    fractal_octaves: i32,
+    /// Fractal lacunarity (finite).
+    fractal_lacunarity: f32,
+    /// Fractal gain (finite).
+    fractal_gain: f32,
+    /// Fractal weighted strength ([0,1]).
+    fractal_weighted_strength: f32,
+    /// Fractal ping-pong strength (finite).
+    fractal_ping_pong_strength: f32,
+    /// Cellular distance function (0..=3).
+    cellular_distance_function: i32,
+    /// Cellular jitter (finite).
+    cellular_jitter: f32,
+    /// Cellular return type (0..=6).
+    cellular_return_type: i32,
+    /// 3D rotation type (0..=2).
+    rotation_type_3d: i32,
+}
+
+impl FastNoiseLiteConfig {
+    /// Pinned upstream defaults (ZN_FastNoiseLite.xml): seed=0,
+    /// noise_type=OpenSimplex2(0), fractal_type=FBm(1), fractal_octaves=3,
+    /// fractal_lacunarity=2.0, fractal_gain=0.5,
+    /// fractal_weighted_strength=0.0, fractal_ping_pong_strength=2.0,
+    /// cellular_distance_function=EuclideanSq(1), cellular_jitter=1.0,
+    /// cellular_return_type=Distance(1), rotation_type_3d=None(0),
+    /// period=64.0 (frequency 1/64).
+    fn pinned_defaults() -> Self {
+        let period = 64.0_f32;
+        Self {
+            seed: 0,
+            frequency: 1.0 / period,
+            noise_type: 0,
+            fractal_type: 1,
+            fractal_octaves: 3,
+            fractal_lacunarity: 2.0,
+            fractal_gain: 0.5,
+            fractal_weighted_strength: 0.0,
+            fractal_ping_pong_strength: 2.0,
+            cellular_distance_function: 1,
+            cellular_jitter: 1.0,
+            cellular_return_type: 1,
+            rotation_type_3d: 0,
+        }
+    }
+
+    /// Build a fresh fastnoise-lite sampler configured from this snapshot.
+    fn build_sampler(&self) -> voxel_core::fastnoise_lite::FastNoiseLite {
+        use voxel_core::fastnoise_lite::{
+            CellularDistanceFunction, CellularReturnType, FastNoiseLite, FractalType, NoiseType,
+            RotationType3D,
+        };
+        let mut noise = FastNoiseLite::new();
+        noise.set_seed(Some(self.seed));
+        noise.set_frequency(Some(self.frequency));
+        noise.set_noise_type(Some(match self.noise_type {
+            1 => NoiseType::OpenSimplex2S,
+            2 => NoiseType::Cellular,
+            3 => NoiseType::Perlin,
+            4 => NoiseType::ValueCubic,
+            5 => NoiseType::Value,
+            _ => NoiseType::OpenSimplex2,
+        }));
+        noise.set_rotation_type_3d(Some(match self.rotation_type_3d {
+            1 => RotationType3D::ImproveXYPlanes,
+            2 => RotationType3D::ImproveXZPlanes,
+            _ => RotationType3D::None,
+        }));
+        noise.set_fractal_type(Some(match self.fractal_type {
+            0 => FractalType::None,
+            2 => FractalType::Ridged,
+            3 => FractalType::PingPong,
+            _ => FractalType::FBm,
+        }));
+        noise.set_fractal_octaves(Some(self.fractal_octaves.max(1)));
+        noise.set_fractal_lacunarity(Some(self.fractal_lacunarity));
+        noise.set_fractal_gain(Some(self.fractal_gain));
+        noise.set_fractal_weighted_strength(Some(self.fractal_weighted_strength));
+        noise.set_fractal_ping_pong_strength(Some(self.fractal_ping_pong_strength));
+        noise.set_cellular_distance_function(Some(match self.cellular_distance_function {
+            0 => CellularDistanceFunction::Euclidean,
+            2 => CellularDistanceFunction::Manhattan,
+            3 => CellularDistanceFunction::Hybrid,
+            _ => CellularDistanceFunction::EuclideanSq,
+        }));
+        noise.set_cellular_return_type(Some(match self.cellular_return_type {
+            0 => CellularReturnType::CellValue,
+            2 => CellularReturnType::Distance2,
+            3 => CellularReturnType::Distance2Add,
+            4 => CellularReturnType::Distance2Sub,
+            5 => CellularReturnType::Distance2Mul,
+            6 => CellularReturnType::Distance2Div,
+            _ => CellularReturnType::Distance,
+        }));
+        noise.set_cellular_jitter(Some(self.cellular_jitter));
+        noise
+    }
+
+    /// True 2D noise sample at `(x, y)` via the crate's `get_noise_2d`
+    /// (not a 3D `(x, 0, y)` slice).
+    fn sample_2d(&self, x: f32, y: f32) -> f32 {
+        self.build_sampler().get_noise_2d(x, y)
+    }
+
+    /// 3D noise sample at `(x, y, z)`.
+    fn sample_3d(&self, x: f32, y: f32, z: f32) -> f32 {
+        self.build_sampler().get_noise_3d(x, y, z)
+    }
+
+    /// Mirrors the pinned `get_noise_3dv` body: a `Vector3` position is
+    /// sampled component-wise through `sample_3d`.
+    #[allow(dead_code)] // pure mirror of the pinned method, exercised by unit tests
+    fn sample_3dv(&self, position: (f32, f32, f32)) -> f32 {
+        self.sample_3d(position.0, position.1, position.2)
+    }
+
+    /// Mirrors the pinned `get_noise_2dv` body.
+    #[allow(dead_code)] // pure mirror of the pinned method, exercised by unit tests
+    fn sample_2dv(&self, position: (f32, f32)) -> f32 {
+        self.sample_2d(position.0, position.1)
+    }
+}
+
+/// FastNoise2 `Remap` transform: linear map of `[min_in, max_in]` onto
+/// `[min_out, max_out]`, without clamping (upstream's `Remap::GenT` computes
+/// `to_min + (source - from_min) / (from_max - from_min) * (to_max - to_min)`).
+/// A degenerate input range (`min_in == max_in`) is a passthrough instead of
+/// the upstream division by zero, so the transform can never produce NaN.
+fn apply_remap(v: f32, min_in: f32, max_in: f32, min_out: f32, max_out: f32, enabled: bool) -> f32 {
+    if !enabled || min_in == max_in {
+        return v;
+    }
+    (v - min_in) / (max_in - min_in) * (max_out - min_out) + min_out
+}
+
+/// FastNoise2 `Terrace` transform.
+///
+/// Follows upstream's `Terrace::GenT` construction (Modifiers.inl): the input
+/// is scaled by the step count (`multiplier`), rounded to the nearest step,
+/// and a smooth transition band is restored around each step boundary. The
+/// `smoothness` parameter is normalized to `[0, 1]` — `0.0` snaps to hard
+/// steps, `1.0` is exactly the identity — corresponding to upstream's raw
+/// smoothness `s / (1 - s)` (upstream reaches identity only in the limit).
+fn apply_terrace(v: f32, multiplier: f32, smoothness: f32, enabled: bool) -> f32 {
+    if !enabled {
+        return v;
+    }
+    if !multiplier.is_finite() || multiplier == 0.0 {
+        // Degenerate step count: passthrough (avoids division by zero).
+        return v;
+    }
+    let smoothness = if smoothness.is_finite() {
+        smoothness.clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    let scaled = v * multiplier;
+    let rounded = scaled.round();
+    if smoothness == 0.0 {
+        return rounded / multiplier;
+    }
+    // Distance from the step boundary, in step-width units (`band` in
+    // `[0, 0.5]`); widen it by `1 / smoothness`, saturating at half a step.
+    let diff = rounded - scaled;
+    let band = (0.5 - diff.abs()) / smoothness;
+    let band = if band > 0.5 { 0.5 } else { band };
+    let adjusted = if diff < 0.0 { 0.5 - band } else { band - 0.5 };
+    (rounded + adjusted) / multiplier
 }
 
 // === Noise Resources (5) ===
@@ -181,29 +389,25 @@ pub struct FastNoiseLiteGD {
 #[godot_api]
 impl IResource for FastNoiseLiteGD {
     fn init(base: Base<Resource>) -> Self {
-        // Upstream defaults: seed=0, noise_type=OpenSimplex2(0),
-        // fractal_type=FBm(1), fractal_octaves=3, fractal_lacunarity=2.0,
-        // fractal_gain=0.5, fractal_weighted_strength=0.0,
-        // fractal_ping_pong_strength=2.0, cellular_distance_function=EuclideanSq(1),
-        // cellular_jitter=1.0, cellular_return_type=Distance(1),
-        // rotation_type_3d=None(0), period=64.0 (→ frequency 1/64).
-        let period = 64.0_f32;
+        // Pinned upstream defaults; the authoritative source is
+        // `FastNoiseLiteConfig::pinned_defaults` (see the pinned XML).
+        let defaults = FastNoiseLiteConfig::pinned_defaults();
         Self {
             base,
-            seed_value: 0,
-            frequency_value: 1.0 / period,
-            noise_type_value: 0,
-            fractal_type_value: 1,
-            fractal_octaves_value: 3,
-            fractal_lacunarity_value: 2.0,
-            fractal_gain_value: 0.5,
-            fractal_weighted_strength_value: 0.0,
-            fractal_ping_pong_strength_value: 2.0,
-            cellular_distance_function_value: 1,
-            cellular_jitter_value: 1.0,
-            cellular_return_type_value: 1,
-            rotation_type_3d_value: 0,
-            period_value: period,
+            seed_value: defaults.seed,
+            frequency_value: defaults.frequency,
+            noise_type_value: defaults.noise_type,
+            fractal_type_value: defaults.fractal_type,
+            fractal_octaves_value: defaults.fractal_octaves,
+            fractal_lacunarity_value: defaults.fractal_lacunarity,
+            fractal_gain_value: defaults.fractal_gain,
+            fractal_weighted_strength_value: defaults.fractal_weighted_strength,
+            fractal_ping_pong_strength_value: defaults.fractal_ping_pong_strength,
+            cellular_distance_function_value: defaults.cellular_distance_function,
+            cellular_jitter_value: defaults.cellular_jitter,
+            cellular_return_type_value: defaults.cellular_return_type,
+            rotation_type_3d_value: defaults.rotation_type_3d,
+            period_value: 1.0 / defaults.frequency,
             seed: PhantomVar::default(),
             frequency: PhantomVar::default(),
             noise_type: PhantomVar::default(),
@@ -223,63 +427,59 @@ impl IResource for FastNoiseLiteGD {
 }
 
 impl FastNoiseLiteGD {
-    /// Build a fresh fastnoise-lite sampler configured from this resource's
-    /// pinned properties. Used by `sample_*`/`get_noise_*` so the noise actually
-    /// reflects the configured fractal/cellular/rotation settings.
-    fn build_sampler(&self) -> voxel_core::fastnoise_lite::FastNoiseLite {
-        use voxel_core::fastnoise_lite::{
-            CellularDistanceFunction, CellularReturnType, FastNoiseLite, FractalType, NoiseType,
-            RotationType3D,
-        };
-        let mut noise = FastNoiseLite::new();
-        noise.set_seed(Some(self.seed_value));
-        noise.set_frequency(Some(self.frequency_value));
-        noise.set_noise_type(Some(match self.noise_type_value {
-            1 => NoiseType::OpenSimplex2S,
-            2 => NoiseType::Cellular,
-            3 => NoiseType::Perlin,
-            4 => NoiseType::ValueCubic,
-            5 => NoiseType::Value,
-            _ => NoiseType::OpenSimplex2,
-        }));
-        noise.set_rotation_type_3d(Some(match self.rotation_type_3d_value {
-            1 => RotationType3D::ImproveXYPlanes,
-            2 => RotationType3D::ImproveXZPlanes,
-            _ => RotationType3D::None,
-        }));
-        noise.set_fractal_type(Some(match self.fractal_type_value {
-            0 => FractalType::None,
-            2 => FractalType::Ridged,
-            3 => FractalType::PingPong,
-            _ => FractalType::FBm,
-        }));
-        noise.set_fractal_octaves(Some(self.fractal_octaves_value.max(1)));
-        noise.set_fractal_lacunarity(Some(self.fractal_lacunarity_value));
-        noise.set_fractal_gain(Some(self.fractal_gain_value));
-        noise.set_fractal_weighted_strength(Some(self.fractal_weighted_strength_value));
-        noise.set_fractal_ping_pong_strength(Some(self.fractal_ping_pong_strength_value));
-        noise.set_cellular_distance_function(Some(match self.cellular_distance_function_value {
-            0 => CellularDistanceFunction::Euclidean,
-            2 => CellularDistanceFunction::Manhattan,
-            3 => CellularDistanceFunction::Hybrid,
-            _ => CellularDistanceFunction::EuclideanSq,
-        }));
-        noise.set_cellular_return_type(Some(match self.cellular_return_type_value {
-            0 => CellularReturnType::CellValue,
-            2 => CellularReturnType::Distance2,
-            3 => CellularReturnType::Distance2Add,
-            4 => CellularReturnType::Distance2Sub,
-            5 => CellularReturnType::Distance2Mul,
-            6 => CellularReturnType::Distance2Div,
-            _ => CellularReturnType::Distance,
-        }));
-        noise.set_cellular_jitter(Some(self.cellular_jitter_value));
-        noise
+    /// Snapshot of the current pinned properties as an engine-free config.
+    fn config(&self) -> FastNoiseLiteConfig {
+        FastNoiseLiteConfig {
+            seed: self.seed_value,
+            frequency: self.frequency_value,
+            noise_type: self.noise_type_value,
+            fractal_type: self.fractal_type_value,
+            fractal_octaves: self.fractal_octaves_value,
+            fractal_lacunarity: self.fractal_lacunarity_value,
+            fractal_gain: self.fractal_gain_value,
+            fractal_weighted_strength: self.fractal_weighted_strength_value,
+            fractal_ping_pong_strength: self.fractal_ping_pong_strength_value,
+            cellular_distance_function: self.cellular_distance_function_value,
+            cellular_jitter: self.cellular_jitter_value,
+            cellular_return_type: self.cellular_return_type_value,
+            rotation_type_3d: self.rotation_type_3d_value,
+        }
     }
 }
 
 #[godot_api]
+#[allow(dead_code)] // script-facing enum constants
 impl FastNoiseLiteGD {
+    // Pinned `NoiseType` enum constants (see upstream ZN_FastNoiseLite.xml).
+    const TYPE_OPEN_SIMPLEX_2: i64 = 0;
+    const TYPE_OPEN_SIMPLEX_2S: i64 = 1;
+    const TYPE_CELLULAR: i64 = 2;
+    const TYPE_PERLIN: i64 = 3;
+    const TYPE_VALUE_CUBIC: i64 = 4;
+    const TYPE_VALUE: i64 = 5;
+    // Pinned `FractalType` enum constants.
+    const FRACTAL_NONE: i64 = 0;
+    const FRACTAL_FBM: i64 = 1;
+    const FRACTAL_RIDGED: i64 = 2;
+    const FRACTAL_PING_PONG: i64 = 3;
+    // Pinned `RotationType3D` enum constants.
+    const ROTATION_3D_NONE: i64 = 0;
+    const ROTATION_3D_IMPROVE_XY_PLANES: i64 = 1;
+    const ROTATION_3D_IMPROVE_XZ_PLANES: i64 = 2;
+    // Pinned `CellularDistanceFunction` enum constants.
+    const CELLULAR_DISTANCE_EUCLIDEAN: i64 = 0;
+    const CELLULAR_DISTANCE_EUCLIDEAN_SQ: i64 = 1;
+    const CELLULAR_DISTANCE_MANHATTAN: i64 = 2;
+    const CELLULAR_DISTANCE_HYBRID: i64 = 3;
+    // Pinned `CellularReturnType` enum constants.
+    const CELLULAR_RETURN_CELL_VALUE: i64 = 0;
+    const CELLULAR_RETURN_DISTANCE: i64 = 1;
+    const CELLULAR_RETURN_DISTANCE_2: i64 = 2;
+    const CELLULAR_RETURN_DISTANCE_2_ADD: i64 = 3;
+    const CELLULAR_RETURN_DISTANCE_2_SUB: i64 = 4;
+    const CELLULAR_RETURN_DISTANCE_2_MUL: i64 = 5;
+    const CELLULAR_RETURN_DISTANCE_2_DIV: i64 = 6;
+
     /// Sample the raw 3D noise at world point `(x,y,z)`, configured from this
     /// resource's seed/frequency/noise_type. Returns a value in roughly
     /// `[-1, 1]`. The result is deterministic for a fixed configuration.
@@ -291,7 +491,21 @@ impl FastNoiseLiteGD {
             godot_error!("ZN_FastNoiseLite.sample_3d: frequency must be positive and all coordinates must be finite");
             return 0.0;
         }
-        self.build_sampler().get_noise_3d(x, y, z)
+        self.config().sample_3d(x, y, z)
+    }
+
+    /// Sample the raw 2D noise at `(x,y)` using the crate's true 2D sampler
+    /// (`get_noise_2d`), configured from this resource's properties. Returns a
+    /// value in roughly `[-1, 1]`, deterministic for a fixed configuration.
+    #[func]
+    fn sample_2d(&self, x: f32, y: f32) -> f32 {
+        if validate_positive_finite_float(self.frequency_value).is_err()
+            || [x, y].iter().any(|value| !value.is_finite())
+        {
+            godot_error!("ZN_FastNoiseLite.sample_2d: frequency must be positive and all coordinates must be finite");
+            return 0.0;
+        }
+        self.config().sample_2d(x, y)
     }
 
     /// Frequency (higher = more detail; strictly positive finite). Updating
@@ -322,26 +536,24 @@ impl FastNoiseLiteGD {
         self.sample_3d(x, y, z)
     }
 
-    /// Get the raw 3D noise value at `position`.
+    /// Get the raw 3D noise value at `position`. Matches upstream's pinned
+    /// `get_noise_3dv(Vector3)` signature.
     #[func]
-    fn get_noise_3dv(&self, position: Vector2) -> f32 {
-        // Upstream signature is `get_noise_3dv(Vector3)`. gdext's `Vector2`
-        // here is the 2-component overload commonly used by the 2D heightmap
-        // path; the 3-component overload delegates to `get_noise_3d`.
-        self.sample_3d(position.x, 0.0, position.y)
+    fn get_noise_3dv(&self, position: Vector3) -> f32 {
+        self.sample_3d(position.x, position.y, position.z)
     }
 
-    /// Get the raw 2D noise value at `(x,y)`. Samples the configured sampler at
-    /// `(x, 0, y)` so 2D queries use the same configuration as 3D queries.
+    /// Get the raw 2D noise value at `(x,y)`, sampled with the crate's true
+    /// 2D sampler. Matches upstream's pinned `get_noise_2d`.
     #[func]
     fn get_noise_2d(&self, x: f32, y: f32) -> f32 {
-        self.sample_3d(x, 0.0, y)
+        self.sample_2d(x, y)
     }
 
     /// Get the raw 2D noise value at `position`.
     #[func]
     fn get_noise_2dv(&self, position: Vector2) -> f32 {
-        self.get_noise_2d(position.x, position.y)
+        self.sample_2d(position.x, position.y)
     }
 
     // -----------------------------------------------------------------
@@ -523,8 +735,9 @@ impl FastNoiseLiteGD {
 /// FastNoise2 noise resource. The upstream FastNoise2 is a C++ library (not
 /// ported to Rust); this binding delegates to the same `fastnoise-lite`
 /// sampler used by voxel-core's `Noise` generator so noise sampling is
-/// functional through the binding. `sample_3d` returns the raw 3D noise value
-/// at a world point, configured from the resource's seed/frequency.
+/// functional through the binding. `sample_3d` returns the 3D noise value at a
+/// world point, configured from the resource's seed/frequency, with the
+/// terrace and remap output transforms applied when enabled.
 ///
 /// The pinned GDScript-facing properties mirror upstream `FastNoise2`. They are
 /// stored faithfully so GDScript reads round-trip and applied to a
@@ -564,9 +777,10 @@ pub struct FastNoise2GD {
     /// Period (`1/frequency`; strictly positive finite). Upstream exposes
     /// `period` instead of `frequency`.
     period_value: f32,
-    /// Encoded FastNoise2 node-tree (base64). Stored but not yet applied.
+    /// Encoded FastNoise2 node-tree (base64). Stored but not applied (the
+    /// Rust binding does not decode node trees — documented partial).
     encoded_node_tree_value: GString,
-    /// Remap toggle (no-op in this build; stored faithfully).
+    /// Remap toggle (gates the linear output remap in `sample_*`).
     remap_enabled_value: bool,
     /// Remap input minimum (finite).
     remap_input_min_value: f32,
@@ -576,11 +790,11 @@ pub struct FastNoise2GD {
     remap_output_min_value: f32,
     /// Remap output maximum (finite).
     remap_output_max_value: f32,
-    /// Terrace toggle (no-op in this build; stored faithfully).
+    /// Terrace toggle (gates the stepped terrace transform in `sample_*`).
     terrace_enabled_value: bool,
-    /// Terrace multiplier (finite).
+    /// Terrace multiplier, i.e. step count (finite; 0 is a safe passthrough).
     terrace_multiplier_value: f32,
-    /// Terrace smoothness (finite).
+    /// Terrace smoothness in `[0,1]` (0 = hard steps, 1 = identity).
     terrace_smoothness_value: f32,
     /// The pinned GDScript-facing `seed` property.
     #[var(get = get_seed, set = set_seed)]
@@ -768,8 +982,57 @@ impl FastNoise2GD {
     }
 }
 
-#[godot_api]
 impl FastNoise2GD {
+    /// Apply the pinned output transforms to a raw sample, in the adopted
+    /// chain order `raw -> terrace -> remap` (terrace shapes the noise, remap
+    /// rescales the final range — matching how upstream chains the nodes).
+    fn transform_output(&self, raw: f32) -> f32 {
+        let terraced = apply_terrace(
+            raw,
+            self.terrace_multiplier_value,
+            self.terrace_smoothness_value,
+            self.terrace_enabled_value,
+        );
+        apply_remap(
+            terraced,
+            self.remap_input_min_value,
+            self.remap_input_max_value,
+            self.remap_output_min_value,
+            self.remap_output_max_value,
+            self.remap_enabled_value,
+        )
+    }
+}
+
+#[godot_api]
+#[allow(dead_code)] // script-facing enum constants
+impl FastNoise2GD {
+    // Pinned `NoiseType` enum constants (see upstream FastNoise2.xml).
+    const TYPE_OPEN_SIMPLEX_2: i64 = 0;
+    const TYPE_SIMPLEX: i64 = 1;
+    const TYPE_PERLIN: i64 = 2;
+    const TYPE_VALUE: i64 = 3;
+    const TYPE_CELLULAR: i64 = 4;
+    const TYPE_ENCODED_NODE_TREE: i64 = 5;
+    const TYPE_CELLULAR_VALUE: i64 = 6;
+    // Pinned `FractalType` enum constants.
+    const FRACTAL_NONE: i64 = 0;
+    const FRACTAL_FBM: i64 = 1;
+    const FRACTAL_RIDGED: i64 = 2;
+    const FRACTAL_PING_PONG: i64 = 3;
+    // Pinned `CellularDistanceFunction` enum constants.
+    const CELLULAR_DISTANCE_EUCLIDEAN: i64 = 0;
+    const CELLULAR_DISTANCE_EUCLIDEAN_SQ: i64 = 1;
+    const CELLULAR_DISTANCE_MANHATTAN: i64 = 2;
+    const CELLULAR_DISTANCE_HYBRID: i64 = 3;
+    const CELLULAR_DISTANCE_MAX_AXIS: i64 = 4;
+    // Pinned `CellularReturnType` enum constants.
+    const CELLULAR_RETURN_INDEX_0: i64 = 0;
+    const CELLULAR_RETURN_INDEX_0_ADD_1: i64 = 1;
+    const CELLULAR_RETURN_INDEX_0_SUB_1: i64 = 2;
+    const CELLULAR_RETURN_INDEX_0_MUL_1: i64 = 3;
+    const CELLULAR_RETURN_INDEX_0_DIV_1: i64 = 4;
+
     // Pinned `SIMDLevel` enum constants (see upstream FastNoise2.xml).
     const SIMD_NULL: i64 = 0;
     const SIMD_SCALAR: i64 = 1;
@@ -784,8 +1047,9 @@ impl FastNoise2GD {
     const SIMD_AVX512: i64 = 512;
     const SIMD_NEON: i64 = 65_536;
 
-    /// Sample the raw 3D noise at world point `(x,y,z)`. Deterministic for a
-    /// fixed seed/frequency. Delegates to the `fastnoise-lite` sampler.
+    /// Sample the raw 3D noise at world point `(x,y,z)`, then apply the
+    /// terrace/remap output transforms. Deterministic for a fixed
+    /// seed/frequency. Delegates to the `fastnoise-lite` sampler.
     #[func]
     fn sample_3d(&self, x: f32, y: f32, z: f32) -> f32 {
         if validate_positive_finite_float(self.frequency_value).is_err()
@@ -794,10 +1058,12 @@ impl FastNoise2GD {
             godot_error!("FastNoise2.sample_3d: frequency must be positive and all coordinates must be finite");
             return 0.0;
         }
-        self.build_sampler().get_noise_3d(x, y, z)
+        let raw = self.build_sampler().get_noise_3d(x, y, z);
+        self.transform_output(raw)
     }
 
-    /// Sample raw 2D noise at `(x, z)` (Y = 0). Useful for heightmap-style use.
+    /// Sample raw 2D noise at `(x, z)` (Y = 0), then apply the terrace/remap
+    /// output transforms. Useful for heightmap-style use.
     #[func]
     fn sample_2d(&self, x: f32, z: f32) -> f32 {
         if validate_positive_finite_float(self.frequency_value).is_err()
@@ -806,7 +1072,8 @@ impl FastNoise2GD {
             godot_error!("FastNoise2.sample_2d: frequency must be positive and all coordinates must be finite");
             return 0.0;
         }
-        self.build_sampler().get_noise_3d(x, 0.0, z)
+        let raw = self.build_sampler().get_noise_3d(x, 0.0, z);
+        self.transform_output(raw)
     }
 
     /// Frequency (strictly positive finite). Updating `frequency` keeps
@@ -880,11 +1147,44 @@ impl FastNoise2GD {
         .to_godot()
     }
 
-    /// Fill a greyscale `image` with noise values. The binding does not own an
-    /// image pipeline; the image dimensions and format are validated and the
-    /// call is a no-op when they are unsupported.
+    /// Fill a greyscale `image` with noise values, sized to the image's
+    /// current dimensions. Samples the resource's configured sampler (with the
+    /// terrace/remap output transforms applied) at integer pixel coordinates,
+    /// mirroring `voxel_core`'s row-major `generate_image_2d` layout; values
+    /// are normalized from `[-1, 1]` to `[0, 1]`. `tileable = true` is not
+    /// supported by the pure-Rust backend: a one-time warning is emitted and
+    /// the non-tileable image is still produced.
     #[func]
-    fn generate_image(&self, _image: Gd<godot::classes::Image>, _tileable: bool) {}
+    fn generate_image(&self, image: Gd<godot::classes::Image>, tileable: bool) {
+        let mut image = image;
+        let width = image.get_width();
+        let height = image.get_height();
+        if width <= 0 || height <= 0 || image.is_empty() {
+            godot_error!(
+                "FastNoise2.generate_image: image must be non-empty with positive dimensions"
+            );
+            return;
+        }
+        let pixel_count = i64::from(width) * i64::from(height);
+        if pixel_count > MAX_GENERATED_IMAGE_PIXELS {
+            godot_error!(
+                "FastNoise2.generate_image: pixel count exceeds the script workload limit"
+            );
+            return;
+        }
+        if tileable {
+            warn_tiling_unsupported_once();
+        }
+        let sampler = self.build_sampler();
+        for y in 0..height {
+            for x in 0..width {
+                let raw = sampler.get_noise_3d(x as f32, 0.0, y as f32);
+                let value = self.transform_output(raw);
+                let gray = ((value + 1.0) * 0.5).clamp(0.0, 1.0);
+                image.set_pixel(x, y, Color::from_rgba(gray, gray, gray, 1.0));
+            }
+        }
+    }
 
     // -----------------------------------------------------------------
     // Pinned FastNoise2 properties (transactional get/set pairs).
@@ -1188,7 +1488,11 @@ impl FastNoise2GD {
 /// The pinned GDScript-facing properties (`cell_size`, `jitter`, `seed`,
 /// `spot_radius`) mirror upstream `ZN_SpotNoise` (5828cbeb). They are stored
 /// faithfully so GDScript reads round-trip and used by the spot-evaluation
-/// helpers.
+/// helpers. The spot grid itself is defined by the engine-free helpers in this
+/// module (`SpotGridConfig` and friends): space is divided into cells, each
+/// cell owns one spot centered at a hash-jittered point, `get_noise_2d/3d`
+/// test spot membership, and `get_spot_positions_in_area_2d/3d` enumerate the
+/// same spot centers.
 #[derive(GodotClass)]
 #[class(base = Resource, tool, rename = ZN_SpotNoise)]
 pub struct SpotNoiseGD {
@@ -1358,28 +1662,67 @@ impl SpotNoiseGD {
     }
 
     /// Get the center positions of spots contained in `rect` (2D). Matches
-    /// upstream's pinned `get_spot_positions_in_area_2d`. The Rust binding does
-    /// not yet implement the full spot-grid sampler; the call is a bounded no-op
-    /// that returns an empty array.
+    /// upstream's pinned `get_spot_positions_in_area_2d`: every grid cell
+    /// owns exactly one spot whose (jittered) center is reported when it lies
+    /// inside the rect. The visited-cell workload is bounded like
+    /// `count_spots`; an over-large rect logs an error and returns an empty
+    /// array.
     #[func]
-    fn get_spot_positions_in_area_2d(&self, _rect: Rect2) -> PackedVector2Array {
-        if self.spot_config_is_invalid() {
+    fn get_spot_positions_in_area_2d(&self, rect: Rect2) -> PackedVector2Array {
+        let Ok(cfg) = self.spot_grid_config() else {
+            godot_error!("ZN_SpotNoise.get_spot_positions_in_area_2d: cell_size and spot_radius must be finite and positive, jitter in [0,1]");
             return PackedVector2Array::new();
+        };
+        let bounds = (rect.position.x, rect.position.y, rect.end().x, rect.end().y);
+        match spot_centers_in_rect(cfg, bounds) {
+            Ok(centers) => {
+                let positions: Vec<Vector2> = centers
+                    .into_iter()
+                    .map(|(x, y)| Vector2::new(x, y))
+                    .collect();
+                PackedVector2Array::from(positions.as_slice())
+            }
+            Err(message) => {
+                godot_error!("ZN_SpotNoise.get_spot_positions_in_area_2d: {message}");
+                PackedVector2Array::new()
+            }
         }
-        // TODO(port): implement spot-grid sampling. Returning empty matches the
-        // upstream contract for an area containing no spots.
-        PackedVector2Array::new()
     }
 
     /// Get the center positions of spots contained in `aabb` (3D). Matches
-    /// upstream's pinned `get_spot_positions_in_area_3d`. Bounded no-op returning
-    /// an empty array (see `get_spot_positions_in_area_2d`).
+    /// upstream's pinned `get_spot_positions_in_area_3d` under this class's
+    /// XZ-column 3D model (`get_noise_3d` ignores Y): each 2D spot center in
+    /// the aabb's XZ projection is repeated along Y at levels spaced by
+    /// `spot_radius`, so every point of a spot column inside the aabb is
+    /// within one spot radius of an enumerated position. Workload-bounded like
+    /// the 2D variant.
     #[func]
-    fn get_spot_positions_in_area_3d(&self, _aabb: Aabb) -> PackedVector3Array {
-        if self.spot_config_is_invalid() {
+    fn get_spot_positions_in_area_3d(&self, aabb: Aabb) -> PackedVector3Array {
+        let Ok(cfg) = self.spot_grid_config() else {
+            godot_error!("ZN_SpotNoise.get_spot_positions_in_area_3d: cell_size and spot_radius must be finite and positive, jitter in [0,1]");
             return PackedVector3Array::new();
+        };
+        let bounds = (
+            aabb.position.x,
+            aabb.position.y,
+            aabb.position.z,
+            aabb.end().x,
+            aabb.end().y,
+            aabb.end().z,
+        );
+        match spot_centers_in_aabb(cfg, bounds) {
+            Ok(centers) => {
+                let positions: Vec<Vector3> = centers
+                    .into_iter()
+                    .map(|(x, y, z)| Vector3::new(x, y, z))
+                    .collect();
+                PackedVector3Array::from(positions.as_slice())
+            }
+            Err(message) => {
+                godot_error!("ZN_SpotNoise.get_spot_positions_in_area_3d: {message}");
+                PackedVector3Array::new()
+            }
         }
-        PackedVector3Array::new()
     }
 
     // -----------------------------------------------------------------
@@ -1445,70 +1788,43 @@ impl SpotNoiseGD {
 }
 
 impl SpotNoiseGD {
+    /// Validated engine-free snapshot of the pinned spot-grid configuration.
+    /// `Ok` iff `cell_size`/`spot_radius` are finite and positive and `jitter`
+    /// is a unit float.
+    fn spot_grid_config(&self) -> Result<SpotGridConfig, &'static str> {
+        SpotGridConfig::new(
+            self.cell_size_value,
+            self.jitter_value,
+            self.spot_radius_value,
+            self.seed_value,
+        )
+    }
+
     /// Evaluate the 2D spot field at `(x, y)`: 1.0 inside a spot, 0.0 outside.
     /// A point is inside a spot when its distance to the nearest cell center
-    /// (jittered, scaled by `cell_size`) is below `spot_radius`.
+    /// (jittered, scaled by `cell_size`) is at most `spot_radius`.
     fn spot_noise_2d(&self, x: f32, y: f32) -> f32 {
-        if self.spot_config_is_invalid() || !x.is_finite() || !y.is_finite() {
-            godot_error!("ZN_SpotNoise: cell_size/spot_radius must be finite and positive");
-            return 0.0;
-        }
-        let cs = self.cell_size_value;
-        let cx = (x / cs).floor();
-        let cy = (y / cs).floor();
-        // Check the 3×3 neighborhood of cells so spots clipped across cell
-        // borders are still detected.
-        for dy in -1..=1 {
-            for dx in -1..=1 {
-                if self.point_in_spot_2d(x, y, cx + dx as f32, cy + dy as f32) {
-                    return 1.0;
-                }
+        match self.spot_grid_config() {
+            Ok(cfg) if x.is_finite() && y.is_finite() => spot_grid_noise_2d(cfg, x, y),
+            _ => {
+                godot_error!("ZN_SpotNoise: cell_size/spot_radius must be finite and positive");
+                0.0
             }
         }
-        0.0
     }
 
-    /// Evaluate the 3D spot field at `(x, y, z)` (the Z axis is ignored, matching
-    /// upstream's grid-of-columns model).
+    /// Evaluate the 3D spot field at `(x, y, z)` (the Y axis is ignored, matching
+    /// the XZ-column grid model; see `get_noise_3d`).
     fn spot_noise_3d(&self, x: f32, y: f32, z: f32) -> f32 {
-        if self.spot_config_is_invalid() || !x.is_finite() || !y.is_finite() || !z.is_finite() {
-            godot_error!("ZN_SpotNoise: cell_size/spot_radius must be finite and positive");
-            return 0.0;
+        match self.spot_grid_config() {
+            Ok(cfg) if [x, y, z].iter().all(|value| value.is_finite()) => {
+                spot_grid_noise_3d(cfg, x, y, z)
+            }
+            _ => {
+                godot_error!("ZN_SpotNoise: cell_size/spot_radius must be finite and positive");
+                0.0
+            }
         }
-        // Upstream uses the XZ plane for the 3D spot grid.
-        self.spot_noise_2d(x, z)
-    }
-
-    /// Whether the pinned spot-grid config is usable for sampling.
-    fn spot_config_is_invalid(&self) -> bool {
-        validate_positive_finite_float(self.cell_size_value).is_err()
-            || validate_positive_finite_float(self.spot_radius_value).is_err()
-            || validate_unit_float(self.jitter_value).is_err()
-    }
-
-    /// Test whether `(px, py)` falls inside the spot owned by cell
-    /// `(cell_x, cell_y)`. The spot center is the cell center displaced by a
-    /// deterministic jitter derived from `seed` and `jitter`.
-    fn point_in_spot_2d(&self, px: f32, py: f32, cell_x: f32, cell_y: f32) -> bool {
-        let cs = self.cell_size_value;
-        let center_x = (cell_x + 0.5) * cs;
-        let center_y = (cell_y + 0.5) * cs;
-        let (jx, jy) = self.cell_jitter(cell_x, cell_y);
-        let dx = px - (center_x + jx);
-        let dy = py - (center_y + jy);
-        dx * dx + dy * dy <= self.spot_radius_value * self.spot_radius_value
-    }
-
-    /// Deterministic per-cell jitter in `[-jitter, jitter] * cell_size` for each
-    /// axis, derived from `seed`. Uses a cheap hash so the result is stable for
-    /// a fixed seed without pulling in a noise sampler.
-    fn cell_jitter(&self, cell_x: f32, cell_y: f32) -> (f32, f32) {
-        let mag = self.jitter_value * self.cell_size_value * 0.5;
-        let h1 = spot_hash(self.seed_value, cell_x, cell_y);
-        let h2 = spot_hash(self.seed_value.wrapping_add(1), cell_y, cell_x);
-        let jx = ((h1 as f32 / u32::MAX as f32) * 2.0 - 1.0) * mag;
-        let jy = ((h2 as f32 / u32::MAX as f32) * 2.0 - 1.0) * mag;
-        (jx, jy)
     }
 }
 
@@ -1523,6 +1839,208 @@ fn spot_hash(seed: i32, a: f32, b: f32) -> u32 {
     s ^= s >> 13;
     s = s.wrapping_mul(0xc2b2_ae35);
     s ^ (s >> 16)
+}
+
+/// Engine-free snapshot of the pinned `ZN_SpotNoise` spot-grid configuration.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SpotGridConfig {
+    /// Grid cell size (strictly positive finite).
+    cell_size: f32,
+    /// Per-cell center jitter (unit float in `[0, 1]`).
+    jitter: f32,
+    /// Spot radius (strictly positive finite).
+    spot_radius: f32,
+    /// Deterministic seed.
+    seed: i32,
+}
+
+impl SpotGridConfig {
+    /// Validate the pinned property constraints.
+    fn new(cell_size: f32, jitter: f32, spot_radius: f32, seed: i32) -> Result<Self, &'static str> {
+        validate_positive_finite_float(cell_size)?;
+        validate_unit_float(jitter)?;
+        validate_positive_finite_float(spot_radius)?;
+        Ok(Self {
+            cell_size,
+            jitter,
+            spot_radius,
+            seed,
+        })
+    }
+}
+
+/// Jittered center of the spot owned by grid cell `(cell_x, cell_y)`: the cell
+/// center displaced by a deterministic hash-derived jitter of at most
+/// `jitter * cell_size / 2` per axis (so the center always stays inside its
+/// own cell). Pure and engine-free; both the noise evaluation and the area
+/// enumeration use it, so they cannot disagree about where spots are.
+fn spot_cell_center_2d(cfg: SpotGridConfig, cell_x: f32, cell_y: f32) -> (f32, f32) {
+    let cell_size = cfg.cell_size;
+    let magnitude = cfg.jitter * cell_size * 0.5;
+    let h1 = spot_hash(cfg.seed, cell_x, cell_y);
+    let h2 = spot_hash(cfg.seed.wrapping_add(1), cell_y, cell_x);
+    let jx = ((h1 as f32 / u32::MAX as f32) * 2.0 - 1.0) * magnitude;
+    let jy = ((h2 as f32 / u32::MAX as f32) * 2.0 - 1.0) * magnitude;
+    (
+        (cell_x + 0.5) * cell_size + jx,
+        (cell_y + 0.5) * cell_size + jy,
+    )
+}
+
+/// Whether `(px, py)` falls inside the spot owned by cell `(cell_x, cell_y)`
+/// (inclusive distance comparison against `spot_radius`).
+fn point_in_spot_grid_2d(cfg: SpotGridConfig, px: f32, py: f32, cell_x: f32, cell_y: f32) -> bool {
+    let (center_x, center_y) = spot_cell_center_2d(cfg, cell_x, cell_y);
+    let dx = px - center_x;
+    let dy = py - center_y;
+    dx * dx + dy * dy <= cfg.spot_radius * cfg.spot_radius
+}
+
+/// 2D spot-noise field value at `(x, y)`: 1.0 inside a spot, 0.0 otherwise.
+/// Searches the 3×3 neighborhood of the point's cell so spots clipped across
+/// cell borders are still detected (sufficient while
+/// `spot_radius <= cell_size / 2`; upstream documents border clipping beyond
+/// that as expected behavior).
+fn spot_grid_noise_2d(cfg: SpotGridConfig, x: f32, y: f32) -> f32 {
+    let cell_x = (x / cfg.cell_size).floor();
+    let cell_y = (y / cfg.cell_size).floor();
+    for dy in -1..=1 {
+        for dx in -1..=1 {
+            if point_in_spot_grid_2d(cfg, x, y, cell_x + dx as f32, cell_y + dy as f32) {
+                return 1.0;
+            }
+        }
+    }
+    0.0
+}
+
+/// 3D spot-noise field value at `(x, y, z)` under the XZ-column model: the Y
+/// axis is ignored and the spot grid lives in the XZ plane, matching
+/// `SpotNoiseGD::spot_noise_3d`.
+fn spot_grid_noise_3d(cfg: SpotGridConfig, x: f32, _y: f32, z: f32) -> f32 {
+    spot_grid_noise_2d(cfg, x, z)
+}
+
+/// Inclusive cell-index range covering `[axis_min, axis_max]`, expanded by one
+/// cell on each side so cells whose jittered center could still land inside
+/// the interval are visited. Casts saturate; over-large spans are rejected by
+/// the workload bound instead.
+fn spot_cell_index_range(axis_min: f32, axis_max: f32, cell_size: f32) -> (i64, i64) {
+    let first = ((axis_min / cell_size).floor() as i64).saturating_sub(1);
+    let last = ((axis_max / cell_size).floor() as i64).saturating_add(1);
+    (first, last)
+}
+
+/// Number of cells covered by an index range (always >= 1), with overflow
+/// surfaced as an error.
+fn spot_cell_axis_work(first: i64, last: i64) -> Result<u64, &'static str> {
+    let span = last.saturating_sub(first);
+    let count = u64::try_from(span)
+        .ok()
+        .and_then(|span| span.checked_add(1))
+        .ok_or("grid cell count overflowed")?;
+    Ok(count)
+}
+
+/// Enumerate the spot centers (exactly one per grid cell) whose jittered
+/// center lies inside `rect = (min_x, min_y, max_x, max_y)`. Inverted or
+/// non-finite rects are errors/empty; the visited-cell count is bounded by
+/// [`MAX_SPOT_GRID_CELLS`].
+fn spot_centers_in_rect(
+    cfg: SpotGridConfig,
+    rect: (f32, f32, f32, f32),
+) -> Result<Vec<(f32, f32)>, &'static str> {
+    let (min_x, min_y, max_x, max_y) = rect;
+    if ![min_x, min_y, max_x, max_y].iter().all(|v| v.is_finite()) {
+        return Err("rect bounds must be finite");
+    }
+    if min_x > max_x || min_y > max_y {
+        return Ok(Vec::new());
+    }
+    let (x_first, x_last) = spot_cell_index_range(min_x, max_x, cfg.cell_size);
+    let (y_first, y_last) = spot_cell_index_range(min_y, max_y, cfg.cell_size);
+    let work = spot_cell_axis_work(x_first, x_last)?
+        .checked_mul(spot_cell_axis_work(y_first, y_last)?)
+        .ok_or("grid cell count overflowed")?;
+    if work > MAX_SPOT_GRID_CELLS {
+        return Err("grid cell count exceeds the script workload limit");
+    }
+    let mut centers = Vec::new();
+    for cell_y in y_first..=y_last {
+        for cell_x in x_first..=x_last {
+            let (center_x, center_y) = spot_cell_center_2d(cfg, cell_x as f32, cell_y as f32);
+            if center_x.is_finite()
+                && center_y.is_finite()
+                && center_x >= min_x
+                && center_x <= max_x
+                && center_y >= min_y
+                && center_y <= max_y
+            {
+                centers.push((center_x, center_y));
+            }
+        }
+    }
+    Ok(centers)
+}
+
+/// Enumerate representative spot-center positions inside
+/// `aabb = (min_x, min_y, min_z, max_x, max_y, max_z)` under the XZ-column
+/// model: each 2D spot center inside the aabb's XZ projection is repeated
+/// along Y at levels spaced by `spot_radius`, so every point of a spot column
+/// within the aabb is within one spot radius of an enumerated position (the
+/// 3D noise itself ignores Y). The visited `XZ cells * Y levels` workload is
+/// bounded by [`MAX_SPOT_GRID_CELLS`].
+fn spot_centers_in_aabb(
+    cfg: SpotGridConfig,
+    aabb: (f32, f32, f32, f32, f32, f32),
+) -> Result<Vec<(f32, f32, f32)>, &'static str> {
+    let (min_x, min_y, min_z, max_x, max_y, max_z) = aabb;
+    if ![min_x, min_y, min_z, max_x, max_y, max_z]
+        .iter()
+        .all(|v| v.is_finite())
+    {
+        return Err("aabb bounds must be finite");
+    }
+    if min_x > max_x || min_y > max_y || min_z > max_z {
+        return Ok(Vec::new());
+    }
+    let (x_first, x_last) = spot_cell_index_range(min_x, max_x, cfg.cell_size);
+    let (z_first, z_last) = spot_cell_index_range(min_z, max_z, cfg.cell_size);
+    let columns = spot_cell_axis_work(x_first, x_last)?
+        .checked_mul(spot_cell_axis_work(z_first, z_last)?)
+        .ok_or("grid cell count overflowed")?;
+    // Y levels spaced by the spot radius, always including the minimum.
+    let level_count = ((max_y - min_y) / cfg.spot_radius).floor() as u64;
+    let level_count = level_count.saturating_add(1);
+    let work = columns
+        .checked_mul(level_count)
+        .ok_or("grid cell count overflowed")?;
+    if work > MAX_SPOT_GRID_CELLS {
+        return Err("grid cell count exceeds the script workload limit");
+    }
+    let mut positions = Vec::new();
+    for cell_z in z_first..=z_last {
+        for cell_x in x_first..=x_last {
+            let (center_x, center_z) = spot_cell_center_2d(cfg, cell_x as f32, cell_z as f32);
+            if !(center_x.is_finite()
+                && center_z.is_finite()
+                && center_x >= min_x
+                && center_x <= max_x
+                && center_z >= min_z
+                && center_z <= max_z)
+            {
+                continue;
+            }
+            for level in 0..level_count {
+                let y = min_y + level as f32 * cfg.spot_radius;
+                if y > max_y {
+                    break;
+                }
+                positions.push((center_x, y, center_z));
+            }
+        }
+    }
+    Ok(positions)
 }
 
 /// A 2D noise pattern resource. `sample_2d` returns the raw noise value at a
@@ -3044,5 +3562,361 @@ mod input_validation_tests {
             }
         }
         assert_eq!(scale_value, 3.0);
+    }
+}
+
+/// Behavioral tests for the noise resources. GD-backed structs cannot be
+/// constructed without a live Godot engine, so these exercise the extracted
+/// engine-free helpers that the `#[func]` methods delegate to (mirroring
+/// `input_validation_tests`).
+#[cfg(test)]
+mod noise_behavioral_tests {
+    use super::*;
+
+    // === ZN_SpotNoise: spot-grid enumeration ===
+
+    #[test]
+    fn spot_noise_area_2d_returns_expected_centers() {
+        // radius == cell_size / 2: every covered grid cell owns exactly one
+        // spot whose center is reported.
+        let cfg = SpotGridConfig::new(8.0, 0.5, 4.0, 42).expect("valid config");
+        let rect = (0.0, 0.0, 32.0, 32.0);
+        let centers = spot_centers_in_rect(cfg, rect).expect("bounded workload");
+        // The rect covers a clean 4×4 block of cells; each contributes exactly
+        // one center, and every center lies inside the rect.
+        assert_eq!(centers.len(), 16);
+        for &(x, y) in &centers {
+            assert!(
+                x >= rect.0 && x <= rect.2 && y >= rect.1 && y <= rect.3,
+                "center ({x},{y}) must be inside the rect"
+            );
+            // The center is inside its own spot: noise is 1 there.
+            assert_eq!(spot_grid_noise_2d(cfg, x, y), 1.0);
+        }
+        // One distinct center per covered cell (no duplicates).
+        let mut sorted = centers.clone();
+        sorted.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+        sorted.dedup_by(|a, b| (a.0 - b.0).abs() < 1e-4 && (a.1 - b.1).abs() < 1e-4);
+        assert_eq!(sorted.len(), 16, "one distinct center per covered cell");
+    }
+
+    #[test]
+    fn spot_noise_area_workload_is_bounded() {
+        let cfg = SpotGridConfig::new(1.0, 0.5, 0.5, 1).expect("valid config");
+        // ~1000×1000 cells far exceeds the 65 536-cell budget.
+        assert!(spot_centers_in_rect(cfg, (0.0, 0.0, 1000.0, 1000.0)).is_err());
+        // Huge aabb rejected through the combined XZ-cells × Y-levels budget.
+        assert!(spot_centers_in_aabb(cfg, (0.0, 0.0, 0.0, 1000.0, 10.0, 1000.0)).is_err());
+        // A tall-but-thin aabb is still bounded by its Y-level share.
+        assert!(spot_centers_in_aabb(cfg, (0.0, 0.0, 0.0, 4.0, 1_000_000.0, 4.0)).is_err());
+        // Inverted (empty) areas return no centers without erroring.
+        assert!(spot_centers_in_rect(cfg, (10.0, 10.0, -10.0, -10.0))
+            .expect("inverted rect is empty, not an error")
+            .is_empty());
+        assert!(spot_centers_in_aabb(cfg, (0.0, 5.0, 0.0, 10.0, -5.0, 10.0))
+            .expect("inverted aabb is empty, not an error")
+            .is_empty());
+        // Non-finite bounds are rejected.
+        assert!(spot_centers_in_rect(cfg, (f32::NAN, 0.0, 1.0, 1.0)).is_err());
+        assert!(spot_centers_in_aabb(cfg, (0.0, 0.0, 0.0, f32::INFINITY, 1.0, 1.0)).is_err());
+    }
+
+    #[test]
+    fn spot_noise_get_noise_agrees_with_area_membership() {
+        let cfg = SpotGridConfig::new(8.0, 0.9, 4.0, 1337).expect("valid config");
+        let rect = (0.0, 0.0, 64.0, 64.0);
+        let centers = spot_centers_in_rect(cfg, rect).expect("bounded workload");
+
+        // 2D self-consistency: for sample points inset by the spot radius
+        // (so every spot that can contain them has its center enumerated),
+        // noise membership is exactly "an enumerated center within radius".
+        // Both sides share `spot_cell_center_2d`, so the comparison is exact.
+        let radius_squared = cfg.spot_radius * cfg.spot_radius;
+        let mut sampled = 0usize;
+        let mut inside = 0usize;
+        let mut y = rect.1 + cfg.spot_radius;
+        while y <= rect.3 - cfg.spot_radius {
+            let mut x = rect.0 + cfg.spot_radius;
+            while x <= rect.2 - cfg.spot_radius {
+                sampled += 1;
+                let nearest = centers
+                    .iter()
+                    .map(|&(cx, cy)| (x - cx) * (x - cx) + (y - cy) * (y - cy))
+                    .fold(f32::INFINITY, f32::min);
+                if spot_grid_noise_2d(cfg, x, y) == 1.0 {
+                    inside += 1;
+                    assert!(
+                        nearest <= radius_squared,
+                        "noise=1 but no enumerated center within radius at ({x},{y})"
+                    );
+                } else {
+                    assert!(
+                        nearest > radius_squared,
+                        "noise=0 but an enumerated center is within radius at ({x},{y})"
+                    );
+                }
+                x += 1.0;
+            }
+            y += 1.0;
+        }
+        assert!(sampled > 100, "expected a meaningful sample count");
+        assert!(inside > 0, "expected at least one spot interior point");
+
+        // 3D self-consistency with the XZ-column model (Y ignored).
+        let aabb = (0.0, -16.0, 0.0, 64.0, 16.0, 64.0);
+        let positions = spot_centers_in_aabb(cfg, aabb).expect("bounded workload");
+        assert!(!positions.is_empty());
+        for &(x, y, z) in &positions {
+            assert!(x >= aabb.0 && x <= aabb.3, "x inside aabb");
+            assert!(y >= aabb.1 && y <= aabb.4, "y inside aabb");
+            assert!(z >= aabb.2 && z <= aabb.5, "z inside aabb");
+            // Every enumerated center is inside its own spot, at any Y.
+            assert_eq!(spot_grid_noise_3d(cfg, x, y, z), 1.0);
+            assert_eq!(spot_grid_noise_3d(cfg, x, y + 3.7, z), 1.0);
+        }
+        // The 3D field equals the 2D field over the shared XZ projection.
+        let mut z = rect.1 + cfg.spot_radius;
+        while z <= rect.3 - cfg.spot_radius {
+            let mut x = rect.0 + cfg.spot_radius;
+            while x <= rect.2 - cfg.spot_radius {
+                assert_eq!(
+                    spot_grid_noise_3d(cfg, x, 123.456, z),
+                    spot_grid_noise_2d(cfg, x, z)
+                );
+                x += 7.0;
+            }
+            z += 7.0;
+        }
+        // Every y in the aabb is within one spot radius of an enumerated
+        // Y level ("repeated over y within radius").
+        let mut y = aabb.1;
+        while y <= aabb.4 {
+            let nearest = positions
+                .iter()
+                .map(|&(_, center_y, _)| (y - center_y).abs())
+                .fold(f32::INFINITY, f32::min);
+            assert!(
+                nearest <= cfg.spot_radius,
+                "y={y} must be within one radius of an enumerated level"
+            );
+            y += 1.0;
+        }
+    }
+
+    // === ZN_FastNoiseLite ===
+
+    #[test]
+    fn fast_noise_lite_get_noise_3dv_equivalent_to_get_noise_3d() {
+        let cfg = FastNoiseLiteConfig::pinned_defaults();
+        for &(x, y, z) in &[(0.0, 0.0, 0.0), (12.5, -3.25, 7.0), (-100.0, 55.5, 0.25)] {
+            assert_eq!(cfg.sample_3dv((x, y, z)), cfg.sample_3d(x, y, z));
+        }
+        // The 2D overload pairs the same way.
+        for &(x, y) in &[(0.0, 0.0), (31.7, -4.2)] {
+            assert_eq!(cfg.sample_2dv((x, y)), cfg.sample_2d(x, y));
+        }
+    }
+
+    #[test]
+    fn fast_noise_lite_2d_matches_crate_true_2d_sampler() {
+        use voxel_core::fastnoise_lite::{
+            CellularDistanceFunction, CellularReturnType, FastNoiseLite, FractalType, NoiseType,
+            RotationType3D,
+        };
+        let cfg = FastNoiseLiteConfig::pinned_defaults();
+        // Reference sampler built straight from the crate, configured to the
+        // pinned defaults.
+        let mut reference = FastNoiseLite::new();
+        reference.set_seed(Some(cfg.seed));
+        reference.set_frequency(Some(cfg.frequency));
+        reference.set_noise_type(Some(NoiseType::OpenSimplex2));
+        reference.set_rotation_type_3d(Some(RotationType3D::None));
+        reference.set_fractal_type(Some(FractalType::FBm));
+        reference.set_fractal_octaves(Some(cfg.fractal_octaves));
+        reference.set_fractal_lacunarity(Some(cfg.fractal_lacunarity));
+        reference.set_fractal_gain(Some(cfg.fractal_gain));
+        reference.set_fractal_weighted_strength(Some(cfg.fractal_weighted_strength));
+        reference.set_fractal_ping_pong_strength(Some(cfg.fractal_ping_pong_strength));
+        reference.set_cellular_distance_function(Some(CellularDistanceFunction::EuclideanSq));
+        reference.set_cellular_return_type(Some(CellularReturnType::Distance));
+        reference.set_cellular_jitter(Some(cfg.cellular_jitter));
+
+        let mut differs_from_3d_slice = false;
+        for y in 0..8i32 {
+            for x in 0..8i32 {
+                let (px, py) = (x as f32 * 71.3, y as f32 * 33.7);
+                let v2 = cfg.sample_2d(px, py);
+                assert_eq!(v2, reference.get_noise_2d(px, py), "true 2D at ({px},{py})");
+                differs_from_3d_slice |= v2 != reference.get_noise_3d(px, 0.0, py);
+            }
+        }
+        assert!(
+            differs_from_3d_slice,
+            "2D sampling must not delegate to the (x, 0, y) 3D slice"
+        );
+    }
+
+    #[test]
+    fn fast_noise_lite_constants_match_pinned_enum_values() {
+        use FastNoiseLiteGD as C;
+        // NoiseType (6).
+        assert_eq!(C::TYPE_OPEN_SIMPLEX_2, 0);
+        assert_eq!(C::TYPE_OPEN_SIMPLEX_2S, 1);
+        assert_eq!(C::TYPE_CELLULAR, 2);
+        assert_eq!(C::TYPE_PERLIN, 3);
+        assert_eq!(C::TYPE_VALUE_CUBIC, 4);
+        assert_eq!(C::TYPE_VALUE, 5);
+        // FractalType (4).
+        assert_eq!(C::FRACTAL_NONE, 0);
+        assert_eq!(C::FRACTAL_FBM, 1);
+        assert_eq!(C::FRACTAL_RIDGED, 2);
+        assert_eq!(C::FRACTAL_PING_PONG, 3);
+        // RotationType3D (3).
+        assert_eq!(C::ROTATION_3D_NONE, 0);
+        assert_eq!(C::ROTATION_3D_IMPROVE_XY_PLANES, 1);
+        assert_eq!(C::ROTATION_3D_IMPROVE_XZ_PLANES, 2);
+        // CellularDistanceFunction (4).
+        assert_eq!(C::CELLULAR_DISTANCE_EUCLIDEAN, 0);
+        assert_eq!(C::CELLULAR_DISTANCE_EUCLIDEAN_SQ, 1);
+        assert_eq!(C::CELLULAR_DISTANCE_MANHATTAN, 2);
+        assert_eq!(C::CELLULAR_DISTANCE_HYBRID, 3);
+        // CellularReturnType (7).
+        assert_eq!(C::CELLULAR_RETURN_CELL_VALUE, 0);
+        assert_eq!(C::CELLULAR_RETURN_DISTANCE, 1);
+        assert_eq!(C::CELLULAR_RETURN_DISTANCE_2, 2);
+        assert_eq!(C::CELLULAR_RETURN_DISTANCE_2_ADD, 3);
+        assert_eq!(C::CELLULAR_RETURN_DISTANCE_2_SUB, 4);
+        assert_eq!(C::CELLULAR_RETURN_DISTANCE_2_MUL, 5);
+        assert_eq!(C::CELLULAR_RETURN_DISTANCE_2_DIV, 6);
+    }
+
+    #[test]
+    fn fast_noise_lite_defaults_match_pinned_xml() {
+        let d = FastNoiseLiteConfig::pinned_defaults();
+        assert_eq!(d.seed, 0);
+        assert_eq!(d.noise_type, 0); // OpenSimplex2
+        assert_eq!(d.fractal_type, 1); // FBm
+        assert_eq!(d.fractal_octaves, 3);
+        assert_eq!(d.fractal_lacunarity, 2.0);
+        assert_eq!(d.fractal_gain, 0.5);
+        assert_eq!(d.fractal_weighted_strength, 0.0);
+        assert_eq!(d.fractal_ping_pong_strength, 2.0);
+        assert_eq!(d.cellular_distance_function, 1); // EuclideanSq
+        assert_eq!(d.cellular_jitter, 1.0);
+        assert_eq!(d.cellular_return_type, 1); // Distance
+        assert_eq!(d.rotation_type_3d, 0); // None
+                                           // period default 64.0 (frequency == 1/period).
+        assert!((1.0 / d.frequency - 64.0).abs() < 1e-4);
+    }
+
+    // === FastNoise2 ===
+
+    #[test]
+    fn fastnoise2_constants_match_pinned_enum_values() {
+        use FastNoise2GD as C;
+        // NoiseType (7).
+        assert_eq!(C::TYPE_OPEN_SIMPLEX_2, 0);
+        assert_eq!(C::TYPE_SIMPLEX, 1);
+        assert_eq!(C::TYPE_PERLIN, 2);
+        assert_eq!(C::TYPE_VALUE, 3);
+        assert_eq!(C::TYPE_CELLULAR, 4);
+        assert_eq!(C::TYPE_ENCODED_NODE_TREE, 5);
+        assert_eq!(C::TYPE_CELLULAR_VALUE, 6);
+        // FractalType (4).
+        assert_eq!(C::FRACTAL_NONE, 0);
+        assert_eq!(C::FRACTAL_FBM, 1);
+        assert_eq!(C::FRACTAL_RIDGED, 2);
+        assert_eq!(C::FRACTAL_PING_PONG, 3);
+        // CellularDistanceFunction (5).
+        assert_eq!(C::CELLULAR_DISTANCE_EUCLIDEAN, 0);
+        assert_eq!(C::CELLULAR_DISTANCE_EUCLIDEAN_SQ, 1);
+        assert_eq!(C::CELLULAR_DISTANCE_MANHATTAN, 2);
+        assert_eq!(C::CELLULAR_DISTANCE_HYBRID, 3);
+        assert_eq!(C::CELLULAR_DISTANCE_MAX_AXIS, 4);
+        // CellularReturnType (5).
+        assert_eq!(C::CELLULAR_RETURN_INDEX_0, 0);
+        assert_eq!(C::CELLULAR_RETURN_INDEX_0_ADD_1, 1);
+        assert_eq!(C::CELLULAR_RETURN_INDEX_0_SUB_1, 2);
+        assert_eq!(C::CELLULAR_RETURN_INDEX_0_MUL_1, 3);
+        assert_eq!(C::CELLULAR_RETURN_INDEX_0_DIV_1, 4);
+        // SIMDLevel (12).
+        assert_eq!(C::SIMD_NULL, 0);
+        assert_eq!(C::SIMD_SCALAR, 1);
+        assert_eq!(C::SIMD_SSE, 2);
+        assert_eq!(C::SIMD_SSE2, 4);
+        assert_eq!(C::SIMD_SSE3, 8);
+        assert_eq!(C::SIMD_SSSE3, 16);
+        assert_eq!(C::SIMD_SSE41, 32);
+        assert_eq!(C::SIMD_SSE42, 64);
+        assert_eq!(C::SIMD_AVX, 128);
+        assert_eq!(C::SIMD_AVX2, 256);
+        assert_eq!(C::SIMD_AVX512, 512);
+        assert_eq!(C::SIMD_NEON, 65_536);
+    }
+
+    #[test]
+    fn fastnoise2_remap_transforms_output_range() {
+        // [-1, 1] -> [0, 1].
+        assert_eq!(apply_remap(-1.0, -1.0, 1.0, 0.0, 1.0, true), 0.0);
+        assert_eq!(apply_remap(0.0, -1.0, 1.0, 0.0, 1.0, true), 0.5);
+        assert_eq!(apply_remap(1.0, -1.0, 1.0, 0.0, 1.0, true), 1.0);
+        assert_eq!(apply_remap(0.25, -1.0, 1.0, 0.0, 1.0, true), 0.625);
+        // Unclamped linear extrapolation, matching upstream's Remap node.
+        assert_eq!(apply_remap(3.0, -1.0, 1.0, 0.0, 1.0, true), 2.0);
+        // A whole noise range maps inside the output range.
+        for step in -20..=20i32 {
+            let v = step as f32 * 0.05;
+            let out = apply_remap(v, -1.0, 1.0, 0.0, 1.0, true);
+            assert!((0.0..=1.0).contains(&out), "{v} -> {out}");
+        }
+        // Disabled = identity.
+        assert_eq!(apply_remap(0.25, -1.0, 1.0, 0.0, 1.0, false), 0.25);
+        // Degenerate input range = safe passthrough (never NaN from division).
+        assert_eq!(apply_remap(0.7, 2.0, 2.0, 0.0, 1.0, true), 0.7);
+        assert!(apply_remap(0.7, 2.0, 2.0, 0.0, 1.0, true).is_finite());
+    }
+
+    #[test]
+    fn fastnoise2_terrace_smoothness_extremes() {
+        let multiplier = 4.0_f32;
+        // smoothness = 1.0 ≈ identity across the noise range.
+        for step in 0..=40i32 {
+            let v = -1.0 + step as f32 * 0.05;
+            let out = apply_terrace(v, multiplier, 1.0, true);
+            assert!(
+                (out - v).abs() < 1e-6,
+                "smoothness 1.0 must be the identity at {v}, got {out}"
+            );
+        }
+        // smoothness = 0.0 = hard steps onto multiples of 1/multiplier.
+        for step in 0..=40i32 {
+            let v = -1.0 + step as f32 * 0.05;
+            let stepped = apply_terrace(v, multiplier, 0.0, true);
+            assert_eq!(stepped, (v * multiplier).round() / multiplier);
+            let levels = stepped * multiplier;
+            assert!(
+                (levels - levels.round()).abs() < 1e-5,
+                "stepped output must sit on a level: {stepped}"
+            );
+        }
+        // Intermediate smoothness stays monotone and within one step width.
+        let mut previous = f32::NEG_INFINITY;
+        for step in 0..=200i32 {
+            let v = -2.0 + step as f32 * 0.02;
+            let out = apply_terrace(v, multiplier, 0.5, true);
+            assert!(
+                out >= previous,
+                "terrace must be monotone at {v}, got {out}"
+            );
+            assert!(
+                (out - v).abs() <= 0.25 / multiplier + 1e-5,
+                "terrace must stay within one step width at {v}, got {out}"
+            );
+            previous = out;
+        }
+        // Disabled and degenerate multiplier are safe passthroughs.
+        assert_eq!(apply_terrace(0.37, 4.0, 0.5, false), 0.37);
+        assert_eq!(apply_terrace(0.37, 0.0, 0.5, true), 0.37);
+        assert!(apply_terrace(0.37, f32::NAN, 0.5, true).is_finite());
     }
 }

@@ -267,12 +267,18 @@ fn parse_flat_json_object_i32(src: &str) -> Result<Vec<(String, i32)>, String> {
 // VoxelGeneratorGD — abstract base Resource for all generators
 // ---------------------------------------------------------------------------
 /// Abstract base resource for voxel generators. In C++ this is the Godot-facing
-/// wrapper around the engine-agnostic `VoxelGenerator`. Subclasses:
-/// Waves, Flat, Noise, Heightmap, Graph.
+/// wrapper around the engine-agnostic `VoxelGenerator`; upstream subclasses:
+/// Waves, Flat, Noise, Heightmap (→ Image, Waves), Graph.
+///
+/// NOTE: gdext 0.5 (the pinned `godot` crate) cannot inherit user-defined Rust
+/// classes, so the concrete generator bindings are flat `base = Resource`
+/// siblings rather than ClassDB subclasses of `VoxelGenerator`. Each concrete
+/// binding therefore re-declares the inherited pinned members itself, and the
+/// only member pinned on this base is `generate_block`.
 ///
 /// The pinned `generate_block` method mirrors upstream `VoxelGenerator`
-/// (5828cbeb). The abstract base cannot produce data, so it is a faithful
-/// no-op stub.
+/// (5828cbeb; `origin_in_voxels` is bound as `Vector3`). The abstract base
+/// cannot produce data, so it is a faithful no-op stub.
 #[derive(GodotClass)]
 #[class(base = Resource, tool, rename = VoxelGenerator)]
 pub struct VoxelGeneratorGD {

@@ -1,1016 +1,1047 @@
 {
-  "schema_version": 1,
-  "upstream": {
-    "repository": "https://github.com/Zylann/godot_voxel",
-    "commit": "5828cbeba19050033f550485abc5f8c3586b1bf5",
-    "class_list_source": "doc/classes/*.xml",
-    "public_class_count": 73
+ "schema_version": 1,
+ "upstream": {
+  "repository": "https://github.com/Zylann/godot_voxel",
+  "commit": "5828cbeba19050033f550485abc5f8c3586b1bf5",
+  "class_list_source": "doc/classes/*.xml",
+  "public_class_count": 73
+ },
+ "status_semantics": {
+  "complete": "Pinned public API and runtime behavior are implemented and referenced by an executable behavioral test.",
+  "partial": "A canonical binding exists, but pinned API surface or runtime semantics remain incomplete.",
+  "deferred": "The canonical feature is intentionally unavailable or has no functional binding yet."
+ },
+ "status_counts": {
+  "complete": 10,
+  "partial": 49,
+  "deferred": 14
+ },
+ "classes": [
+  {
+   "name": "FastNoise2",
+   "status": "partial",
+   "binding_state": "registered",
+   "registered_name": "FastNoise2",
+   "evidence": "Full pinned surface present: all 6 methods and 22 properties with pinned defaults, all 33 constants, remap applied with the upstream Remap formula and terrace with the upstream Terrace construction (smoothness normalized to [0,1]), generate_image implemented (non-tileable; tiling logs a one-time warning). Honest partial: this port substitutes the pure-Rust fastnoise-lite engine for the C++ FastNoise2 library (no numeric parity, get_simd_level always scalar), encoded_node_tree is stored but not decoded, and cellular index-based lookups approximate via distance variants.",
+   "source_paths": [
+    "upstream:doc/classes/FastNoise2.xml",
+    "rust/voxel-gdext/src/resources3.rs"
+   ],
+   "behavioral_tests": [
+    "rust/voxel-gdext/src/resources3.rs#fastnoise2_constants_match_pinned_enum_values",
+    "rust/voxel-gdext/src/resources3.rs#fastnoise2_remap_transforms_output_range",
+    "rust/voxel-gdext/src/resources3.rs#fastnoise2_terrace_smoothness_extremes"
+   ]
   },
-  "status_semantics": {
-    "complete": "Pinned public API and runtime behavior are implemented and referenced by an executable behavioral test.",
-    "partial": "A canonical binding exists, but pinned API surface or runtime semantics remain incomplete.",
-    "deferred": "The canonical feature is intentionally unavailable or has no functional binding yet."
+  {
+   "name": "VoxelAStarGrid3D",
+   "status": "partial",
+   "binding_state": "registered",
+   "registered_name": "VoxelAStarGrid3D",
+   "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelAStarGrid3D.xml",
+    "rust/voxel-gdext/src/resources2.rs"
+   ],
+   "behavioral_tests": []
   },
-  "status_counts": {
-    "complete": 3,
-    "partial": 56,
-    "deferred": 14
+  {
+   "name": "VoxelBlockSerializer",
+   "status": "partial",
+   "binding_state": "registered",
+   "registered_name": "VoxelBlockSerializer",
+   "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelBlockSerializer.xml",
+    "rust/voxel-gdext/src/resources2.rs"
+   ],
+   "behavioral_tests": []
   },
-  "classes": [
-    {
-      "name": "FastNoise2",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "FastNoise2",
-      "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
-      "source_paths": [
-        "upstream:doc/classes/FastNoise2.xml",
-        "rust/voxel-gdext/src/resources3.rs"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelAStarGrid3D",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelAStarGrid3D",
-      "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelAStarGrid3D.xml",
-        "rust/voxel-gdext/src/resources2.rs"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelBlockSerializer",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelBlockSerializer",
-      "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelBlockSerializer.xml",
-        "rust/voxel-gdext/src/resources2.rs"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelBlockyAttribute",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelBlockyAttribute",
-      "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelBlockyAttribute.xml",
-        "rust/voxel-gdext/src/resources2.rs"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelBlockyAttributeAxis",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelBlockyAttributeAxis",
-      "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelBlockyAttributeAxis.xml",
-        "rust/voxel-gdext/src/resources2.rs"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelBlockyAttributeCustom",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelBlockyAttributeCustom",
-      "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelBlockyAttributeCustom.xml",
-        "rust/voxel-gdext/src/resources2.rs"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelBlockyAttributeDirection",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelBlockyAttributeDirection",
-      "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelBlockyAttributeDirection.xml",
-        "rust/voxel-gdext/src/resources2.rs"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelBlockyAttributeRotation",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelBlockyAttributeRotation",
-      "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelBlockyAttributeRotation.xml",
-        "rust/voxel-gdext/src/resources2.rs"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelBlockyFluid",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelBlockyFluid",
-      "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelBlockyFluid.xml",
-        "rust/voxel-gdext/src/resources3.rs"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelBlockyLibrary",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelBlockyLibrary",
-      "evidence": "add_solid_model builds a full-cube BakedModel, bake() runs bake_library, and the baked table is consumed by VoxelMesherBlocky on VoxelTerrain. Canonical model-resource peer is still a placeholder.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelBlockyLibrary.xml",
-        "rust/voxel-gdext/src/resources.rs"
-      ],
-      "behavioral_tests": [
-        "rust/voxel-gdext/smoke_test/blocky_terrain.gd#_ready"
-      ]
-    },
-    {
-      "name": "VoxelBlockyLibraryBase",
-      "status": "deferred",
-      "binding_state": "unregistered",
-      "registered_name": null,
-      "evidence": "No canonical binding is registered for the pinned abstract library base.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelBlockyLibraryBase.xml"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelBlockyModel",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelBlockyModel",
-      "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelBlockyModel.xml",
-        "rust/voxel-gdext/src/resources2.rs"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelBlockyModelCube",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelBlockyModelCube",
-      "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelBlockyModelCube.xml",
-        "rust/voxel-gdext/src/resources3.rs"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelBlockyModelEmpty",
-      "status": "complete",
-      "binding_state": "registered",
-      "registered_name": "VoxelBlockyModelEmpty",
-      "evidence": "Registered with canonical name and correct parent class. The class has 0 pinned methods, properties, signals, and constants in the upstream XML, so the complete criterion is trivially satisfied for the API surface. At least one executable behavioral test exercises the class registration and core contract.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelBlockyModelEmpty.xml",
-        "rust/voxel-gdext/src/resources3.rs"
-      ],
-      "behavioral_tests": [
-        "rust/voxel-gdext/src/resources3.rs#blocky_model_empty_is_registered_and_reports_air"
-      ]
-    },
-    {
-      "name": "VoxelBlockyModelFluid",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelBlockyModelFluid",
-      "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelBlockyModelFluid.xml",
-        "rust/voxel-gdext/src/resources3.rs"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelBlockyModelMesh",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelBlockyModelMesh",
-      "evidence": "Mesh triangles bake into interior vs cube-side surfaces using side_vertex_tolerance. mesh_ortho_rotation_index rotates about the cube center (24 ortho bases). side_cutout_enabled is forwarded so bake_library can pre-cut neighbor faces.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelBlockyModelMesh.xml",
-        "rust/voxel-gdext/src/resources3.rs",
-        "rust/voxel-core/src/meshers/blocky/mesh_geometry.rs"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelBlockyType",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelBlockyType",
-      "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelBlockyType.xml",
-        "rust/voxel-gdext/src/resources2.rs"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelBlockyTypeLibrary",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelBlockyTypeLibrary",
-      "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelBlockyTypeLibrary.xml",
-        "rust/voxel-gdext/src/resources2.rs"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelBoxMover",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelBoxMover",
-      "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelBoxMover.xml",
-        "rust/voxel-gdext/src/resources2.rs"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelBuffer",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelBuffer",
-      "evidence": "46 canonical #[func] methods (43 real: create/set/get/fill/fill_area/clear/is_uniform/compress/decompress/copy_channel/downscale/byte_array/mirror/rotate_90/remap/op_add/sub/min/max/paste/get_size/get_voxel_f/set_voxel_f/get_voxel_v/set_voxel_v/get_channel_depth/set_channel_depth/get_channel_compression/get_allocator plus in-memory block/voxel metadata). Remaining stubs: get_voxel_tool, 2 texture methods, 1 debug method. Variant serializer codec is still deferred. + 29 #[constant] declarations + behavioral tests (api_test.gd, parity_suite). Status partial because a few methods lack matching observable behavior.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelBuffer.xml",
-        "rust/voxel-gdext/src/voxel_buffer.rs"
-      ],
-      "behavioral_tests": [
-        "rust/voxel-gdext/smoke_test/api_test.gd#_ready"
-      ]
-    },
-    {
-      "name": "VoxelColorPalette",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelColorPalette",
-      "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelColorPalette.xml",
-        "rust/voxel-gdext/src/resources.rs"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelDataBlockEnterInfo",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelDataBlockEnterInfo",
-      "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelDataBlockEnterInfo.xml",
-        "rust/voxel-gdext/src/resources.rs"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelEngine",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelEngine",
-      "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelEngine.xml",
-        "rust/voxel-gdext/src/resources.rs"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelFormat",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelFormat",
-      "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelFormat.xml",
-        "rust/voxel-gdext/src/resources.rs"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelGenerator",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelGenerator",
-      "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelGenerator.xml",
-        "rust/voxel-gdext/src/resources2.rs"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelGeneratorFlat",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelGeneratorFlat",
-      "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelGeneratorFlat.xml",
-        "rust/voxel-gdext/src/generators.rs"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelGeneratorGraph",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelGeneratorGraph",
-      "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelGeneratorGraph.xml",
-        "rust/voxel-gdext/src/voxel_buffer.rs"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelGeneratorHeightmap",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelGeneratorHeightmap",
-      "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelGeneratorHeightmap.xml",
-        "rust/voxel-gdext/src/generators.rs"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelGeneratorImage",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelGeneratorImage",
-      "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelGeneratorImage.xml",
-        "rust/voxel-gdext/src/generators.rs"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelGeneratorMultipassCB",
-      "status": "deferred",
-      "binding_state": "unregistered",
-      "registered_name": null,
-      "evidence": "Multipass generation is intentionally deferred; the differently named local helper is not API parity.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelGeneratorMultipassCB.xml"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelGeneratorNoise",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelGeneratorNoise",
-      "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelGeneratorNoise.xml",
-        "rust/voxel-gdext/src/generators.rs"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelGeneratorNoise2D",
-      "status": "deferred",
-      "binding_state": "unregistered",
-      "registered_name": null,
-      "evidence": "No canonical 2D-noise generator binding is registered.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelGeneratorNoise2D.xml"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelGeneratorScript",
-      "status": "deferred",
-      "binding_state": "unregistered",
-      "registered_name": null,
-      "evidence": "Godot-script generator callbacks are not ported.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelGeneratorScript.xml"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelGeneratorWaves",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelGeneratorWaves",
-      "evidence": "The generator drives runtime paging in smoke tests, but the pinned canonical API surface is incomplete.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelGeneratorWaves.xml",
-        "rust/voxel-gdext/src/generators.rs"
-      ],
-      "behavioral_tests": [
-        "rust/voxel-gdext/smoke_test/runtime_process.gd#_ready"
-      ]
-    },
-    {
-      "name": "VoxelGraphFunction",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelGraphFunction",
-      "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelGraphFunction.xml",
-        "rust/voxel-gdext/src/resources2.rs"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelInstanceComponent",
-      "status": "complete",
-      "binding_state": "registered",
-      "registered_name": "VoxelInstanceComponent",
-      "evidence": "Registered with canonical name and correct parent class. The class has 0 pinned methods, properties, signals, and constants in the upstream XML, so the complete criterion is trivially satisfied for the API surface. At least one executable behavioral test exercises the class registration and core contract.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelInstanceComponent.xml",
-        "rust/voxel-gdext/src/resources3.rs"
-      ],
-      "behavioral_tests": [
-        "rust/voxel-gdext/src/resources3.rs#instance_component_is_registered_with_default_visibility"
-      ]
-    },
-    {
-      "name": "VoxelInstanceGenerator",
-      "status": "deferred",
-      "binding_state": "unregistered",
-      "registered_name": null,
-      "evidence": "No canonical instance-generator binding is registered.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelInstanceGenerator.xml"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelInstanceLibrary",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelInstanceLibrary",
-      "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelInstanceLibrary.xml",
-        "rust/voxel-gdext/src/resources.rs"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelInstanceLibraryItem",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelInstanceLibraryItem",
-      "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelInstanceLibraryItem.xml",
-        "rust/voxel-gdext/src/resources.rs"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelInstanceLibraryMultiMeshItem",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelInstanceLibraryMultiMeshItem",
-      "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelInstanceLibraryMultiMeshItem.xml",
-        "rust/voxel-gdext/src/resources3.rs"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelInstanceLibrarySceneItem",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelInstanceLibrarySceneItem",
-      "evidence": "Registered resource with a real PackedScene slot, paralleling VoxelInstancer.set_item_scene; the resource is not yet attachable to the node's internal library.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelInstanceLibrarySceneItem.xml",
-        "rust/voxel-gdext/src/resources3.rs"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelInstancer",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelInstancer",
-      "evidence": "Registered node with library items, seeded scatter, MultiMesh upload, per-mesh-block streaming, and scene-item instancing (set_item_scene spawns real Node3D roots per instance). Upstream-only extras (async tasks, persistence, fading, body tracking) keep it partial.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelInstancer.xml",
-        "rust/voxel-gdext/src/voxel_buffer.rs"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelInstancerRigidBody",
-      "status": "deferred",
-      "binding_state": "unregistered",
-      "registered_name": null,
-      "evidence": "Rigid-body instancing is deferred with the physics integration.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelInstancerRigidBody.xml"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelLodTerrain",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelLodTerrain",
-      "evidence": "Registered and now a real runtime: owns a VoxelTerrainCore built via new_variable_lod, drives try_process through the production Variable LOD planner, consumes mesh lifecycle and RenderTopologyChanged events (u_transition_mask), uploads ArrayMeshes, and can emit regular-only collision surfaces when generate_collisions is on. Debug-draw flags rebuild a wireframe overlay (clipbox leaves, volume bounds, viewer clipboxes, edited/metadata boxes). 3-LOD paging is exercised by variable_lod_3. GPU/normalmap inspector fields remain stored stubs.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelLodTerrain.xml",
-        "rust/voxel-gdext/src/resources2.rs"
-      ],
-      "behavioral_tests": [
-        "rust/voxel-gdext/smoke_test/variable_lod_3.gd#_ready",
-        "rust/voxel-gdext/smoke_test/variable_lod_3.gd#_process",
-        "rust/voxel-gdext/smoke_test/variable_lod_3.tscn#[variable_lod_3] building 3-LOD VoxelLodTerrain"
-      ]
-    },
-    {
-      "name": "VoxelMeshSDF",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelMeshSDF",
-      "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelMeshSDF.xml",
-        "rust/voxel-gdext/src/resources2.rs"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelMesher",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelMesher",
-      "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelMesher.xml",
-        "rust/voxel-gdext/src/resources2.rs"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelMesherBlocky",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelMesherBlocky",
-      "evidence": "set_library + core_mesher() carry a baked VoxelBlockyLibrary into BlockyMesher; VoxelTerrain.resolve_core_mesher uses that mesher. Tint/shadow-occluder properties still do not affect the runtime mesher.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelMesherBlocky.xml",
-        "rust/voxel-gdext/src/resources.rs"
-      ],
-      "behavioral_tests": [
-        "rust/voxel-gdext/smoke_test/blocky_terrain.gd#_ready"
-      ]
-    },
-    {
-      "name": "VoxelMesherCubes",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelMesherCubes",
-      "evidence": "All 6 pinned constants (Materials enum, ColorMode enum) are implemented as #[constant] items; many pinned methods, properties and signals remain only partially exposed.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelMesherCubes.xml",
-        "rust/voxel-gdext/src/resources.rs"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelMesherTransvoxel",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelMesherTransvoxel",
-      "evidence": "The Rust mesher is used by the runtime and all 3 valid pinned constants (TexturingMode enum, excluding the deprecated TEXTURES_BLEND_4_OVER_16) are implemented as #[constant] items, but the pinned Godot resource API remains incomplete.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelMesherTransvoxel.xml",
-        "rust/voxel-gdext/src/resources.rs"
-      ],
-      "behavioral_tests": [
-        "rust/voxel-gdext/smoke_test/runtime_correctness.gd#_mesh_has_transvoxel_custom0"
-      ]
-    },
-    {
-      "name": "VoxelModifier",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelModifier",
-      "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelModifier.xml",
-        "rust/voxel-gdext/src/resources2.rs"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelModifierMesh",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelModifierMesh",
-      "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelModifierMesh.xml",
-        "rust/voxel-gdext/src/resources2.rs"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelModifierSphere",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelModifierSphere",
-      "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelModifierSphere.xml",
-        "rust/voxel-gdext/src/resources2.rs"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelNode",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelNode",
-      "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelNode.xml",
-        "rust/voxel-gdext/src/voxel_buffer.rs"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelRaycastResult",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelRaycastResult",
-      "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelRaycastResult.xml",
-        "rust/voxel-gdext/src/voxel_buffer.rs"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelSaveCompletionTracker",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelSaveCompletionTracker",
-      "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelSaveCompletionTracker.xml",
-        "rust/voxel-gdext/src/resources.rs"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelStream",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelStream",
-      "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelStream.xml",
-        "rust/voxel-gdext/src/resources2.rs"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelStreamMemory",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelStreamMemory",
-      "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelStreamMemory.xml",
-        "rust/voxel-gdext/src/streams.rs"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelStreamRegionFiles",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelStreamRegionFiles",
-      "evidence": "RegionFiles persist .vxr plus meta.vxrm (block/region/sector size and channel depths). convert_files rewrites both. Inspector block_size_po2 is passed into the core stream.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelStreamRegionFiles.xml",
-        "rust/voxel-gdext/src/streams.rs"
-      ],
-      "behavioral_tests": [
-        "rust/voxel-gdext/smoke_test/runtime_correctness.gd#_run"
-      ]
-    },
-    {
-      "name": "VoxelStreamSQLite",
-      "status": "deferred",
-      "binding_state": "registered",
-      "registered_name": "VoxelStreamSQLite",
-      "evidence": "SQLite streams are intentionally deferred; the registered class is an unavailable placeholder.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelStreamSQLite.xml",
-        "rust/voxel-gdext/src/resources3.rs"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelStreamScript",
-      "status": "deferred",
-      "binding_state": "unregistered",
-      "registered_name": null,
-      "evidence": "Godot-script stream callbacks are not ported.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelStreamScript.xml"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelTerrain",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelTerrain",
-      "evidence": "Fixed-LOD paging, rendering, editing, remeshing and persistence are exercised. The four canonical signals (block_loaded, block_unloaded, mesh_block_entered, mesh_block_exited) are declared and emitted on lifecycle events. Most pinned methods, properties and the four DEBUG_DRAW constants remain unimplemented.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelTerrain.xml",
-        "rust/voxel-gdext/src/terrain.rs"
-      ],
-      "behavioral_tests": [
-        "rust/voxel-gdext/smoke_test/runtime_process.gd#_process",
-        "rust/voxel-gdext/smoke_test/runtime_correctness.gd#_run"
-      ]
-    },
-    {
-      "name": "VoxelTerrainMultiplayerSynchronizer",
-      "status": "deferred",
-      "binding_state": "unregistered",
-      "registered_name": null,
-      "evidence": "The canonical multiplayer synchronizer is not ported.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelTerrainMultiplayerSynchronizer.xml"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelTool",
-      "status": "deferred",
-      "binding_state": "unregistered",
-      "registered_name": null,
-      "evidence": "The canonical base voxel-tool class is not registered.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelTool.xml"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelToolBuffer",
-      "status": "complete",
-      "binding_state": "registered",
-      "registered_name": "VoxelToolBuffer",
-      "evidence": "Registered with canonical name and correct parent class. The class has 0 pinned methods, properties, signals, and constants in the upstream XML, so the complete criterion is trivially satisfied for the API surface. At least one executable behavioral test exercises the class registration and core contract.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelToolBuffer.xml",
-        "rust/voxel-gdext/src/voxel_tool.rs"
-      ],
-      "behavioral_tests": [
-        "rust/voxel-gdext/src/voxel_tool.rs#voxel_tool_buffer_can_construct_and_edit"
-      ]
-    },
-    {
-      "name": "VoxelToolLodTerrain",
-      "status": "deferred",
-      "binding_state": "unregistered",
-      "registered_name": null,
-      "evidence": "The canonical LOD terrain editing tool is not registered.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelToolLodTerrain.xml"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelToolMultipassGenerator",
-      "status": "deferred",
-      "binding_state": "unregistered",
-      "registered_name": null,
-      "evidence": "Multipass generation and its editing tool are intentionally deferred.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelToolMultipassGenerator.xml"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "VoxelToolTerrain",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelToolTerrain",
-      "evidence": "VoxelTerrain.get_voxel_tool returns a tool bound to the live core. do_sphere/do_box/hemisphere/smooth/paste/set_voxel/get_voxel route through VoxelTerrainCore edits. In-memory voxel metadata and tags-aware run_blocky_random_tick are live. Serializer Variant codec remains deferred.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelToolTerrain.xml",
-        "rust/voxel-gdext/src/voxel_buffer.rs"
-      ],
-      "behavioral_tests": [
-        "rust/voxel-gdext/smoke_test/runtime_correctness.gd#_run_lifecycle_checks"
-      ]
-    },
-    {
-      "name": "VoxelViewer",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelViewer",
-      "evidence": "The viewer drives fixed-LOD paging in smoke tests, but the pinned canonical API surface is incomplete.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelViewer.xml",
-        "rust/voxel-gdext/src/terrain.rs"
-      ],
-      "behavioral_tests": [
-        "rust/voxel-gdext/smoke_test/runtime_process.gd#_ready"
-      ]
-    },
-    {
-      "name": "VoxelVoxLoader",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "VoxelVoxLoader",
-      "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
-      "source_paths": [
-        "upstream:doc/classes/VoxelVoxLoader.xml",
-        "rust/voxel-gdext/src/resources3.rs"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "ZN_FastNoiseLite",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "ZN_FastNoiseLite",
-      "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
-      "source_paths": [
-        "upstream:doc/classes/ZN_FastNoiseLite.xml",
-        "rust/voxel-gdext/src/resources3.rs"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "ZN_FastNoiseLiteGradient",
-      "status": "deferred",
-      "binding_state": "unregistered",
-      "registered_name": null,
-      "evidence": "The canonical gradient resource is not registered.",
-      "source_paths": [
-        "upstream:doc/classes/ZN_FastNoiseLiteGradient.xml"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "ZN_SpotNoise",
-      "status": "partial",
-      "binding_state": "registered",
-      "registered_name": "ZN_SpotNoise",
-      "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
-      "source_paths": [
-        "upstream:doc/classes/ZN_SpotNoise.xml",
-        "rust/voxel-gdext/src/resources3.rs"
-      ],
-      "behavioral_tests": []
-    },
-    {
-      "name": "ZN_ThreadedTask",
-      "status": "deferred",
-      "binding_state": "unregistered",
-      "registered_name": null,
-      "evidence": "The Godot-visible threaded task wrapper is not registered.",
-      "source_paths": [
-        "upstream:doc/classes/ZN_ThreadedTask.xml"
-      ],
-      "behavioral_tests": []
-    }
-  ],
-  "extension_only_classes": [
-    {
-      "name": "NoisePattern2D",
-      "source_path": "rust/voxel-gdext/src/resources3.rs",
-      "reason": "Rust-port helper registered outside the pinned documented public API."
-    },
-    {
-      "name": "VoxelAboutWindow",
-      "source_path": "rust/voxel-gdext/src/resources3.rs",
-      "reason": "Rust-port helper registered outside the pinned documented public API."
-    },
-    {
-      "name": "VoxelBlockRaycastResult",
-      "source_path": "rust/voxel-gdext/src/resources2.rs",
-      "reason": "Rust-port helper registered outside the pinned documented public API."
-    },
-    {
-      "name": "VoxelCompressedData",
-      "source_path": "rust/voxel-gdext/src/resources2.rs",
-      "reason": "Rust-port helper registered outside the pinned documented public API."
-    },
-    {
-      "name": "VoxelEditorCameraCache",
-      "source_path": "rust/voxel-gdext/src/resources3.rs",
-      "reason": "Rust-port helper registered outside the pinned documented public API."
-    },
-    {
-      "name": "VoxelGeneratorMultipass",
-      "source_path": "rust/voxel-gdext/src/resources2.rs",
-      "reason": "Noncanonical placeholder name; it is not the deferred upstream VoxelGeneratorMultipassCB API."
-    },
-    {
-      "name": "VoxelGraphConnection",
-      "source_path": "rust/voxel-gdext/src/resources3.rs",
-      "reason": "Rust-port helper registered outside the pinned documented public API."
-    },
-    {
-      "name": "VoxelGraphEditorPlugin",
-      "source_path": "rust/voxel-gdext/src/editor.rs",
-      "reason": "Editor-only registration outside the pinned documented runtime API."
-    },
-    {
-      "name": "VoxelGraphEditorWindow",
-      "source_path": "rust/voxel-gdext/src/resources3.rs",
-      "reason": "Rust-port helper registered outside the pinned documented public API."
-    },
-    {
-      "name": "VoxelGraphNode",
-      "source_path": "rust/voxel-gdext/src/resources3.rs",
-      "reason": "Rust-port helper registered outside the pinned documented public API."
-    },
-    {
-      "name": "VoxelGraphNodesDocData",
-      "source_path": "rust/voxel-gdext/src/resources3.rs",
-      "reason": "Rust-port helper registered outside the pinned documented public API."
-    },
-    {
-      "name": "VoxelGraphPreview",
-      "source_path": "rust/voxel-gdext/src/resources3.rs",
-      "reason": "Rust-port helper registered outside the pinned documented public API."
-    },
-    {
-      "name": "VoxelInstancerEditorPlugin",
-      "source_path": "rust/voxel-gdext/src/editor.rs",
-      "reason": "Editor-only registration outside the pinned documented runtime API."
-    },
-    {
-      "name": "VoxelLodTerrainEditorPlugin",
-      "source_path": "rust/voxel-gdext/src/editor.rs",
-      "reason": "Editor-only registration outside the pinned documented runtime API."
-    },
-    {
-      "name": "VoxelTaskIndicator",
-      "source_path": "rust/voxel-gdext/src/resources3.rs",
-      "reason": "Rust-port helper registered outside the pinned documented public API."
-    },
-    {
-      "name": "VoxelTerrainEditorPlugin",
-      "source_path": "rust/voxel-gdext/src/editor.rs",
-      "reason": "Editor-only registration outside the pinned documented runtime API."
-    },
-    {
-      "name": "VoxelTerrainStats",
-      "source_path": "rust/voxel-gdext/src/resources2.rs",
-      "reason": "Rust-port helper registered outside the pinned documented public API."
-    },
-    {
-      "name": "VoxImporterPlugin",
-      "source_path": "rust/voxel-gdext/src/editor.rs",
-      "reason": "Editor-only registration outside the pinned documented runtime API."
-    },
-    {
-      "name": "ZN_Curve",
-      "source_path": "rust/voxel-gdext/src/resources3.rs",
-      "reason": "Rust-port helper registered outside the pinned documented public API."
-    },
-    {
-      "name": "VoxelTerrainReplicator",
-      "reason": "Transport-agnostic replication bridge (R3): server role polls the authoritative terrain for edited-block snapshots per peer interest; client role applies received frames with server-revision ordering. No sockets by design — scripts bridge frames over any Godot transport.",
-      "source_path": "rust/voxel-gdext/src/terrain.rs"
-    }
-  ]
+  {
+   "name": "VoxelBlockyAttribute",
+   "status": "partial",
+   "binding_state": "registered",
+   "registered_name": "VoxelBlockyAttribute",
+   "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelBlockyAttribute.xml",
+    "rust/voxel-gdext/src/resources2.rs"
+   ],
+   "behavioral_tests": []
+  },
+  {
+   "name": "VoxelBlockyAttributeAxis",
+   "status": "partial",
+   "binding_state": "registered",
+   "registered_name": "VoxelBlockyAttributeAxis",
+   "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelBlockyAttributeAxis.xml",
+    "rust/voxel-gdext/src/resources2.rs"
+   ],
+   "behavioral_tests": []
+  },
+  {
+   "name": "VoxelBlockyAttributeCustom",
+   "status": "partial",
+   "binding_state": "registered",
+   "registered_name": "VoxelBlockyAttributeCustom",
+   "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelBlockyAttributeCustom.xml",
+    "rust/voxel-gdext/src/resources2.rs"
+   ],
+   "behavioral_tests": []
+  },
+  {
+   "name": "VoxelBlockyAttributeDirection",
+   "status": "partial",
+   "binding_state": "registered",
+   "registered_name": "VoxelBlockyAttributeDirection",
+   "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelBlockyAttributeDirection.xml",
+    "rust/voxel-gdext/src/resources2.rs"
+   ],
+   "behavioral_tests": []
+  },
+  {
+   "name": "VoxelBlockyAttributeRotation",
+   "status": "partial",
+   "binding_state": "registered",
+   "registered_name": "VoxelBlockyAttributeRotation",
+   "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelBlockyAttributeRotation.xml",
+    "rust/voxel-gdext/src/resources2.rs"
+   ],
+   "behavioral_tests": []
+  },
+  {
+   "name": "VoxelBlockyFluid",
+   "status": "partial",
+   "binding_state": "registered",
+   "registered_name": "VoxelBlockyFluid",
+   "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelBlockyFluid.xml",
+    "rust/voxel-gdext/src/resources3.rs"
+   ],
+   "behavioral_tests": []
+  },
+  {
+   "name": "VoxelBlockyLibrary",
+   "status": "partial",
+   "binding_state": "registered",
+   "registered_name": "VoxelBlockyLibrary",
+   "evidence": "add_solid_model builds a full-cube BakedModel, bake() runs bake_library, and the baked table is consumed by VoxelMesherBlocky on VoxelTerrain. Canonical model-resource peer is still a placeholder.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelBlockyLibrary.xml",
+    "rust/voxel-gdext/src/resources.rs"
+   ],
+   "behavioral_tests": [
+    "rust/voxel-gdext/smoke_test/blocky_terrain.gd#_ready"
+   ]
+  },
+  {
+   "name": "VoxelBlockyLibraryBase",
+   "status": "deferred",
+   "binding_state": "unregistered",
+   "registered_name": null,
+   "evidence": "No canonical binding is registered for the pinned abstract library base.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelBlockyLibraryBase.xml"
+   ],
+   "behavioral_tests": []
+  },
+  {
+   "name": "VoxelBlockyModel",
+   "status": "partial",
+   "binding_state": "registered",
+   "registered_name": "VoxelBlockyModel",
+   "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelBlockyModel.xml",
+    "rust/voxel-gdext/src/resources2.rs"
+   ],
+   "behavioral_tests": []
+  },
+  {
+   "name": "VoxelBlockyModelCube",
+   "status": "partial",
+   "binding_state": "registered",
+   "registered_name": "VoxelBlockyModelCube",
+   "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelBlockyModelCube.xml",
+    "rust/voxel-gdext/src/resources3.rs"
+   ],
+   "behavioral_tests": []
+  },
+  {
+   "name": "VoxelBlockyModelEmpty",
+   "status": "complete",
+   "binding_state": "registered",
+   "registered_name": "VoxelBlockyModelEmpty",
+   "evidence": "Registered with canonical name and correct parent class. The class has 0 pinned methods, properties, signals, and constants in the upstream XML, so the complete criterion is trivially satisfied for the API surface. At least one executable behavioral test exercises the class registration and core contract.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelBlockyModelEmpty.xml",
+    "rust/voxel-gdext/src/resources3.rs"
+   ],
+   "behavioral_tests": [
+    "rust/voxel-gdext/src/resources3.rs#blocky_model_empty_is_registered_and_reports_air"
+   ]
+  },
+  {
+   "name": "VoxelBlockyModelFluid",
+   "status": "partial",
+   "binding_state": "registered",
+   "registered_name": "VoxelBlockyModelFluid",
+   "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelBlockyModelFluid.xml",
+    "rust/voxel-gdext/src/resources3.rs"
+   ],
+   "behavioral_tests": []
+  },
+  {
+   "name": "VoxelBlockyModelMesh",
+   "status": "partial",
+   "binding_state": "registered",
+   "registered_name": "VoxelBlockyModelMesh",
+   "evidence": "Mesh triangles bake into interior vs cube-side surfaces using side_vertex_tolerance. mesh_ortho_rotation_index rotates about the cube center (24 ortho bases). side_cutout_enabled is forwarded so bake_library can pre-cut neighbor faces.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelBlockyModelMesh.xml",
+    "rust/voxel-gdext/src/resources3.rs",
+    "rust/voxel-core/src/meshers/blocky/mesh_geometry.rs"
+   ],
+   "behavioral_tests": []
+  },
+  {
+   "name": "VoxelBlockyType",
+   "status": "partial",
+   "binding_state": "registered",
+   "registered_name": "VoxelBlockyType",
+   "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelBlockyType.xml",
+    "rust/voxel-gdext/src/resources2.rs"
+   ],
+   "behavioral_tests": []
+  },
+  {
+   "name": "VoxelBlockyTypeLibrary",
+   "status": "partial",
+   "binding_state": "registered",
+   "registered_name": "VoxelBlockyTypeLibrary",
+   "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelBlockyTypeLibrary.xml",
+    "rust/voxel-gdext/src/resources2.rs"
+   ],
+   "behavioral_tests": []
+  },
+  {
+   "name": "VoxelBoxMover",
+   "status": "partial",
+   "binding_state": "registered",
+   "registered_name": "VoxelBoxMover",
+   "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelBoxMover.xml",
+    "rust/voxel-gdext/src/resources2.rs"
+   ],
+   "behavioral_tests": []
+  },
+  {
+   "name": "VoxelBuffer",
+   "status": "partial",
+   "binding_state": "registered",
+   "registered_name": "VoxelBuffer",
+   "evidence": "46 canonical #[func] methods (43 real: create/set/get/fill/fill_area/clear/is_uniform/compress/decompress/copy_channel/downscale/byte_array/mirror/rotate_90/remap/op_add/sub/min/max/paste/get_size/get_voxel_f/set_voxel_f/get_voxel_v/set_voxel_v/get_channel_depth/set_channel_depth/get_channel_compression/get_allocator plus in-memory block/voxel metadata). Remaining stubs: get_voxel_tool, 2 texture methods, 1 debug method. Variant serializer codec is still deferred. + 29 #[constant] declarations + behavioral tests (api_test.gd, parity_suite). Status partial because a few methods lack matching observable behavior.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelBuffer.xml",
+    "rust/voxel-gdext/src/voxel_buffer.rs"
+   ],
+   "behavioral_tests": [
+    "rust/voxel-gdext/smoke_test/api_test.gd#_ready"
+   ]
+  },
+  {
+   "name": "VoxelColorPalette",
+   "status": "partial",
+   "binding_state": "registered",
+   "registered_name": "VoxelColorPalette",
+   "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelColorPalette.xml",
+    "rust/voxel-gdext/src/resources.rs"
+   ],
+   "behavioral_tests": []
+  },
+  {
+   "name": "VoxelDataBlockEnterInfo",
+   "status": "partial",
+   "binding_state": "registered",
+   "registered_name": "VoxelDataBlockEnterInfo",
+   "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelDataBlockEnterInfo.xml",
+    "rust/voxel-gdext/src/resources.rs"
+   ],
+   "behavioral_tests": []
+  },
+  {
+   "name": "VoxelEngine",
+   "status": "partial",
+   "binding_state": "registered",
+   "registered_name": "VoxelEngine",
+   "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelEngine.xml",
+    "rust/voxel-gdext/src/resources.rs"
+   ],
+   "behavioral_tests": []
+  },
+  {
+   "name": "VoxelFormat",
+   "status": "partial",
+   "binding_state": "registered",
+   "registered_name": "VoxelFormat",
+   "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelFormat.xml",
+    "rust/voxel-gdext/src/resources.rs"
+   ],
+   "behavioral_tests": []
+  },
+  {
+   "name": "VoxelGenerator",
+   "status": "complete",
+   "binding_state": "registered",
+   "registered_name": "VoxelGenerator",
+   "evidence": "Pinned surface complete: generate_block(out_buffer, origin_in_voxels: Vector3, lod) is exposed on the base and overridden on every concrete generator (origin type matches the pinned XML and upstream C++). Abstract base body is a faithful no-op; concrete overrides run the core generator into the buffer. gdext 0.5.4 cannot inherit user-defined classes, so every inherited pinned member is re-declared on the concrete class (flat Resource base) and the terrain accepts generators via per-type casts. Behavioral test pins the generate_block contract (solid/air fill and SDF sign flip) via the core-backed free functions.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelGenerator.xml",
+    "rust/voxel-gdext/src/resources2.rs"
+   ],
+   "behavioral_tests": [
+    "rust/voxel-gdext/src/generators.rs#voxel_generator_generate_block_contract"
+   ]
+  },
+  {
+   "name": "VoxelGeneratorFlat",
+   "status": "complete",
+   "binding_state": "registered",
+   "registered_name": "VoxelGeneratorFlat",
+   "evidence": "Pinned surface complete: channel, height, voxel_type properties with pinned defaults plus generate_block; create_core_generator forwards all three into the core Flat generator. Extra height_int alias retained. Behavioral tests pin the blocky fill, channel mapping and SDF sign flip through the extracted parameter function, and the live runtime is exercised by the blocky-terrain smoke scene.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelGeneratorFlat.xml",
+    "rust/voxel-gdext/src/generators.rs"
+   ],
+   "behavioral_tests": [
+    "rust/voxel-gdext/src/generators.rs#flat_generator_from_params_fills_blocky_and_maps_channel",
+    "rust/voxel-gdext/src/generators.rs#voxel_generator_generate_block_contract",
+    "rust/voxel-gdext/smoke_test/blocky_terrain.gd#_ready"
+   ]
+  },
+  {
+   "name": "VoxelGeneratorGraph",
+   "status": "partial",
+   "binding_state": "registered",
+   "registered_name": "VoxelGeneratorGraph",
+   "evidence": "Feasible pinned subset implemented and tested: clear, compile returning the pinned {success, node_id, message} report, debug_analyze_range via core interval analysis, raycast_sdf_approx with stride/step bounds, debug_load_waves_preset, debug_measure_microseconds_per_voxel, generate_image_from_sdf, all seven pinned members with validation (use_xz_caching genuinely gates the core XZ cache), TEXTURE_MODE constants and the node_name_changed signal declaration. Remaining blockers: bake_sphere_bumpmap/bake_sphere_normalmap need panorama baking support absent from the core, and get_main_function requires the VoxelGraphFunction registry rework (separate stage).",
+   "source_paths": [
+    "upstream:doc/classes/VoxelGeneratorGraph.xml",
+    "rust/voxel-gdext/src/voxel_buffer.rs"
+   ],
+   "behavioral_tests": [
+    "rust/voxel-gdext/src/voxel_buffer.rs#generator_graph_compile_report_maps_topology_errors_to_node_ids",
+    "rust/voxel-gdext/src/voxel_buffer.rs#generator_graph_raycast_sdf_approx_hits_sphere_within_stride",
+    "rust/voxel-gdext/src/voxel_buffer.rs#generator_graph_debug_analyze_range_returns_constant_interval",
+    "rust/voxel-gdext/src/voxel_buffer.rs#generator_graph_waves_preset_compiles_and_produces_wavy_sdf"
+   ]
+  },
+  {
+   "name": "VoxelGeneratorHeightmap",
+   "status": "complete",
+   "binding_state": "registered",
+   "registered_name": "VoxelGeneratorHeightmap",
+   "evidence": "Pinned surface complete: channel, height_start, height_range (pinned default 30), iso_scale and offset all forward into the core HeightmapParams (previously only height_range did), plus generate_block. Extra sample_height retained. Behavioral test pins full parameter forwarding and the offset field shift.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelGeneratorHeightmap.xml",
+    "rust/voxel-gdext/src/generators.rs"
+   ],
+   "behavioral_tests": [
+    "rust/voxel-gdext/src/generators.rs#heightmap_generator_forwards_all_pinned_params"
+   ]
+  },
+  {
+   "name": "VoxelGeneratorImage",
+   "status": "complete",
+   "binding_state": "registered",
+   "registered_name": "VoxelGeneratorImage",
+   "evidence": "Pinned surface complete: image property (void set_image pinned name, get_image) storing the last assigned Image, blur_enabled wired to a deterministic core box blur, height_range pinned override default 200, red-channel sampling (upstream reads red, not luminance), repeat-by-default wrap, inherited channel/height_start/iso_scale/offset all forwarded, plus generate_block. gdext 0.5.4 cannot inherit user-defined classes, so every inherited pinned member is re-declared on the concrete class (flat Resource base) and the terrain accepts generators via per-type casts. Behavioral test pins red-channel reading, clamp/repeat wrap, iso/offset forwarding and the blur flag; the core blur has its own unit tests.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelGeneratorImage.xml",
+    "rust/voxel-gdext/src/generators.rs"
+   ],
+   "behavioral_tests": [
+    "rust/voxel-gdext/src/generators.rs#image_generator_contract"
+   ]
+  },
+  {
+   "name": "VoxelGeneratorMultipassCB",
+   "status": "deferred",
+   "binding_state": "unregistered",
+   "registered_name": null,
+   "evidence": "Multipass generation is intentionally deferred; the differently named local helper is not API parity.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelGeneratorMultipassCB.xml"
+   ],
+   "behavioral_tests": []
+  },
+  {
+   "name": "VoxelGeneratorNoise",
+   "status": "complete",
+   "binding_state": "registered",
+   "registered_name": "VoxelGeneratorNoise",
+   "evidence": "Pinned surface complete: channel, height_start, height_range and the required noise resource plus generate_block. The assigned noise resource (ZN_FastNoiseLite or FastNoise2) now drives generation through its ClassDB getters; own seed/frequency remain the documented fallback when no resource is assigned. Core NoiseConfig honors fractal passthrough. Behavioral tests pin determinism per configuration, seed divergence and channel wiring.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelGeneratorNoise.xml",
+    "rust/voxel-gdext/src/generators.rs"
+   ],
+   "behavioral_tests": [
+    "rust/voxel-gdext/src/generators.rs#noise_generator_honors_noise_resource_params",
+    "rust/voxel-gdext/src/generators.rs#noise_generator_from_params_wires_the_channel"
+   ]
+  },
+  {
+   "name": "VoxelGeneratorNoise2D",
+   "status": "deferred",
+   "binding_state": "unregistered",
+   "registered_name": null,
+   "evidence": "No canonical 2D-noise generator binding is registered.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelGeneratorNoise2D.xml"
+   ],
+   "behavioral_tests": []
+  },
+  {
+   "name": "VoxelGeneratorScript",
+   "status": "deferred",
+   "binding_state": "unregistered",
+   "registered_name": null,
+   "evidence": "Godot-script generator callbacks are not ported.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelGeneratorScript.xml"
+   ],
+   "behavioral_tests": []
+  },
+  {
+   "name": "VoxelGeneratorWaves",
+   "status": "complete",
+   "binding_state": "registered",
+   "registered_name": "VoxelGeneratorWaves",
+   "evidence": "Pinned surface complete: pattern_size and pattern_offset now actually drive the core Waves generator (previously they were inert and legacy amplitude/period drove generation), inherited height_start/height_range (default 30)/iso_scale/channel/offset re-declared and forwarded, plus generate_block. gdext 0.5.4 cannot inherit user-defined classes, so every inherited pinned member is re-declared on the concrete class (flat Resource base) and the terrain accepts generators via per-type casts. Legacy amplitude/period remain as write-through deprecated aliases. Behavioral test pins canonical parameter forwarding (regression for the inert-property defect), phase shift under pattern_offset and the surface crossing range; the runtime smoke scene drives paging with this generator.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelGeneratorWaves.xml",
+    "rust/voxel-gdext/src/generators.rs"
+   ],
+   "behavioral_tests": [
+    "rust/voxel-gdext/src/generators.rs#waves_generator_forwards_canonical_params",
+    "rust/voxel-gdext/smoke_test/runtime_process.gd#_ready"
+   ]
+  },
+  {
+   "name": "VoxelGraphFunction",
+   "status": "partial",
+   "binding_state": "registered",
+   "registered_name": "VoxelGraphFunction",
+   "evidence": "The pinned API is a node-type registry with an edge list (32 methods, 44 NodeTypeID constants, IO definitions, sub-graph function nodes); the core graph is an AST with embedded ports and no per-node metadata or connection objects. Structural gap, scheduled as its own later stage; the current binding keeps only the extras (set_name/get_name, compile_and_sample) that the graph editor addon drives.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelGraphFunction.xml",
+    "rust/voxel-gdext/src/resources2.rs"
+   ],
+   "behavioral_tests": []
+  },
+  {
+   "name": "VoxelInstanceComponent",
+   "status": "complete",
+   "binding_state": "registered",
+   "registered_name": "VoxelInstanceComponent",
+   "evidence": "Registered with canonical name and correct parent class. The class has 0 pinned methods, properties, signals, and constants in the upstream XML, so the complete criterion is trivially satisfied for the API surface. At least one executable behavioral test exercises the class registration and core contract.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelInstanceComponent.xml",
+    "rust/voxel-gdext/src/resources3.rs"
+   ],
+   "behavioral_tests": [
+    "rust/voxel-gdext/src/resources3.rs#instance_component_is_registered_with_default_visibility"
+   ]
+  },
+  {
+   "name": "VoxelInstanceGenerator",
+   "status": "deferred",
+   "binding_state": "unregistered",
+   "registered_name": null,
+   "evidence": "No canonical instance-generator binding is registered.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelInstanceGenerator.xml"
+   ],
+   "behavioral_tests": []
+  },
+  {
+   "name": "VoxelInstanceLibrary",
+   "status": "partial",
+   "binding_state": "registered",
+   "registered_name": "VoxelInstanceLibrary",
+   "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelInstanceLibrary.xml",
+    "rust/voxel-gdext/src/resources.rs"
+   ],
+   "behavioral_tests": []
+  },
+  {
+   "name": "VoxelInstanceLibraryItem",
+   "status": "partial",
+   "binding_state": "registered",
+   "registered_name": "VoxelInstanceLibraryItem",
+   "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelInstanceLibraryItem.xml",
+    "rust/voxel-gdext/src/resources.rs"
+   ],
+   "behavioral_tests": []
+  },
+  {
+   "name": "VoxelInstanceLibraryMultiMeshItem",
+   "status": "partial",
+   "binding_state": "registered",
+   "registered_name": "VoxelInstanceLibraryMultiMeshItem",
+   "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelInstanceLibraryMultiMeshItem.xml",
+    "rust/voxel-gdext/src/resources3.rs"
+   ],
+   "behavioral_tests": []
+  },
+  {
+   "name": "VoxelInstanceLibrarySceneItem",
+   "status": "partial",
+   "binding_state": "registered",
+   "registered_name": "VoxelInstanceLibrarySceneItem",
+   "evidence": "Registered resource with a real PackedScene slot, paralleling VoxelInstancer.set_item_scene; the resource is not yet attachable to the node's internal library.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelInstanceLibrarySceneItem.xml",
+    "rust/voxel-gdext/src/resources3.rs"
+   ],
+   "behavioral_tests": []
+  },
+  {
+   "name": "VoxelInstancer",
+   "status": "partial",
+   "binding_state": "registered",
+   "registered_name": "VoxelInstancer",
+   "evidence": "Registered node with library items, seeded scatter, MultiMesh upload, per-mesh-block streaming, and scene-item instancing (set_item_scene spawns real Node3D roots per instance). Upstream-only extras (async tasks, persistence, fading, body tracking) keep it partial.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelInstancer.xml",
+    "rust/voxel-gdext/src/voxel_buffer.rs"
+   ],
+   "behavioral_tests": []
+  },
+  {
+   "name": "VoxelInstancerRigidBody",
+   "status": "deferred",
+   "binding_state": "unregistered",
+   "registered_name": null,
+   "evidence": "Rigid-body instancing is deferred with the physics integration.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelInstancerRigidBody.xml"
+   ],
+   "behavioral_tests": []
+  },
+  {
+   "name": "VoxelLodTerrain",
+   "status": "partial",
+   "binding_state": "registered",
+   "registered_name": "VoxelLodTerrain",
+   "evidence": "Registered and now a real runtime: owns a VoxelTerrainCore built via new_variable_lod, drives try_process through the production Variable LOD planner, consumes mesh lifecycle and RenderTopologyChanged events (u_transition_mask), uploads ArrayMeshes, and can emit regular-only collision surfaces when generate_collisions is on. Debug-draw flags rebuild a wireframe overlay (clipbox leaves, volume bounds, viewer clipboxes, edited/metadata boxes). 3-LOD paging is exercised by variable_lod_3. GPU/normalmap inspector fields remain stored stubs.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelLodTerrain.xml",
+    "rust/voxel-gdext/src/resources2.rs"
+   ],
+   "behavioral_tests": [
+    "rust/voxel-gdext/smoke_test/variable_lod_3.gd#_ready",
+    "rust/voxel-gdext/smoke_test/variable_lod_3.gd#_process",
+    "rust/voxel-gdext/smoke_test/variable_lod_3.tscn#[variable_lod_3] building 3-LOD VoxelLodTerrain"
+   ]
+  },
+  {
+   "name": "VoxelMeshSDF",
+   "status": "partial",
+   "binding_state": "registered",
+   "registered_name": "VoxelMeshSDF",
+   "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelMeshSDF.xml",
+    "rust/voxel-gdext/src/resources2.rs"
+   ],
+   "behavioral_tests": []
+  },
+  {
+   "name": "VoxelMesher",
+   "status": "partial",
+   "binding_state": "registered",
+   "registered_name": "VoxelMesher",
+   "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelMesher.xml",
+    "rust/voxel-gdext/src/resources2.rs"
+   ],
+   "behavioral_tests": []
+  },
+  {
+   "name": "VoxelMesherBlocky",
+   "status": "partial",
+   "binding_state": "registered",
+   "registered_name": "VoxelMesherBlocky",
+   "evidence": "set_library + core_mesher() carry a baked VoxelBlockyLibrary into BlockyMesher; VoxelTerrain.resolve_core_mesher uses that mesher. Tint/shadow-occluder properties still do not affect the runtime mesher.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelMesherBlocky.xml",
+    "rust/voxel-gdext/src/resources.rs"
+   ],
+   "behavioral_tests": [
+    "rust/voxel-gdext/smoke_test/blocky_terrain.gd#_ready"
+   ]
+  },
+  {
+   "name": "VoxelMesherCubes",
+   "status": "partial",
+   "binding_state": "registered",
+   "registered_name": "VoxelMesherCubes",
+   "evidence": "All 6 pinned constants (Materials enum, ColorMode enum) are implemented as #[constant] items; many pinned methods, properties and signals remain only partially exposed.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelMesherCubes.xml",
+    "rust/voxel-gdext/src/resources.rs"
+   ],
+   "behavioral_tests": []
+  },
+  {
+   "name": "VoxelMesherTransvoxel",
+   "status": "partial",
+   "binding_state": "registered",
+   "registered_name": "VoxelMesherTransvoxel",
+   "evidence": "The Rust mesher is used by the runtime and all 3 valid pinned constants (TexturingMode enum, excluding the deprecated TEXTURES_BLEND_4_OVER_16) are implemented as #[constant] items, but the pinned Godot resource API remains incomplete.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelMesherTransvoxel.xml",
+    "rust/voxel-gdext/src/resources.rs"
+   ],
+   "behavioral_tests": [
+    "rust/voxel-gdext/smoke_test/runtime_correctness.gd#_mesh_has_transvoxel_custom0"
+   ]
+  },
+  {
+   "name": "VoxelModifier",
+   "status": "partial",
+   "binding_state": "registered",
+   "registered_name": "VoxelModifier",
+   "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelModifier.xml",
+    "rust/voxel-gdext/src/resources2.rs"
+   ],
+   "behavioral_tests": []
+  },
+  {
+   "name": "VoxelModifierMesh",
+   "status": "partial",
+   "binding_state": "registered",
+   "registered_name": "VoxelModifierMesh",
+   "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelModifierMesh.xml",
+    "rust/voxel-gdext/src/resources2.rs"
+   ],
+   "behavioral_tests": []
+  },
+  {
+   "name": "VoxelModifierSphere",
+   "status": "partial",
+   "binding_state": "registered",
+   "registered_name": "VoxelModifierSphere",
+   "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelModifierSphere.xml",
+    "rust/voxel-gdext/src/resources2.rs"
+   ],
+   "behavioral_tests": []
+  },
+  {
+   "name": "VoxelNode",
+   "status": "partial",
+   "binding_state": "registered",
+   "registered_name": "VoxelNode",
+   "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelNode.xml",
+    "rust/voxel-gdext/src/voxel_buffer.rs"
+   ],
+   "behavioral_tests": []
+  },
+  {
+   "name": "VoxelRaycastResult",
+   "status": "partial",
+   "binding_state": "registered",
+   "registered_name": "VoxelRaycastResult",
+   "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelRaycastResult.xml",
+    "rust/voxel-gdext/src/voxel_buffer.rs"
+   ],
+   "behavioral_tests": []
+  },
+  {
+   "name": "VoxelSaveCompletionTracker",
+   "status": "partial",
+   "binding_state": "registered",
+   "registered_name": "VoxelSaveCompletionTracker",
+   "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelSaveCompletionTracker.xml",
+    "rust/voxel-gdext/src/resources.rs"
+   ],
+   "behavioral_tests": []
+  },
+  {
+   "name": "VoxelStream",
+   "status": "partial",
+   "binding_state": "registered",
+   "registered_name": "VoxelStream",
+   "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelStream.xml",
+    "rust/voxel-gdext/src/resources2.rs"
+   ],
+   "behavioral_tests": []
+  },
+  {
+   "name": "VoxelStreamMemory",
+   "status": "partial",
+   "binding_state": "registered",
+   "registered_name": "VoxelStreamMemory",
+   "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelStreamMemory.xml",
+    "rust/voxel-gdext/src/streams.rs"
+   ],
+   "behavioral_tests": []
+  },
+  {
+   "name": "VoxelStreamRegionFiles",
+   "status": "partial",
+   "binding_state": "registered",
+   "registered_name": "VoxelStreamRegionFiles",
+   "evidence": "RegionFiles persist .vxr plus meta.vxrm (block/region/sector size and channel depths). convert_files rewrites both. Inspector block_size_po2 is passed into the core stream.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelStreamRegionFiles.xml",
+    "rust/voxel-gdext/src/streams.rs"
+   ],
+   "behavioral_tests": [
+    "rust/voxel-gdext/smoke_test/runtime_correctness.gd#_run"
+   ]
+  },
+  {
+   "name": "VoxelStreamSQLite",
+   "status": "deferred",
+   "binding_state": "registered",
+   "registered_name": "VoxelStreamSQLite",
+   "evidence": "SQLite streams are intentionally deferred; the registered class is an unavailable placeholder.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelStreamSQLite.xml",
+    "rust/voxel-gdext/src/resources3.rs"
+   ],
+   "behavioral_tests": []
+  },
+  {
+   "name": "VoxelStreamScript",
+   "status": "deferred",
+   "binding_state": "unregistered",
+   "registered_name": null,
+   "evidence": "Godot-script stream callbacks are not ported.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelStreamScript.xml"
+   ],
+   "behavioral_tests": []
+  },
+  {
+   "name": "VoxelTerrain",
+   "status": "partial",
+   "binding_state": "registered",
+   "registered_name": "VoxelTerrain",
+   "evidence": "Fixed-LOD paging, rendering, editing, remeshing and persistence are exercised. The four canonical signals (block_loaded, block_unloaded, mesh_block_entered, mesh_block_exited) are declared and emitted on lifecycle events. Most pinned methods, properties and the four DEBUG_DRAW constants remain unimplemented.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelTerrain.xml",
+    "rust/voxel-gdext/src/terrain.rs"
+   ],
+   "behavioral_tests": [
+    "rust/voxel-gdext/smoke_test/runtime_process.gd#_process",
+    "rust/voxel-gdext/smoke_test/runtime_correctness.gd#_run"
+   ]
+  },
+  {
+   "name": "VoxelTerrainMultiplayerSynchronizer",
+   "status": "deferred",
+   "binding_state": "unregistered",
+   "registered_name": null,
+   "evidence": "The canonical multiplayer synchronizer is not ported.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelTerrainMultiplayerSynchronizer.xml"
+   ],
+   "behavioral_tests": []
+  },
+  {
+   "name": "VoxelTool",
+   "status": "deferred",
+   "binding_state": "unregistered",
+   "registered_name": null,
+   "evidence": "The canonical base voxel-tool class is not registered.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelTool.xml"
+   ],
+   "behavioral_tests": []
+  },
+  {
+   "name": "VoxelToolBuffer",
+   "status": "complete",
+   "binding_state": "registered",
+   "registered_name": "VoxelToolBuffer",
+   "evidence": "Registered with canonical name and correct parent class. The class has 0 pinned methods, properties, signals, and constants in the upstream XML, so the complete criterion is trivially satisfied for the API surface. At least one executable behavioral test exercises the class registration and core contract.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelToolBuffer.xml",
+    "rust/voxel-gdext/src/voxel_tool.rs"
+   ],
+   "behavioral_tests": [
+    "rust/voxel-gdext/src/voxel_tool.rs#voxel_tool_buffer_can_construct_and_edit"
+   ]
+  },
+  {
+   "name": "VoxelToolLodTerrain",
+   "status": "deferred",
+   "binding_state": "unregistered",
+   "registered_name": null,
+   "evidence": "The canonical LOD terrain editing tool is not registered.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelToolLodTerrain.xml"
+   ],
+   "behavioral_tests": []
+  },
+  {
+   "name": "VoxelToolMultipassGenerator",
+   "status": "deferred",
+   "binding_state": "unregistered",
+   "registered_name": null,
+   "evidence": "Multipass generation and its editing tool are intentionally deferred.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelToolMultipassGenerator.xml"
+   ],
+   "behavioral_tests": []
+  },
+  {
+   "name": "VoxelToolTerrain",
+   "status": "partial",
+   "binding_state": "registered",
+   "registered_name": "VoxelToolTerrain",
+   "evidence": "VoxelTerrain.get_voxel_tool returns a tool bound to the live core. do_sphere/do_box/hemisphere/smooth/paste/set_voxel/get_voxel route through VoxelTerrainCore edits. In-memory voxel metadata and tags-aware run_blocky_random_tick are live. Serializer Variant codec remains deferred.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelToolTerrain.xml",
+    "rust/voxel-gdext/src/voxel_buffer.rs"
+   ],
+   "behavioral_tests": [
+    "rust/voxel-gdext/smoke_test/runtime_correctness.gd#_run_lifecycle_checks"
+   ]
+  },
+  {
+   "name": "VoxelViewer",
+   "status": "partial",
+   "binding_state": "registered",
+   "registered_name": "VoxelViewer",
+   "evidence": "The viewer drives fixed-LOD paging in smoke tests, but the pinned canonical API surface is incomplete.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelViewer.xml",
+    "rust/voxel-gdext/src/terrain.rs"
+   ],
+   "behavioral_tests": [
+    "rust/voxel-gdext/smoke_test/runtime_process.gd#_ready"
+   ]
+  },
+  {
+   "name": "VoxelVoxLoader",
+   "status": "partial",
+   "binding_state": "registered",
+   "registered_name": "VoxelVoxLoader",
+   "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
+   "source_paths": [
+    "upstream:doc/classes/VoxelVoxLoader.xml",
+    "rust/voxel-gdext/src/resources3.rs"
+   ],
+   "behavioral_tests": []
+  },
+  {
+   "name": "ZN_FastNoiseLite",
+   "status": "partial",
+   "binding_state": "registered",
+   "registered_name": "ZN_FastNoiseLite",
+   "evidence": "Everything except warp_noise is implemented: the four sampling methods with the pinned Vector3 signature for get_noise_3dv (previously Vector2), true 2D sampling (previously a 3D slice), 13 properties with pinned defaults and all 24 pinned constants; the engine is the same fastnoise-lite library upstream wraps, so numeric parity is real. warp_noise stays absent because it requires ZN_FastNoiseLiteGradient, which is deferred with the GPU-adjacent gradient work.",
+   "source_paths": [
+    "upstream:doc/classes/ZN_FastNoiseLite.xml",
+    "rust/voxel-gdext/src/resources3.rs"
+   ],
+   "behavioral_tests": [
+    "rust/voxel-gdext/src/resources3.rs#fast_noise_lite_constants_match_pinned_enum_values",
+    "rust/voxel-gdext/src/resources3.rs#fast_noise_lite_get_noise_3dv_equivalent_to_get_noise_3d",
+    "rust/voxel-gdext/src/resources3.rs#fast_noise_lite_2d_matches_crate_true_2d_sampler"
+   ]
+  },
+  {
+   "name": "ZN_FastNoiseLiteGradient",
+   "status": "deferred",
+   "binding_state": "unregistered",
+   "registered_name": null,
+   "evidence": "The canonical gradient resource is not registered.",
+   "source_paths": [
+    "upstream:doc/classes/ZN_FastNoiseLiteGradient.xml"
+   ],
+   "behavioral_tests": []
+  },
+  {
+   "name": "ZN_SpotNoise",
+   "status": "complete",
+   "binding_state": "registered",
+   "registered_name": "ZN_SpotNoise",
+   "evidence": "Pinned surface complete and functional: get_noise_2d/2dv/3d/3dv plus get_spot_positions_in_area_2d/3d implemented on shared cell/jitter machinery with a bounded workload (workload guard), and cell_size/jitter/seed/spot_radius properties with pinned defaults. Noise evaluation and area enumeration share bit-identical centers, so membership self-consistency holds exactly while spot_radius <= cell_size/2 (upstream's documented border limitation beyond). Jitter hash is a Rust-side deterministic substitute for upstream's RNG (documented approximation). Behavioral tests pin expected centers, workload bounds and noise/enumeration agreement in 2D and 3D.",
+   "source_paths": [
+    "upstream:doc/classes/ZN_SpotNoise.xml",
+    "rust/voxel-gdext/src/resources3.rs"
+   ],
+   "behavioral_tests": [
+    "rust/voxel-gdext/src/resources3.rs#spot_noise_get_noise_agrees_with_area_membership",
+    "rust/voxel-gdext/src/resources3.rs#spot_noise_area_2d_returns_expected_centers",
+    "rust/voxel-gdext/src/resources3.rs#spot_noise_area_workload_is_bounded"
+   ]
+  },
+  {
+   "name": "ZN_ThreadedTask",
+   "status": "deferred",
+   "binding_state": "unregistered",
+   "registered_name": null,
+   "evidence": "The Godot-visible threaded task wrapper is not registered.",
+   "source_paths": [
+    "upstream:doc/classes/ZN_ThreadedTask.xml"
+   ],
+   "behavioral_tests": []
+  }
+ ],
+ "extension_only_classes": [
+  {
+   "name": "NoisePattern2D",
+   "source_path": "rust/voxel-gdext/src/resources3.rs",
+   "reason": "Rust-port helper registered outside the pinned documented public API."
+  },
+  {
+   "name": "VoxelAboutWindow",
+   "source_path": "rust/voxel-gdext/src/resources3.rs",
+   "reason": "Rust-port helper registered outside the pinned documented public API."
+  },
+  {
+   "name": "VoxelBlockRaycastResult",
+   "source_path": "rust/voxel-gdext/src/resources2.rs",
+   "reason": "Rust-port helper registered outside the pinned documented public API."
+  },
+  {
+   "name": "VoxelCompressedData",
+   "source_path": "rust/voxel-gdext/src/resources2.rs",
+   "reason": "Rust-port helper registered outside the pinned documented public API."
+  },
+  {
+   "name": "VoxelEditorCameraCache",
+   "source_path": "rust/voxel-gdext/src/resources3.rs",
+   "reason": "Rust-port helper registered outside the pinned documented public API."
+  },
+  {
+   "name": "VoxelGeneratorMultipass",
+   "source_path": "rust/voxel-gdext/src/resources2.rs",
+   "reason": "Noncanonical placeholder name; it is not the deferred upstream VoxelGeneratorMultipassCB API."
+  },
+  {
+   "name": "VoxelGraphConnection",
+   "source_path": "rust/voxel-gdext/src/resources3.rs",
+   "reason": "Rust-port helper registered outside the pinned documented public API."
+  },
+  {
+   "name": "VoxelGraphEditorPlugin",
+   "source_path": "rust/voxel-gdext/src/editor.rs",
+   "reason": "Editor-only registration outside the pinned documented runtime API."
+  },
+  {
+   "name": "VoxelGraphEditorWindow",
+   "source_path": "rust/voxel-gdext/src/resources3.rs",
+   "reason": "Rust-port helper registered outside the pinned documented public API."
+  },
+  {
+   "name": "VoxelGraphNode",
+   "source_path": "rust/voxel-gdext/src/resources3.rs",
+   "reason": "Rust-port helper registered outside the pinned documented public API."
+  },
+  {
+   "name": "VoxelGraphNodesDocData",
+   "source_path": "rust/voxel-gdext/src/resources3.rs",
+   "reason": "Rust-port helper registered outside the pinned documented public API."
+  },
+  {
+   "name": "VoxelGraphPreview",
+   "source_path": "rust/voxel-gdext/src/resources3.rs",
+   "reason": "Rust-port helper registered outside the pinned documented public API."
+  },
+  {
+   "name": "VoxelInstancerEditorPlugin",
+   "source_path": "rust/voxel-gdext/src/editor.rs",
+   "reason": "Editor-only registration outside the pinned documented runtime API."
+  },
+  {
+   "name": "VoxelLodTerrainEditorPlugin",
+   "source_path": "rust/voxel-gdext/src/editor.rs",
+   "reason": "Editor-only registration outside the pinned documented runtime API."
+  },
+  {
+   "name": "VoxelTaskIndicator",
+   "source_path": "rust/voxel-gdext/src/resources3.rs",
+   "reason": "Rust-port helper registered outside the pinned documented public API."
+  },
+  {
+   "name": "VoxelTerrainEditorPlugin",
+   "source_path": "rust/voxel-gdext/src/editor.rs",
+   "reason": "Editor-only registration outside the pinned documented runtime API."
+  },
+  {
+   "name": "VoxelTerrainStats",
+   "source_path": "rust/voxel-gdext/src/resources2.rs",
+   "reason": "Rust-port helper registered outside the pinned documented public API."
+  },
+  {
+   "name": "VoxImporterPlugin",
+   "source_path": "rust/voxel-gdext/src/editor.rs",
+   "reason": "Editor-only registration outside the pinned documented runtime API."
+  },
+  {
+   "name": "ZN_Curve",
+   "source_path": "rust/voxel-gdext/src/resources3.rs",
+   "reason": "Rust-port helper registered outside the pinned documented public API."
+  },
+  {
+   "name": "VoxelTerrainReplicator",
+   "reason": "Transport-agnostic replication bridge (R3): server role polls the authoritative terrain for edited-block snapshots per peer interest; client role applies received frames with server-revision ordering. No sockets by design — scripts bridge frames over any Godot transport.",
+   "source_path": "rust/voxel-gdext/src/terrain.rs"
+  }
+ ]
 }
