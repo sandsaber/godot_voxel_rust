@@ -936,6 +936,10 @@ pub struct VoxelMesherCubesGD {
     opaque_material_resource: Option<Gd<Material>>,
     palette_resource: Option<Gd<Resource>>,
     transparent_material_resource: Option<Gd<Material>>,
+    /// Upstream aborts every palette-mode build without a palette
+    /// (`ERR_FAIL_COND_MSG`); the terrain resolve path builds per re-mesh, so
+    /// the diagnostic is reported once per resource instead of spamming.
+    palette_mode_error_reported: std::sync::atomic::AtomicBool,
     #[var(get = get_color_mode, set = set_color_mode)]
     color_mode: PhantomVar<i64>,
     #[var(get = is_greedy_meshing_enabled, set = set_greedy_meshing_enabled)]
@@ -962,6 +966,7 @@ impl IResource for VoxelMesherCubesGD {
             opaque_material_resource: None,
             palette_resource: None,
             transparent_material_resource: None,
+            palette_mode_error_reported: std::sync::atomic::AtomicBool::new(false),
             color_mode: PhantomVar::default(),
             greedy_meshing_enabled: PhantomVar::default(),
             opaque_material: PhantomVar::default(),
@@ -1315,8 +1320,21 @@ impl VoxelMesherCubesGD {
             .palette_resource
             .as_ref()
             .and_then(|resource| resource.clone().try_cast::<VoxelColorPaletteGD>().ok())
-            .map(|palette| palette.bind().core_palette())
-            .unwrap_or_default();
+            .map(|palette| palette.bind().core_palette());
+        // Upstream aborts palette-mode builds without a palette; this runs on
+        // the terrain re-mesh path, so report once per resource and continue
+        // with the default palette (the standalone build_mesh aborts instead).
+        // `false` is passed because this branch only runs when resolution
+        // failed (no resource or a non-palette resource).
+        if palette.is_none()
+            && !cubes_palette_mode_satisfied(self.color_mode_value, false)
+            && !self
+                .palette_mode_error_reported
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            godot_error!("VoxelMesherCubes: Palette mode is used but no palette was specified");
+        }
+        let palette = palette.unwrap_or_default();
         let channel = validate_mesher_channel(self.color_channel)
             .unwrap_or(voxel_core::storage::ChannelId::Color.index());
         cubes_core_mesher_from_config(
@@ -1385,13 +1403,13 @@ impl VoxelColorPaletteGD {
 
     /// Gets the color at the given index (canonical pinned signature,
     /// upstream `get_color(int) -> Color`). Out-of-range indices emit an error
-    /// and return transparent black, matching upstream's `ERR_FAIL_INDEX_V`
-    /// default-constructed `Color`.
+    /// and return Godot's default-constructed `Color` — opaque black —
+    /// matching upstream's `ERR_FAIL_INDEX_V(index, size, Color())`.
     #[func]
     fn get_color(&self, index: i32) -> Color {
         if let Err(error) = validate_palette_index(index) {
             godot_error!("VoxelColorPalette.get_color: {error}");
-            return Color::from_rgba(0.0, 0.0, 0.0, 0.0);
+            return Color::from_rgba(0.0, 0.0, 0.0, 1.0);
         }
         let color = self.palette.get_color(index as usize);
         Color::from_rgba(color.r, color.g, color.b, color.a)
@@ -1457,8 +1475,10 @@ impl VoxelColorPaletteGD {
     }
 
     /// Set packed 8-bit binary color data (canonical `data` property setter).
-    /// Accepts up to 256 packed `0xRRGGBBAA` integers. Matches
-    /// `VoxelColorPalette::set_data`.
+    /// Accepts up to 256 packed `0xRRGGBBAA` integers, matching
+    /// `VoxelColorPalette::set_data` for shorter arrays; deviation: arrays
+    /// longer than 256 are silently truncated where upstream rejects them
+    /// (`ERR_FAIL_COND(size > 256)`).
     #[func]
     fn set_data(&mut self, data: PackedInt32Array) {
         let u32s: Vec<u32> = data.as_slice().iter().map(|v| *v as u32).collect();

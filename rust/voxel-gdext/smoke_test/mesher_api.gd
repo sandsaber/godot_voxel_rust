@@ -381,9 +381,9 @@ func palette_properties_and_color_accessors() -> void:
 	palette.set_color(3, Color(1.0, 0.0, 0.0, 1.0))
 	var red: Color = palette.get_color(3)
 	_ok(red is Color and red.r > 0.99 and red.g < 0.01, "get_color returns the set Color")
-	# Out-of-range indices report transparent black.
+	# Out-of-range indices report Godot's default-constructed opaque black.
 	var bad: Color = palette.get_color(300)
-	_ok(bad is Color and bad.r == 0.0 and bad.a == 0.0, "get_color(300) returns transparent black")
+	_ok(bad is Color and bad.r == 0.0 and bad.a == 1.0, "get_color(300) returns opaque black")
 	# data round-trips through set_data.
 	var data: PackedInt32Array = palette.get("data")
 	data[3] = 0x00FF00FF
