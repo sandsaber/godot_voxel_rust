@@ -174,6 +174,10 @@ func _ready() -> void:
 	#     grayscale noise pixels (R9 smoke coverage).
 	fastnoise2_generate_image_writes_pixels()
 
+	# 11. VoxelBlockSerializer round-trips a VoxelBuffer through an
+	#     LZ4-compressed PackedByteArray (R9 smoke coverage: pinned static API).
+	block_serializer_round_trips_bytes()
+
 	print("=== result: %d failure(s) ===" % failures)
 	get_tree().quit(1 if failures > 0 else 0)
 
@@ -192,3 +196,24 @@ func fastnoise2_generate_image_writes_pixels() -> void:
 	var c: Color = img.get_pixel(0, 0)
 	_ok(c != sentinel, "generate_image wrote pixel (0,0) (got %s)" % str(c))
 	_ok(c.r == c.g and c.g == c.b, "written pixel is grayscale (r==g==b)")
+
+## VoxelBlockSerializer's pinned static API must round-trip a buffer through
+## an LZ4-compressed PackedByteArray: serialize produces non-empty bytes and
+## deserializing them into a fresh buffer restores the written voxel.
+func block_serializer_round_trips_bytes() -> void:
+	var buf: RefCounted = ClassDB.instantiate("VoxelBuffer")
+	_ok(buf != null, "VoxelBuffer instantiated for serialization")
+	if buf == null:
+		return
+	buf.create(8, 8, 8)
+	buf.set_voxel(2, 3, 4, 0, 5)
+
+	var data: PackedByteArray = VoxelBlockSerializer.serialize_to_byte_array(buf, 1)
+	_ok(data.size() > 0,
+		"serialize_to_byte_array(LZ4) returns non-empty bytes (got %d)" % data.size())
+
+	var restored: RefCounted = ClassDB.instantiate("VoxelBuffer")
+	VoxelBlockSerializer.deserialize_from_byte_array(data, restored, true)
+	var value = restored.get_voxel(2, 3, 4, 0)
+	_ok(int(value) == 5,
+		"deserialize_from_byte_array restores the voxel (got %d)" % int(value))

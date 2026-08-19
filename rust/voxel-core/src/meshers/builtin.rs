@@ -226,6 +226,16 @@ impl<'a, T: SdfSample + bytemuck::Pod> RegularMesherInput for TypedSdfInput<'a, 
 /// algorithm's `MIN_PADDING=1` / `MAX_PADDING=2` requirement.
 pub struct TransvoxelMesher {
     sdf_channel: usize,
+    /// Minimum distance from cell corners below which interpolated vertices
+    /// are clamped (0.0 = no clamping, 0.5 = always mid-edge). Mirrors upstream
+    /// `VoxelMesherTransvoxel::edge_clamp_margin` (pinned default 0.02 in the
+    /// Godot class; the **core** default stays 0.0 so the C++ parity goldens,
+    /// which were generated with 0.0, remain byte-identical).
+    edge_clamp_margin: f32,
+    /// When `false`, the `MesherInput::lod_hint` transition passes are
+    /// suppressed. Mirrors upstream `VoxelMesherTransvoxel::transitions_enabled`
+    /// (default enabled).
+    transitions_enabled: bool,
 }
 
 impl Default for TransvoxelMesher {
@@ -238,6 +248,8 @@ impl TransvoxelMesher {
     pub fn new() -> Self {
         Self {
             sdf_channel: ChannelId::Sdf.index(),
+            edge_clamp_margin: 0.0,
+            transitions_enabled: true,
         }
     }
 
@@ -245,6 +257,65 @@ impl TransvoxelMesher {
     pub fn with_sdf_channel(mut self, channel: usize) -> Self {
         self.sdf_channel = channel;
         self
+    }
+
+    /// Set the edge-clamp margin. Values are clamped to `[0.0, 0.5]`, matching
+    /// the upstream property contract (0 = no clamping, 0.5 = mid-edge).
+    pub fn with_edge_clamp_margin(mut self, margin: f32) -> Self {
+        self.edge_clamp_margin = if margin.is_finite() {
+            margin.clamp(0.0, 0.5)
+        } else {
+            0.0
+        };
+        self
+    }
+
+    /// Enable or disable LOD transition-mesh generation (upstream
+    /// `transitions_enabled`).
+    pub fn with_transitions_enabled(mut self, enabled: bool) -> Self {
+        self.transitions_enabled = enabled;
+        self
+    }
+
+    /// The configured edge-clamp margin (already clamped to 0..=0.5).
+    pub fn edge_clamp_margin(&self) -> f32 {
+        self.edge_clamp_margin
+    }
+
+    /// Whether LOD transition meshes are generated.
+    pub fn transitions_enabled(&self) -> bool {
+        self.transitions_enabled
+    }
+
+    /// Build **only** the transition mesh for one `direction` (0..=5, see the
+    /// `SIDE_*` constants), without the regular cells. Mirrors upstream
+    /// `VoxelMesherTransvoxel::build_transition_mesh` (mainly for testing).
+    /// Returns the mesh arrays containing just that transition pass; a uniform
+    /// SDF channel yields empty arrays (matching the regular path's fast-path).
+    pub fn build_transition_mesh_for_direction(
+        &self,
+        input: &MesherInput<'_>,
+        direction: u8,
+    ) -> MeshArrays {
+        let mut arrays = MeshArrays::default();
+        if direction >= SIDE_COUNT || input.voxels.is_uniform(self.sdf_channel) {
+            return arrays;
+        }
+        let params = BuildRegularMeshParams {
+            lod_index: u32::from(input.lod_index),
+            edge_clamp_margin: self.edge_clamp_margin,
+        };
+        let transvoxel_input = VoxelBufferTransvoxelInput::new(input.voxels, self.sdf_channel);
+        TRANSVOXEL_CACHE.with(|cache| {
+            build_transition_mesh(
+                &transvoxel_input,
+                &params,
+                direction,
+                &mut cache.borrow_mut(),
+                &mut arrays,
+            );
+        });
+        arrays
     }
 }
 
@@ -285,7 +356,7 @@ impl VoxelMesher for TransvoxelMesher {
 
         let params = BuildRegularMeshParams {
             lod_index: u32::from(input.lod_index),
-            edge_clamp_margin: 0.0,
+            edge_clamp_margin: self.edge_clamp_margin,
         };
         let transvoxel_input = VoxelBufferTransvoxelInput::new(input.voxels, self.sdf_channel);
         // B3 (audit §9.6-B3): reuse a pooled `MeshArrays` when the terrain core
@@ -342,9 +413,10 @@ impl VoxelMesher for TransvoxelMesher {
                 }
             }
             // M2.2: build transition meshes on all 6 faces when LOD transitions
-            // are needed (lod_hint = true). Transition verts are appended to the
+            // are needed (lod_hint = true) and not disabled via the upstream
+            // `transitions_enabled` knob. Transition verts are appended to the
             // same MeshArrays, producing a watertight surface across LOD seams.
-            if input.lod_hint {
+            if input.lod_hint && self.transitions_enabled {
                 for dir in 0..SIDE_COUNT {
                     build_transition_mesh(
                         &transvoxel_input,
@@ -390,6 +462,13 @@ pub enum CubesColorMode {
     Raw,
     /// Look up each voxel value (low 8 bits) in a [`ColorPalette`].
     Palette,
+    /// Write the raw voxel value into the red component and the palette
+    /// entry's alpha into alpha, leaving green and blue at zero (upstream
+    /// `COLOR_SHADER_PALETTE`). A custom shader reads the palette index back
+    /// with `int(COLOR.r * 255.0)`; the palette is still required so
+    /// transparent entries (alpha < 255) are sorted into the transparent
+    /// material. Its RGB values are unused.
+    ShaderPalette,
 }
 
 /// Blocky colored-cube mesher wrapping the existing greedy-cubes free
@@ -440,6 +519,22 @@ impl CubesMesher {
     pub fn with_type_channel(mut self, channel: usize) -> Self {
         self.type_channel = channel;
         self
+    }
+
+    /// The configured color mode (upstream `COLOR_*` constant).
+    pub fn color_mode(&self) -> CubesColorMode {
+        self.color_mode
+    }
+
+    /// The configured palette (used by the [`CubesColorMode::Palette`] and
+    /// [`CubesColorMode::ShaderPalette`] modes).
+    pub fn palette(&self) -> &crate::meshers::cubes::palette::ColorPalette {
+        &self.palette
+    }
+
+    /// Whether the greedy rectangle-merging path is active.
+    pub fn is_greedy(&self) -> bool {
+        self.greedy
     }
 
     /// Extract the typed-channel slice the cubes mesher expects (`&[u32]`). The
@@ -503,6 +598,12 @@ impl VoxelMesher for CubesMesher {
                 _ => crate::math::Color8::from_u32(raw),
             },
             CubesColorMode::Palette => palette.get_color8(raw as u8),
+            // Raw index in red, palette alpha in alpha; equal indices (with
+            // equal palette alpha) still greedy-merge, matching upstream.
+            CubesColorMode::ShaderPalette => {
+                let entry = palette.get_color8(raw as u8);
+                crate::math::Color8::new(raw as u8, 0, 0, entry.a)
+            }
         };
 
         let mut arrays: [crate::meshers::cubes::arrays::CubesArrays; MATERIAL_COUNT] =
@@ -1013,6 +1114,106 @@ mod tests {
         );
     }
 
+    /// `with_edge_clamp_margin` must reach `BuildRegularMeshParams`: clamping
+    /// moves interpolated vertices away from cell corners, so a clamped build
+    /// produces different vertex positions (same topology) than an unclamped
+    /// one. Out-of-range margins are clamped to the [0, 0.5] contract.
+    #[test]
+    fn transvoxel_edge_clamp_margin_builder_reaches_build_params() {
+        let voxels = sphere_buffer(16, 6.0);
+
+        let build = |margin: f32| -> (f32, Vec<crate::math::Vector3f>) {
+            let mesher = TransvoxelMesher::new().with_edge_clamp_margin(margin);
+            assert_eq!(mesher.edge_clamp_margin(), margin.clamp(0.0, 0.5));
+            let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+            let mut output = MesherOutput::default();
+            mesher.build(&mut output, &input);
+            match &output.surfaces[0].arrays {
+                SurfaceArrays::Transvoxel(arrays) => {
+                    (mesher.edge_clamp_margin(), arrays.vertices.clone())
+                }
+                _ => unreachable!(),
+            }
+        };
+
+        let unclamped = build(0.0);
+        let clamped = build(0.5);
+        assert!(!unclamped.1.is_empty() && !clamped.1.is_empty());
+        assert_ne!(
+            unclamped.1, clamped.1,
+            "edge clamping must change the mesh (positions and/or reuse-driven count)"
+        );
+        // Values outside [0, 0.5] clamp to the boundaries.
+        let over = build(2.0);
+        assert_eq!(over.0, 0.5);
+        assert_eq!(over.1, clamped.1);
+        let negative = build(-1.0);
+        assert_eq!(negative.0, 0.0);
+        assert_eq!(negative.1, unclamped.1);
+        // Core default stays 0.0 (the parity goldens were generated with it).
+        assert_eq!(TransvoxelMesher::new().edge_clamp_margin(), 0.0);
+    }
+
+    /// `with_transitions_enabled(false)` suppresses the lod_hint transition
+    /// passes: the output must equal a plain regular-only build.
+    #[test]
+    fn transvoxel_transitions_disabled_suppresses_transition_geometry() {
+        let voxels = sphere_buffer(16, 12.0);
+
+        let mut input_regular = MesherInput::new(&voxels, Vector3i::zero(), 0);
+        input_regular.lod_hint = false;
+        let mut out_regular = MesherOutput::default();
+        TransvoxelMesher::new().build(&mut out_regular, &input_regular);
+
+        let mesher = TransvoxelMesher::new().with_transitions_enabled(false);
+        assert!(!mesher.transitions_enabled());
+        let mut input_lod = MesherInput::new(&voxels, Vector3i::zero(), 0);
+        input_lod.lod_hint = true;
+        let mut out_lod = MesherOutput::default();
+        mesher.build(&mut out_lod, &input_lod);
+
+        assert_eq!(
+            out_lod.total_vertex_count(),
+            out_regular.total_vertex_count(),
+            "disabled transitions must reduce lod_hint output to the regular mesh"
+        );
+        // Default stays enabled (parity goldens and the terrain LOD runtime
+        // rely on it).
+        assert!(TransvoxelMesher::new().transitions_enabled());
+    }
+
+    /// `build_transition_mesh_for_direction` produces only the transition
+    /// geometry for one side: fewer vertices than the full lod_hint build, and
+    /// nothing for a uniform (all-air) buffer or an invalid direction.
+    #[test]
+    fn transvoxel_transition_only_build_covers_single_direction() {
+        let mesher = TransvoxelMesher::new();
+        let voxels = sphere_buffer(16, 12.0);
+
+        let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+        let arrays = mesher.build_transition_mesh_for_direction(&input, 0);
+        assert!(
+            !arrays.vertices.is_empty(),
+            "a boundary-crossing sphere should produce transition vertices on side 0"
+        );
+
+        let mut air = VoxelBuffer::with_size(Vector3i::splat(16));
+        let mut format = VoxelFormat::new();
+        format.depths[ChannelId::Sdf.index()] = ChannelDepth::Bit32;
+        format.configure_buffer(&mut air);
+        let air_input = MesherInput::new(&air, Vector3i::zero(), 0);
+        assert!(mesher
+            .build_transition_mesh_for_direction(&air_input, 0)
+            .vertices
+            .is_empty());
+        // Out-of-range directions yield empty arrays instead of panicking.
+        let bad = MesherInput::new(&voxels, Vector3i::zero(), 0);
+        assert!(mesher
+            .build_transition_mesh_for_direction(&bad, 6)
+            .vertices
+            .is_empty());
+    }
+
     #[test]
     fn transvoxel_collision_hint_populates_collision_submesh_range() {
         let mesher = TransvoxelMesher::new();
@@ -1230,6 +1431,65 @@ mod tests {
         assert_send_sync::<CubesMesher>();
     }
 
+    /// Upstream `COLOR_SHADER_PALETTE`: voxel values are written raw into the
+    /// red component (green/blue zero) and the palette entry's alpha is copied
+    /// into alpha, so transparent palette entries sort into the transparent
+    /// material surface.
+    #[test]
+    fn cubes_shader_palette_writes_index_in_red_and_palette_alpha() {
+        let mut palette = crate::meshers::cubes::palette::ColorPalette::default();
+        palette.set_color8(1, crate::math::Color8::new(9, 9, 9, 255));
+        palette.set_color8(2, crate::math::Color8::new(9, 9, 9, 128));
+
+        let build = |voxel_id: u64| -> MesherOutput {
+            let mut voxels = VoxelBuffer::with_size(Vector3i::splat(2 + 2));
+            let channel = ChannelId::Color.index();
+            for z in 1..3 {
+                for x in 1..3 {
+                    for y in 1..3 {
+                        voxels.set_voxel(voxel_id, x, y, z, channel);
+                    }
+                }
+            }
+            let mesher = CubesMesher::new()
+                .with_color_mode(CubesColorMode::ShaderPalette)
+                .with_palette(palette.clone());
+            let input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+            let mut output = MesherOutput::default();
+            mesher.build(&mut output, &input);
+            output
+        };
+
+        let colors_of = |output: &MesherOutput, surface: usize| -> Vec<crate::math::Color> {
+            match &output.surfaces[surface].arrays {
+                SurfaceArrays::Cubes(arrays) => arrays.colors.clone(),
+                _ => unreachable!(),
+            }
+        };
+
+        // Opaque palette entry (alpha 255) → opaque surface, index in red.
+        let opaque = build(1);
+        let opaque_colors = colors_of(&opaque, 0);
+        assert!(!opaque_colors.is_empty());
+        for c in &opaque_colors {
+            assert!((c.r - 1.0 / 255.0).abs() < 1e-4, "red carries the index");
+            assert_eq!(c.g, 0.0);
+            assert_eq!(c.b, 0.0);
+            assert!((c.a - 1.0).abs() < 1e-4, "alpha carries the palette alpha");
+        }
+        assert!(colors_of(&opaque, 1).is_empty());
+
+        // Partial-alpha palette entry → transparent surface.
+        let transparent = build(2);
+        assert!(colors_of(&transparent, 0).is_empty());
+        let transparent_colors = colors_of(&transparent, 1);
+        assert!(!transparent_colors.is_empty());
+        for c in &transparent_colors {
+            assert!((c.r - 2.0 / 255.0).abs() < 1e-4);
+            assert!((c.a - 128.0 / 255.0).abs() < 1e-4);
+        }
+    }
+
     fn empty_blocky_library() -> std::sync::Arc<crate::meshers::blocky::baked_library::BakedLibrary>
     {
         // Default-constructed library is empty (no models), so the mesher
@@ -1330,6 +1590,56 @@ mod tests {
         assert_eq!(mesher.minimum_padding(), 1);
         assert_eq!(mesher.maximum_padding(), 1);
         assert_eq!(mesher.used_channels_mask(), 1u32 << ChannelId::Type.index());
+    }
+
+    /// The blocky mesher's two configuration knobs are genuinely honored:
+    /// geometry only appears for models present in the attached library, and
+    /// enabling occlusion darkens corner vertices relative to AO-disabled
+    /// output (same vertex count, different colors).
+    #[test]
+    fn blocky_core_mesher_honors_occlusion_and_library() {
+        let library = full_cube_blocky_library(true);
+        // An L-shaped cluster: the top face of (1,1,1) stays visible (air
+        // above) while (2,2,1) laterally occludes its +x edge, so ambient
+        // occlusion actually darkens something. A lone voxel or a full block
+        // would expose only faces whose occluder ring is entirely air.
+        let mut voxels = VoxelBuffer::with_size(Vector3i::splat(4));
+        for (x, y, z) in [(1, 1, 1), (2, 1, 1), (2, 2, 1), (1, 1, 2)] {
+            voxels.set_voxel(1, x, y, z, ChannelId::Type.index());
+        }
+        let mut input = MesherInput::new(&voxels, Vector3i::zero(), 0);
+        input.collision_hint = false;
+
+        // Library honored: the full-cube library meshes the lone voxel...
+        let mut full = MesherOutput::default();
+        BlockyMesher::new(library.clone()).build(&mut full, &input);
+        assert!(full.total_triangle_count() > 0);
+
+        // ...while an empty (default) library emits nothing.
+        let mut empty = MesherOutput::default();
+        BlockyMesher::new(empty_blocky_library()).build(&mut empty, &input);
+        assert_eq!(empty.total_triangle_count(), 0);
+
+        // Occlusion honored: same topology, but AO darkens some vertices.
+        let colors_with = |occlusion: bool| -> Vec<crate::math::Color> {
+            let mesher = BlockyMesher::new(library.clone()).with_occlusion(occlusion, 0.8);
+            let mut output = MesherOutput::default();
+            mesher.build(&mut output, &input);
+            match &output.surfaces[0].arrays {
+                SurfaceArrays::Blocky(arrays) => arrays.colors.clone(),
+                _ => unreachable!(),
+            }
+        };
+        let ao_off = colors_with(false);
+        let ao_on = colors_with(true);
+        assert_eq!(ao_off.len(), ao_on.len());
+        assert!(
+            ao_on
+                .iter()
+                .zip(&ao_off)
+                .any(|(with, without)| with != without),
+            "enabled occlusion must darken at least one vertex"
+        );
     }
 
     #[test]

@@ -2632,11 +2632,9 @@ impl VoxelToolTerrainGD {
 /// Result of a voxel raycast. Contains hit position, previous position,
 /// and distance along the ray.
 ///
-/// The pinned GDScript-facing properties (`normal`, `position`,
+/// The pinned GDScript-facing properties (`distance`, `normal`, `position`,
 /// `previous_position`) mirror upstream `VoxelRaycastResult` (5828cbeb). They
-/// are read-only getters (no setter) composing the existing integer fields.
-/// The pinned `distance` property is provided by the existing `distance`
-/// field's auto-generated getter.
+/// are read-only getters (no setter) composing the integer fields.
 #[derive(GodotClass)]
 #[class(base = RefCounted, tool, rename = VoxelRaycastResult)]
 pub struct VoxelRaycastResultGD {
@@ -2653,7 +2651,6 @@ pub struct VoxelRaycastResultGD {
     prev_y: i32,
     #[var]
     prev_z: i32,
-    #[var]
     distance: f32,
     #[var]
     normal_x: i32,
@@ -2661,6 +2658,9 @@ pub struct VoxelRaycastResultGD {
     normal_y: i32,
     #[var]
     normal_z: i32,
+    /// The pinned GDScript-facing read-only `distance` property.
+    #[var(get = get_distance, no_set)]
+    distance_prop: PhantomVar<f32>,
     /// The pinned GDScript-facing read-only `normal` property.
     #[var(get = get_normal, no_set)]
     normal_prop: PhantomVar<Vector3>,
@@ -2670,6 +2670,36 @@ pub struct VoxelRaycastResultGD {
     /// The pinned GDScript-facing read-only `previous_position` property.
     #[var(get = get_previous_position, no_set)]
     previous_position_prop: PhantomVar<godot::builtin::Vector3i>,
+}
+
+/// Pack a core raycast hit into the pinned `VoxelRaycastResult` member tuple
+/// `(distance, normal, position, previous_position)`. Producers (the
+/// `VoxelTool.raycast` binding, staged later) fill a result's fields from this
+/// tuple; the field mapping here is the engine-free contract the tests pin
+/// down.
+#[allow(dead_code)] // producers land in a later stage; tests exercise it now
+pub(crate) fn raycast_result_from_hit(
+    hit: &voxel_core::edition::raycast::VoxelRaycastHit,
+) -> (
+    f32,
+    Vector3,
+    godot::builtin::Vector3i,
+    godot::builtin::Vector3i,
+) {
+    (
+        hit.distance,
+        Vector3::new(
+            hit.normal.x as f32,
+            hit.normal.y as f32,
+            hit.normal.z as f32,
+        ),
+        godot::builtin::Vector3i::new(hit.position.x, hit.position.y, hit.position.z),
+        godot::builtin::Vector3i::new(
+            hit.previous_position.x,
+            hit.previous_position.y,
+            hit.previous_position.z,
+        ),
+    )
 }
 
 #[godot_api]
@@ -2687,6 +2717,7 @@ impl IRefCounted for VoxelRaycastResultGD {
             normal_x: 0,
             normal_y: 0,
             normal_z: 0,
+            distance_prop: PhantomVar::default(),
             normal_prop: PhantomVar::default(),
             position_prop: PhantomVar::default(),
             previous_position_prop: PhantomVar::default(),
@@ -2714,6 +2745,13 @@ impl VoxelRaycastResultGD {
     // (upstream 5828cbeb: VoxelRaycastResult.xml).
     // -----------------------------------------------------------------
 
+    /// Distance between the origin of the ray and the surface of the cube
+    /// representing the hit voxel (upstream default `0.0`).
+    #[func]
+    fn get_distance(&self) -> f32 {
+        self.distance
+    }
+
     /// Unit vector pointing away from the surface that was hit (upstream
     /// default `Vector3(0, 0, 0)`). Only available when the producing
     /// `VoxelTool` was configured to compute normals.
@@ -2738,6 +2776,60 @@ impl VoxelRaycastResultGD {
     #[func]
     fn get_previous_position(&self) -> godot::builtin::Vector3i {
         godot::builtin::Vector3i::new(self.prev_x, self.prev_y, self.prev_z)
+    }
+}
+
+/// Engine-free tests for the pinned `VoxelRaycastResult` member mapping.
+/// `raycast_result_from_hit` is the producer-side contract; it only touches
+/// voxel-core hits and Godot builtin values, so no Godot runtime is needed.
+#[cfg(test)]
+mod raycast_result_tests {
+    use super::raycast_result_from_hit;
+    use godot::builtin::Vector3i as GdVector3i;
+    use godot::prelude::Vector3;
+    use voxel_core::edition::raycast::voxel_raycast;
+    use voxel_core::edition::raycast::VoxelRaycastHit;
+    use voxel_core::math::{Vector3f, Vector3i};
+
+    #[test]
+    fn raycast_result_defaults_match_pinned_members() {
+        // A freshly-initialized result carries all-zero fields, so packing a
+        // zero hit must yield exactly the pinned upstream member defaults:
+        // distance 0.0, normal Vector3(0,0,0), position Vector3i(0,0,0),
+        // previous_position Vector3i(0,0,0).
+        let zero_hit = VoxelRaycastHit {
+            position: Vector3i::new(0, 0, 0),
+            previous_position: Vector3i::new(0, 0, 0),
+            distance: 0.0,
+            normal: Vector3i::new(0, 0, 0),
+        };
+        let (distance, normal, position, previous_position) = raycast_result_from_hit(&zero_hit);
+        assert_eq!(distance, 0.0);
+        assert_eq!(normal, Vector3::new(0.0, 0.0, 0.0));
+        assert_eq!(position, GdVector3i::new(0, 0, 0));
+        assert_eq!(previous_position, GdVector3i::new(0, 0, 0));
+    }
+
+    #[test]
+    fn raycast_result_packs_core_hit() {
+        // Mirrors the core test raycast.rs#raycast_hits_solid_voxel_along_x:
+        // from (0.5, 0.5, 0.5) along +X, the ray hits voxel (3, 0, 0) after
+        // passing through (2, 0, 0), entering through its -X face.
+        let hit = voxel_raycast(
+            Vector3f::new(0.5, 0.5, 0.5),
+            Vector3f::new(1.0, 0.0, 0.0),
+            100.0,
+            |state| state.position == Vector3i::new(3, 0, 0),
+        )
+        .expect("ray along +X must reach voxel (3,0,0)");
+        let (distance, normal, position, previous_position) = raycast_result_from_hit(&hit);
+        assert!(
+            distance > 0.0,
+            "hit distance must be positive (got {distance})"
+        );
+        assert_eq!(normal, Vector3::new(-1.0, 0.0, 0.0));
+        assert_eq!(position, GdVector3i::new(3, 0, 0));
+        assert_eq!(previous_position, GdVector3i::new(2, 0, 0));
     }
 }
 
