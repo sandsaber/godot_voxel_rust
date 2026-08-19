@@ -187,9 +187,18 @@ the plan):
       substitution + encoded node trees), ZN_FastNoiseLite (warp_noise needs
       the deferred ZN_FastNoiseLiteGradient). Two multi-role review rounds
       preceded the merge.)
-- [ ] **Stage 2 — Meshers & serialization**: `VoxelMesher`, the cubes /
-      blocky mesher classes, `VoxelBlockSerializer`, `VoxelColorPalette`,
-      `VoxelRaycastResult`
+- [x] **Stage 2 — Meshers & serialization** ✅ (5 of 7 flipped `complete`:
+      VoxelMesher, VoxelMesherCubes, VoxelColorPalette, VoxelRaycastResult,
+      VoxelBlockSerializer — ZSTD round-trips behind the optional feature,
+      loudly rejected in the default pure-Rust build. Transvoxel and Blocky
+      stay strong partial: 100% pinned surface + honored knobs
+      (edge_clamp_margin, transitions_enabled, materials fallback), with
+      texturing modes / mesh optimizer / tint / shadow occluders recorded as
+      deferred core fronts. Two multi-role review rounds preceded the merge.
+      Follow-up found by round 2 for Stages 4/5: pre-existing PhantomVars
+      registered under suffixed names (`*_var`/`*_prop`) mask the pinned
+      properties on VoxelTerrain (9 fields) and VoxelBlockyTypeLibrary
+      (`_id_map_data`) — fix with those cohorts.)
 - [ ] **Stage 3 — Streams**: `VoxelStream` and stream implementations still
       `partial`
 - [ ] **Stage 4 — Terrain nodes & engine**: `VoxelNode`, the terrain nodes,

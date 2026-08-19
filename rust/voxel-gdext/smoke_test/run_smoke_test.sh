@@ -129,39 +129,44 @@ echo ">> copied $SRC -> $DST ($(wc -c < "$DST") bytes)"
 ls -l "$DST" "$SCRIPT_DIR/voxel_gdext.gdextension"
 
 echo
-echo ">> [1/7] API test (class registration + func surface)..."
+echo ">> [1/8] API test (class registration + func surface)..."
 run_godot_check "API" \
 	"$GODOT" --headless --path "$SCRIPT_DIR" --verbose api_test.tscn
 
 echo
-echo ">> [2/7] runtime paging test (terrain + generator + viewer, real frames)..."
+echo ">> [2/8] runtime paging test (terrain + generator + viewer, real frames)..."
 run_godot_check "runtime paging" \
 	"$GODOT" --headless --path "$SCRIPT_DIR" runtime_scene.tscn
 
 echo
-echo ">> [3/7] smoke scene (VoxelTerrain node in a scene)..."
+echo ">> [3/8] smoke scene (VoxelTerrain node in a scene)..."
 run_godot_check "smoke scene" \
 	"$GODOT" --headless --path "$SCRIPT_DIR" smoke_test.tscn
 
 echo
-echo ">> [4/7] runtime correctness (remesh + unload + safety + persistence)..."
+echo ">> [4/8] runtime correctness (remesh + unload + safety + persistence)..."
 run_godot_check "runtime correctness" \
 	"$GODOT" --headless --path "$SCRIPT_DIR" runtime_correctness.tscn
 
 echo
-echo ">> [5/7] 3-LOD Variable LOD integration (multi-LOD paging, split/join, negatives)..."
+echo ">> [5/8] 3-LOD Variable LOD integration (multi-LOD paging, split/join, negatives)..."
 run_godot_check "variable lod 3" \
 	"$GODOT" --headless --path "$SCRIPT_DIR" variable_lod_3.tscn
 
 echo
-echo ">> [6/7] blocky library on terrain (type channel + baked cube)..."
+echo ">> [6/8] blocky library on terrain (type channel + baked cube)..."
 run_godot_check "blocky terrain" \
 	"$GODOT" --headless --path "$SCRIPT_DIR" blocky_terrain.tscn
 
 echo
-echo ">> [7/7] instancer streaming on terrain (per-block spawn + unload)..."
+echo ">> [7/8] instancer streaming on terrain (per-block spawn + unload)..."
 run_godot_check "instancer streaming" \
 	"$GODOT" --headless --path "$SCRIPT_DIR" instancer_streaming.tscn
+
+echo
+echo ">> [8/8] mesher API (base paddings, transvoxel, cubes, blocky, palette)..."
+run_godot_check "mesher api" \
+	"$GODOT" --headless --path "$SCRIPT_DIR" mesher_api.tscn
 
 echo
 echo ">> all smoke tests complete"

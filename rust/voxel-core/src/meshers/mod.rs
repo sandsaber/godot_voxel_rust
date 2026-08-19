@@ -12,7 +12,7 @@ pub mod mesh_block_task;
 pub mod transvoxel;
 pub mod voxel_mesher;
 
-pub use builtin::{BlockyMesher, CubesMesher, TransvoxelMesher};
+pub use builtin::{BlockyMesher, CubesColorMode, CubesMesher, TransvoxelMesher};
 pub use mesh_block_task::{
     gather_voxels_cpu, BlockMeshOutput, MeshBlockKey, MeshBlockLocation, MeshBlockTask,
     MeshBlockTaskOutput, MeshBlockTaskParams, MeshBuildFeatures, MeshUploadSnapshot, PayloadState,

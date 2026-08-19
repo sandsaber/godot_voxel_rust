@@ -12,8 +12,8 @@
   "deferred": "The canonical feature is intentionally unavailable or has no functional binding yet."
  },
  "status_counts": {
-  "complete": 10,
-  "partial": 49,
+  "complete": 15,
+  "partial": 44,
   "deferred": 14
  },
  "classes": [
@@ -48,15 +48,20 @@
   },
   {
    "name": "VoxelBlockSerializer",
-   "status": "partial",
+   "status": "complete",
    "binding_state": "registered",
    "registered_name": "VoxelBlockSerializer",
-   "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
+   "evidence": "Pinned surface complete: all four static methods and three compression constants route through the parity-tested v4 core codec via engine-free free functions (tested path == production path). NONE and LZ4 round-trip voxel data (LZ4 smaller on compressible input); the stream-peer variants carry detailed error messages. ZSTD requires the optional zstd cargo feature, deliberately off in the default pure-Rust build (Android/WASM cross-compilation); without it the API errors loudly (a silent-empty-array bug was fixed this stage) — the codec itself is feature-gated upstream of this class and round-trip-tested in voxel-core when the feature is enabled.",
    "source_paths": [
     "upstream:doc/classes/VoxelBlockSerializer.xml",
     "rust/voxel-gdext/src/resources2.rs"
    ],
-   "behavioral_tests": []
+   "behavioral_tests": [
+    "rust/voxel-gdext/src/resources2.rs#block_serializer_compression_mapping_is_canonical",
+    "rust/voxel-gdext/src/resources2.rs#block_serializer_round_trips_none_and_lz4",
+    "rust/voxel-gdext/src/resources2.rs#block_serializer_rejects_zstd_without_feature",
+    "rust/voxel-gdext/smoke_test/api_test.gd#block_serializer_round_trips_bytes"
+   ]
   },
   {
    "name": "VoxelBlockyAttribute",
@@ -270,15 +275,18 @@
   },
   {
    "name": "VoxelColorPalette",
-   "status": "partial",
+   "status": "complete",
    "binding_state": "registered",
    "registered_name": "VoxelColorPalette",
-   "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
+   "evidence": "Pinned surface complete: canonical set_color(index, Color)/get_color -> Color signatures (out-of-range logs an error and returns Godot's default-constructed opaque black like upstream), colors: PackedColorArray and data: PackedInt32Array registered as properties with the pinned 256-entry default, and MAX_COLORS. Deviation: set_colors/set_data use partial-write semantics where upstream rejects non-256/oversized arrays (documented in the setter). The core palette contract (float round-trips, 0xRRGGBBAA packing) is pinned by core-side unit tests; the binding is covered engine-free and by the smoke driver.",
    "source_paths": [
     "upstream:doc/classes/VoxelColorPalette.xml",
     "rust/voxel-gdext/src/resources.rs"
    ],
-   "behavioral_tests": []
+   "behavioral_tests": [
+    "rust/voxel-gdext/src/resources.rs#palette_index_validation_covers_the_256_entries",
+    "rust/voxel-gdext/smoke_test/mesher_api.gd#palette_properties_and_color_accessors"
+   ]
   },
   {
    "name": "VoxelDataBlockEnterInfo",
@@ -592,54 +600,64 @@
   },
   {
    "name": "VoxelMesher",
-   "status": "partial",
+   "status": "complete",
    "binding_state": "registered",
    "registered_name": "VoxelMesher",
-   "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
+   "evidence": "Pinned surface complete: build_mesh (abstract base errors and returns null, faithful to upstream's unimplemented base) and both padding getters returning the upstream base defaults 0/0. The padding property and get_category remain as documented extras. Behavioral tests pin the base defaults engine-free and through the smoke driver; concrete meshers re-declare the inherited members (gdext 0.5.4 cannot inherit user-defined classes).",
    "source_paths": [
     "upstream:doc/classes/VoxelMesher.xml",
     "rust/voxel-gdext/src/resources2.rs"
    ],
-   "behavioral_tests": []
+   "behavioral_tests": [
+    "rust/voxel-gdext/src/resources2.rs#mesher_base_padding_defaults_are_zero",
+    "rust/voxel-gdext/smoke_test/mesher_api.gd#base_mesher_padding_defaults"
+   ]
   },
   {
    "name": "VoxelMesherBlocky",
    "status": "partial",
    "binding_state": "registered",
    "registered_name": "VoxelMesherBlocky",
-   "evidence": "set_library + core_mesher() carry a baked VoxelBlockyLibrary into BlockyMesher; VoxelTerrain.resolve_core_mesher uses that mesher. Tint/shadow-occluder properties still do not affect the runtime mesher.",
+   "evidence": "Full pinned surface exposed: both own methods, all ten members, eight constants, re-declared build_mesh and padding getters (1/1) running the configured core mesher; library and occlusion settings genuinely honored (previously build_mesh did not exist and the type channel was unclamped). Remains partial: tint_mode is inert (the color-channel TintSampler is a deferred core port) and the six shadow_occluder_* flags are stored-but-inert (the core shadow-occluder generator exists and is tested, but is not wired into the build/output pipeline).",
    "source_paths": [
     "upstream:doc/classes/VoxelMesherBlocky.xml",
     "rust/voxel-gdext/src/resources.rs"
    ],
    "behavioral_tests": [
+    "rust/voxel-gdext/smoke_test/mesher_api.gd#blocky_build_mesh_with_library",
     "rust/voxel-gdext/smoke_test/blocky_terrain.gd#_ready"
    ]
   },
   {
    "name": "VoxelMesherCubes",
-   "status": "partial",
+   "status": "complete",
    "binding_state": "registered",
    "registered_name": "VoxelMesherCubes",
-   "evidence": "All 6 pinned constants (Materials enum, ColorMode enum) are implemented as #[constant] items; many pinned methods, properties and signals remain only partially exposed.",
+   "evidence": "Pinned surface complete: static generate_mesh_from_image mirrors the upstream C++ implementation (padded w+2 grid, Y-flip, raw 0xRRGGBBAA read, centered origin, voxel_size scaling; rejects compressed images like upstream (additionally rejects empty images and oversized pixel counts as a script-workload budget) and aborts palette-mode builds without a palette, like upstream), set_material_by_index with per-slot material fallback in build_mesh (caller array wins; uncovered slots fall back to the stored opaque/transparent materials, positional — null entries do not shift indices), re-declared build_mesh and padding getters, all five members and six constants. color_mode and palette now forward into the core mesher (previously discarded by the terrain resolver), and COLOR_SHADER_PALETTE maps to a core ShaderPalette mode writing the index in red with palette alpha. The channel default was fixed from Weights(4) to Color(2). Orientation (Y-flip, centering, padding) is pinned live with a non-uniform image; the palette modes are exercised end-to-end through a GD palette resource.",
    "source_paths": [
     "upstream:doc/classes/VoxelMesherCubes.xml",
     "rust/voxel-gdext/src/resources.rs"
    ],
-   "behavioral_tests": []
+   "behavioral_tests": [
+    "rust/voxel-gdext/src/resources.rs#cubes_config_maps_all_color_modes_and_forwards_palette",
+    "rust/voxel-gdext/src/resources.rs#cubes_generate_mesh_from_image_rejects_invalid_inputs",
+    "rust/voxel-gdext/smoke_test/mesher_api.gd#cubes_materials_and_generate_mesh_from_image",
+    "rust/voxel-gdext/smoke_test/mesher_api.gd#cubes_palette_mode_build_mesh"
+   ]
   },
   {
    "name": "VoxelMesherTransvoxel",
    "status": "partial",
    "binding_state": "registered",
    "registered_name": "VoxelMesherTransvoxel",
-   "evidence": "The Rust mesher is used by the runtime and all 3 valid pinned constants (TexturingMode enum, excluding the deprecated TEXTURES_BLEND_4_OVER_16) are implemented as #[constant] items, but the pinned Godot resource API remains incomplete.",
+   "evidence": "Full pinned surface exposed: all seven members with pinned defaults, three TEXTURES_* constants (the deprecated TEXTURES_BLEND_4_OVER_16 alias is intentionally not registered), build_transition_mesh (per-direction, validated 0..=5), re-declared build_mesh and padding getters (1/2). sdf_channel, edge_clamp_margin (GD default 0.02, core default kept 0.0 so C++ parity goldens are unaffected) and transitions_enabled now genuinely drive the core mesher — the terrain resolver previously discarded the whole config. Remains partial: texturing_mode 1/2 and textures_ignore_air_voxels are stored-but-inert (core texturing machinery exists but is not wired into the regular/transition kernels) and the three mesh_optimization_* properties are inert (no optimizer in voxel-core) — both are large deferred core fronts.",
    "source_paths": [
     "upstream:doc/classes/VoxelMesherTransvoxel.xml",
     "rust/voxel-gdext/src/resources.rs"
    ],
    "behavioral_tests": [
-    "rust/voxel-gdext/smoke_test/runtime_correctness.gd#_mesh_has_transvoxel_custom0"
+    "rust/voxel-gdext/src/resources.rs#transvoxel_core_mesher_from_config_maps_all_fields",
+    "rust/voxel-gdext/smoke_test/mesher_api.gd#transvoxel_build_mesh_and_transition_mesh"
    ]
   },
   {
@@ -692,15 +710,19 @@
   },
   {
    "name": "VoxelRaycastResult",
-   "status": "partial",
+   "status": "complete",
    "binding_state": "registered",
    "registered_name": "VoxelRaycastResult",
-   "evidence": "The canonical class is registered, but its pinned methods, properties, signals or runtime semantics are only partially exposed.",
+   "evidence": "Pinned surface complete: all four members (distance, normal, position, previous_position) registered read-only under their pinned property names — the PhantomVars previously registered as *_prop, breaking result.distance from GDScript; fixed and covered live. The core-hit field mapping future producers will use (voxel_raycast -> distance/normal/position/previous) is an engine-free tested contract. No producer constructs this class yet (VoxelTool.raycast is deferred, Stage 6); the pinned surface contains only the members, which are complete and behavior-tested through the engine.",
    "source_paths": [
     "upstream:doc/classes/VoxelRaycastResult.xml",
     "rust/voxel-gdext/src/voxel_buffer.rs"
    ],
-   "behavioral_tests": []
+   "behavioral_tests": [
+    "rust/voxel-gdext/smoke_test/mesher_api.gd#raycast_result_members",
+    "rust/voxel-gdext/src/voxel_buffer.rs#raycast_result_packs_core_hit",
+    "rust/voxel-gdext/src/voxel_buffer.rs#raycast_result_pack_fn_maps_zero_hit_to_member_defaults"
+   ]
   },
   {
    "name": "VoxelSaveCompletionTracker",

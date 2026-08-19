@@ -57,6 +57,15 @@ impl ColorPalette {
         self.colors[index].to_color()
     }
 
+    /// Bulk float-color setter matching the pinned `colors` property
+    /// (`set_colors(PackedColorArray)`): writes up to `colors.len()` entries
+    /// and leaves the remainder untouched (mirroring `set_from_u32_array`).
+    pub fn set_colors(&mut self, colors: &[Color]) {
+        for (index, &color) in colors.iter().take(PALETTE_SIZE).enumerate() {
+            self.colors[index] = Color8::from_color(color);
+        }
+    }
+
     /// `clear` — reset all entries to the default `Color8` (transparent black).
     pub fn clear(&mut self) {
         for c in &mut self.colors {
@@ -150,5 +159,61 @@ mod tests {
         assert_eq!(p.get_color8(1), Color8::from_u32(0x55667788));
         // Index 2 untouched from default.
         assert_eq!(p.get_color8(2), Color8::new(0, 0, 0, 255));
+    }
+
+    /// Pinned `VoxelColorPalette` contract: `set_color(int, Color)` /
+    /// `get_color(int) -> Color` round-trip float colors through the internal
+    /// 8-bit storage.
+    #[test]
+    fn color_palette_contract_round_trips_colors() {
+        let mut p = ColorPalette::default();
+        let samples = [
+            (0usize, Color::new(1.0, 0.0, 0.0, 1.0)),
+            (1, Color::new(0.0, 1.0, 0.0, 0.5)),
+            (42, Color::new(0.25, 0.5, 0.75, 0.125)),
+            (255, Color::new(0.0, 0.0, 0.0, 0.0)),
+        ];
+        for &(index, color) in &samples {
+            p.set_color(index, color);
+        }
+        for &(index, color) in &samples {
+            let got = p.get_color(index);
+            assert!((got.r - color.r).abs() <= 1.0 / 255.0, "r at {index}");
+            assert!((got.g - color.g).abs() <= 1.0 / 255.0, "g at {index}");
+            assert!((got.b - color.b).abs() <= 1.0 / 255.0, "b at {index}");
+            assert!((got.a - color.a).abs() <= 1.0 / 255.0, "a at {index}");
+        }
+    }
+
+    /// Pinned `VoxelColorPalette.data` default:
+    /// `[0, 0xFFFFFFFF, 255 × 254]` packed as `0xRRGGBBAA` (index 0
+    /// transparent black, index 1 opaque white, indices 2.. opaque black).
+    #[test]
+    fn color_palette_data_matches_pinned_default() {
+        let data = ColorPalette::default().to_u32_array();
+        assert_eq!(data.len(), 256);
+        assert_eq!(data[0], 0x0000_0000);
+        assert_eq!(data[1], 0xFFFF_FFFF);
+        for &value in &data[2..] {
+            assert_eq!(value, 0x0000_00FF, "opaque black packed as 0xRRGGBBAA");
+        }
+    }
+
+    /// Pinned `colors` property semantics: a partial `set_colors` list writes
+    /// only the provided entries and leaves the rest untouched; `data` packs
+    /// each entry as `0xRRGGBBAA`.
+    #[test]
+    fn color_palette_set_colors_partial_and_data_packing() {
+        let mut p = ColorPalette::default();
+        p.set_colors(&[
+            Color::new(1.0, 0.0, 0.0, 1.0), // 0xFF0000FF
+            Color::new(0.0, 1.0, 0.0, 0.5), // 0x00FF007F (truncating conversion)
+        ]);
+        let data = p.to_u32_array();
+        assert_eq!(data[0], 0xFF00_00FF);
+        assert_eq!(data[1], 0x00FF_007F);
+        // Untouched entries keep the default pattern.
+        assert_eq!(data[2], 0x0000_00FF);
+        assert_eq!(data[255], 0x0000_00FF);
     }
 }

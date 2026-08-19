@@ -457,11 +457,18 @@ impl VoxelStreamGD {
 // ---------------------------------------------------------------------------
 // VoxelMesherGD — abstract base Resource for all meshers
 // ---------------------------------------------------------------------------
+/// Upstream `VoxelMesher` base padding defaults: the abstract class reports 0
+/// for both paddings; only concrete meshers know their real requirements.
+pub(crate) const MESHER_BASE_MINIMUM_PADDING: i32 = 0;
+pub(crate) const MESHER_BASE_MAXIMUM_PADDING: i32 = 0;
+
 /// Abstract base resource for voxel meshers. Subclasses: Transvoxel, Blocky, Cubes.
 #[derive(GodotClass)]
 #[class(base = Resource, tool, rename = VoxelMesher)]
 pub struct VoxelMesherGD {
     base: Base<Resource>,
+    /// Extra legacy knob, not part of the pinned upstream surface: the base
+    /// class has no `padding` property upstream (its `get_*_padding` report 0).
     #[var]
     padding: i32,
 }
@@ -483,19 +490,21 @@ impl VoxelMesherGD {
     // ----- Canonical pinned methods (upstream 5828cbeb: VoxelMesher.xml) -----
 
     /// Minimum padding the mesher needs before the lower corner of the build
-    /// region. The abstract base reports `0`; concrete meshers override this.
-    /// Matches `VoxelMesher::get_minimum_padding`.
+    /// region. The abstract base reports `0`; concrete meshers override this
+    /// with their algorithm-specific requirement. Matches
+    /// `VoxelMesher::get_minimum_padding`.
     #[func]
     fn get_minimum_padding(&self) -> i32 {
-        self.padding.max(0)
+        MESHER_BASE_MINIMUM_PADDING
     }
 
     /// Maximum padding the mesher needs after the upper corner of the build
-    /// region. The abstract base reports its `padding` field; concrete meshers
-    /// may override this. Matches `VoxelMesher::get_maximum_padding`.
+    /// region. The abstract base reports `0`; concrete meshers override this
+    /// with their algorithm-specific requirement. Matches
+    /// `VoxelMesher::get_maximum_padding`.
     #[func]
     fn get_maximum_padding(&self) -> i32 {
-        self.padding.max(0)
+        MESHER_BASE_MAXIMUM_PADDING
     }
 
     /// Build a mesh from a `VoxelBufferGD`. The abstract base cannot produce
@@ -2630,6 +2639,44 @@ impl VoxelBlockRaycastResultGD {
 // ---------------------------------------------------------------------------
 // VoxelBlockSerializerGD — RefCounted for block save/load
 // ---------------------------------------------------------------------------
+
+/// Engine-free codec path shared by the pinned `VoxelBlockSerializer`
+/// `#[func]`s (and their tests): resolve the GDScript `Compression` enum
+/// (0 = none, 1 = LZ4, 2 = ZSTD), then run the core v4 block codec, optionally
+/// wrapped in a compression envelope. Errors carry the core `Display` string
+/// so the Godot-side wrappers can report them loudly.
+pub(crate) fn serialize_core_buffer(
+    buffer: &voxel_core::storage::VoxelBuffer,
+    compress: i64,
+) -> Result<Vec<u8>, String> {
+    let compression = VoxelBlockSerializerGD::resolve_compression(compress)
+        .map_err(|()| format!("invalid compression mode ({compress})"))?;
+    let mut data = Vec::new();
+    let result = match compression {
+        Some(mode) => {
+            voxel_core::streams::block_serializer::serialize_and_compress(buffer, &mut data, mode)
+        }
+        None => voxel_core::streams::block_serializer::serialize(buffer, &mut data),
+    };
+    result.map(|_| data).map_err(|e| e.to_string())
+}
+
+/// Engine-free codec path shared by the pinned `VoxelBlockSerializer`
+/// `#[func]`s (and their tests): load `bytes` into `buffer`, decompressing the
+/// envelope first when `decompress` is set.
+pub(crate) fn deserialize_bytes_into(
+    buffer: &mut voxel_core::storage::VoxelBuffer,
+    bytes: &[u8],
+    decompress: bool,
+) -> Result<(), String> {
+    let result = if decompress {
+        voxel_core::streams::block_serializer::decompress_and_deserialize(bytes, buffer)
+    } else {
+        voxel_core::streams::block_serializer::deserialize(bytes, buffer)
+    };
+    result.map_err(|e| e.to_string())
+}
+
 /// Utility for serializing/deserializing voxel blocks to/from bytes.
 /// Wraps [`voxel_core::streams::block_serializer`] with a real VoxelBuffer.
 #[derive(GodotClass)]
@@ -2775,36 +2822,15 @@ impl VoxelBlockSerializerGD {
         compress: i64,
     ) -> PackedByteArray {
         let bound = voxel_buffer.bind();
-        let core = bound.core_buffer();
-        let compression = match Self::resolve_compression(compress) {
-            Ok(mode) => mode,
-            Err(()) => {
-                drop(bound);
-                godot_error!(
-                    "VoxelBlockSerializer.serialize_to_byte_array: invalid compression mode ({compress})"
-                );
-                return PackedByteArray::new();
-            }
-        };
-        if let Some(compression) = compression {
-            let mut data = Vec::new();
-            let result = voxel_core::streams::block_serializer::serialize_and_compress(
-                core,
-                &mut data,
-                compression,
-            );
-            drop(bound);
-            match result {
-                Ok(_) => PackedByteArray::from(data.as_slice()),
-                Err(_) => PackedByteArray::new(),
-            }
-        } else {
-            let mut data = Vec::new();
-            let result = voxel_core::streams::block_serializer::serialize(core, &mut data);
-            drop(bound);
-            match result {
-                Ok(_) => PackedByteArray::from(data.as_slice()),
-                Err(_) => PackedByteArray::new(),
+        let result = serialize_core_buffer(bound.core_buffer(), compress);
+        drop(bound);
+        // Errors (including ZSTD without the cargo feature) must surface in the
+        // Godot console — never a silently empty array.
+        match result {
+            Ok(data) => PackedByteArray::from(data.as_slice()),
+            Err(message) => {
+                godot_error!("VoxelBlockSerializer.serialize_to_byte_array: {message}");
+                PackedByteArray::new()
             }
         }
     }
@@ -2819,17 +2845,10 @@ impl VoxelBlockSerializerGD {
     ) {
         let raw = bytes.as_slice();
         let mut bound = voxel_buffer.bind_mut();
-        let core = bound.core_buffer_mut();
-        let result = if decompress {
-            voxel_core::streams::block_serializer::decompress_and_deserialize(raw, core)
-        } else {
-            voxel_core::streams::block_serializer::deserialize(raw, core)
-        };
-        if result.is_err() {
-            drop(bound);
-            godot_error!(
-                "VoxelBlockSerializer.deserialize_from_byte_array: failed to deserialize VoxelBuffer"
-            );
+        let result = deserialize_bytes_into(bound.core_buffer_mut(), raw, decompress);
+        drop(bound);
+        if let Err(message) = result {
+            godot_error!("VoxelBlockSerializer.deserialize_from_byte_array: {message}");
         }
     }
 
@@ -2842,34 +2861,15 @@ impl VoxelBlockSerializerGD {
         compress: i64,
     ) -> i64 {
         let bound = voxel_buffer.bind();
-        let core = bound.core_buffer();
-        let compression = match Self::resolve_compression(compress) {
-            Ok(mode) => mode,
-            Err(()) => {
-                drop(bound);
-                godot_error!(
-                    "VoxelBlockSerializer.serialize_to_stream_peer: invalid compression mode ({compress})"
-                );
+        let result = serialize_core_buffer(bound.core_buffer(), compress);
+        drop(bound);
+        let data = match result {
+            Ok(data) => data,
+            Err(message) => {
+                godot_error!("VoxelBlockSerializer.serialize_to_stream_peer: {message}");
                 return -1;
             }
         };
-        let mut data = Vec::new();
-        let result = if let Some(compression) = compression {
-            voxel_core::streams::block_serializer::serialize_and_compress(
-                core,
-                &mut data,
-                compression,
-            )
-        } else {
-            voxel_core::streams::block_serializer::serialize(core, &mut data)
-        };
-        drop(bound);
-        if result.is_err() {
-            godot_error!(
-                "VoxelBlockSerializer.serialize_to_stream_peer: failed to serialize VoxelBuffer"
-            );
-            return -1;
-        }
         let written = data.len();
         let payload = PackedByteArray::from(data.as_slice());
         let mut peer = peer;
@@ -2922,17 +2922,10 @@ impl VoxelBlockSerializerGD {
         };
         let bytes = payload.as_slice();
         let mut bound = voxel_buffer.bind_mut();
-        let core = bound.core_buffer_mut();
-        let result = if decompress {
-            voxel_core::streams::block_serializer::decompress_and_deserialize(bytes, core)
-        } else {
-            voxel_core::streams::block_serializer::deserialize(bytes, core)
-        };
-        if result.is_err() {
-            drop(bound);
-            godot_error!(
-                "VoxelBlockSerializer.deserialize_from_stream_peer: failed to deserialize VoxelBuffer"
-            );
+        let result = deserialize_bytes_into(bound.core_buffer_mut(), bytes, decompress);
+        drop(bound);
+        if let Err(message) = result {
+            godot_error!("VoxelBlockSerializer.deserialize_from_stream_peer: {message}");
         }
     }
 
@@ -2951,6 +2944,141 @@ impl VoxelBlockSerializerGD {
             )),
             _ => Err(()),
         }
+    }
+}
+
+/// Engine-free tests for the pinned `VoxelBlockSerializer` surface. The
+/// helpers under test (`serialize_core_buffer`, `deserialize_bytes_into`,
+/// `VoxelBlockSerializerGD::resolve_compression`) are the exact codec path the
+/// `#[func]` wrappers run; they only touch voxel-core types, so no Godot
+/// runtime is needed.
+#[cfg(test)]
+mod block_serializer_tests {
+    use super::{deserialize_bytes_into, serialize_core_buffer, VoxelBlockSerializerGD};
+    use voxel_core::math::Vector3i;
+    use voxel_core::storage::{ChannelId, VoxelBuffer, VoxelFormat};
+    use voxel_core::streams::block_serializer::BLOCK_FORMAT_VERSION;
+    use voxel_core::streams::compressed_data::Compression;
+
+    /// A 16³ buffer configured the way the engine configures runtime blocks
+    /// (`VoxelFormat`: 16-bit Type/SDF, 8-bit Color): a solid half-space in the
+    /// Type channel plus a distinct SDF value along the diagonal. The Type runs
+    /// make the block compressible; the diagonal keeps it non-uniform.
+    fn core_block() -> VoxelBuffer {
+        let mut buffer = VoxelBuffer::with_size(Vector3i::splat(16));
+        VoxelFormat::new().configure_buffer(&mut buffer);
+        for y in 0..8 {
+            for z in 0..16 {
+                for x in 0..16 {
+                    buffer.set_voxel(3, x, y, z, ChannelId::Type.index());
+                }
+            }
+        }
+        for i in 0..16 {
+            buffer.set_voxel(i as u64, i, i, i, ChannelId::Sdf.index());
+        }
+        buffer
+    }
+
+    /// Every voxel of the Type and SDF channels must match between two blocks.
+    fn assert_same_voxels(a: &VoxelBuffer, b: &VoxelBuffer) {
+        assert_eq!(a.size(), b.size(), "restored size must match");
+        for channel in [ChannelId::Type, ChannelId::Sdf] {
+            let ci = channel.index();
+            for z in 0..a.size().z {
+                for y in 0..a.size().y {
+                    for x in 0..a.size().x {
+                        assert_eq!(
+                            a.get_voxel(x, y, z, ci),
+                            b.get_voxel(x, y, z, ci),
+                            "{channel:?} voxel at ({x},{y},{z}) differs"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn block_serializer_compression_mapping_is_canonical() {
+        // Pinned XML: COMPRESSION_NONE = 0, COMPRESSION_LZ4 = 1,
+        // COMPRESSION_ZSTD = 2; anything else is invalid.
+        assert_eq!(VoxelBlockSerializerGD::COMPRESSION_NONE, 0);
+        assert_eq!(VoxelBlockSerializerGD::COMPRESSION_LZ4, 1);
+        assert_eq!(VoxelBlockSerializerGD::COMPRESSION_ZSTD, 2);
+
+        assert_eq!(
+            VoxelBlockSerializerGD::resolve_compression(VoxelBlockSerializerGD::COMPRESSION_NONE),
+            Ok(None)
+        );
+        assert_eq!(
+            VoxelBlockSerializerGD::resolve_compression(VoxelBlockSerializerGD::COMPRESSION_LZ4),
+            Ok(Some(Compression::Lz4))
+        );
+        assert_eq!(
+            VoxelBlockSerializerGD::resolve_compression(VoxelBlockSerializerGD::COMPRESSION_ZSTD),
+            Ok(Some(Compression::Zstd))
+        );
+        for bad in [3, -1, i64::MAX] {
+            assert_eq!(VoxelBlockSerializerGD::resolve_compression(bad), Err(()));
+        }
+    }
+
+    #[test]
+    fn block_serializer_round_trips_none_and_lz4() {
+        let source = core_block();
+
+        // NONE: the raw v4 stream. Its first byte is the block format version
+        // (canonical version 4, same as upstream C++ 5828cbeb).
+        let none_bytes = serialize_core_buffer(&source, VoxelBlockSerializerGD::COMPRESSION_NONE)
+            .expect("uncompressed serialize succeeds");
+        assert_eq!(none_bytes.first(), Some(&BLOCK_FORMAT_VERSION));
+        assert_eq!(none_bytes[0], 4);
+
+        let mut restored = VoxelBuffer::with_size(Vector3i::splat(1));
+        deserialize_bytes_into(&mut restored, &none_bytes, false)
+            .expect("uncompressed deserialize succeeds");
+        assert_same_voxels(&source, &restored);
+
+        // LZ4: the envelope round-trips and actually shrinks the run-heavy
+        // block below the uncompressed size.
+        let lz4_bytes = serialize_core_buffer(&source, VoxelBlockSerializerGD::COMPRESSION_LZ4)
+            .expect("lz4 serialize succeeds");
+        let mut restored_lz4 = VoxelBuffer::with_size(Vector3i::splat(1));
+        deserialize_bytes_into(&mut restored_lz4, &lz4_bytes, true)
+            .expect("lz4 deserialize succeeds");
+        assert_same_voxels(&source, &restored_lz4);
+        assert!(
+            lz4_bytes.len() < none_bytes.len(),
+            "lz4 ({} bytes) should beat none ({} bytes) on a run-heavy block",
+            lz4_bytes.len(),
+            none_bytes.len()
+        );
+
+        // Compression mode errors are surfaced, not swallowed: an invalid mode
+        // never reaches the codec.
+        assert_eq!(
+            serialize_core_buffer(&source, 7),
+            Err("invalid compression mode (7)".to_string())
+        );
+    }
+
+    #[test]
+    fn block_serializer_rejects_zstd_without_feature() {
+        // Lead policy: the default pure-Rust build keeps ZSTD unavailable (the
+        // zstd crate bundles a C library, breaking the no-C-deps cross-compile
+        // story), and voxel-gdext never forwards the voxel-core feature — so
+        // every build produced from this workspace has it off. The codec must
+        // fail LOUDLY with the missing-feature error, never return silently
+        // empty bytes. (This test is deliberately not `#[cfg]`-gated: the
+        // feature is not declared on this crate, so gating on it would trip
+        // `unexpected_cfgs`.)
+        let error = serialize_core_buffer(&core_block(), VoxelBlockSerializerGD::COMPRESSION_ZSTD)
+            .expect_err("zstd must fail when the feature is disabled");
+        assert!(
+            error.contains("zstd not compiled in"),
+            "error must name the missing feature, got: {error}"
+        );
     }
 }
 
@@ -5301,5 +5429,19 @@ impl VoxelAStarGrid3DGD {
     #[func]
     fn debug_get_visited_positions(&self) -> Array<Vector3i> {
         self.visited.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MESHER_BASE_MAXIMUM_PADDING, MESHER_BASE_MINIMUM_PADDING};
+
+    /// Pinned `VoxelMesher` base contract: the abstract base reports 0 for
+    /// both paddings; concrete meshers override these with their
+    /// algorithm-specific requirement.
+    #[test]
+    fn mesher_base_padding_defaults_are_zero() {
+        assert_eq!(MESHER_BASE_MINIMUM_PADDING, 0);
+        assert_eq!(MESHER_BASE_MAXIMUM_PADDING, 0);
     }
 }

@@ -238,7 +238,7 @@ fn custom0_rgba_float_flags() -> ArrayFormat {
 }
 
 impl PendingRenderSurface {
-    fn from_surface(surface: &Surface) -> Self {
+    pub(crate) fn from_surface(surface: &Surface) -> Self {
         match &surface.arrays {
             SurfaceArrays::Transvoxel(arrays) => Self {
                 material_index: surface.material_index,
@@ -342,6 +342,32 @@ impl PendingRenderSurface {
             .unwrap_or(&self.vertices[..]);
         let indices = self.indices.get(..index_end).unwrap_or(&self.indices[..]);
         (vertices, indices)
+    }
+
+    /// Uniformly transform vertex positions by `p * scale + offset` (used by
+    /// the standalone mesher `build_mesh` entry points, e.g. the cubes
+    /// `generate_mesh_from_image` centering offset + voxel-size scaling).
+    pub(crate) fn transformed(&self, offset: Vector3, scale: f32) -> Self {
+        Self {
+            material_index: self.material_index,
+            vertices: self
+                .vertices
+                .iter()
+                .map(|v| {
+                    Vector3::new(
+                        v.x * scale + offset.x,
+                        v.y * scale + offset.y,
+                        v.z * scale + offset.z,
+                    )
+                })
+                .collect(),
+            normals: self.normals.clone(),
+            colors: self.colors.clone(),
+            uvs: self.uvs.clone(),
+            tangents: self.tangents.clone(),
+            custom0: self.custom0.clone(),
+            indices: self.indices.clone(),
+        }
     }
 }
 
@@ -3070,9 +3096,10 @@ pub(crate) fn resolve_core_generator(
     Arc::new(waves)
 }
 
-/// Resolve a Godot mesher resource into a voxel-core mesher. Defaults to
-/// transvoxel when unset or unrecognised. Shared by `VoxelTerrain` and
-/// `VoxelLodTerrain`.
+/// Resolve a Godot mesher resource into a voxel-core mesher, forwarding the
+/// full GD configuration (channels, knobs, palette) instead of discarding it.
+/// Defaults to transvoxel when unset or unrecognised. Shared by `VoxelTerrain`
+/// and `VoxelLodTerrain`.
 pub(crate) fn resolve_core_mesher(
     resource: Option<&Gd<Resource>>,
 ) -> Arc<dyn voxel_core::meshers::VoxelMesher> {
@@ -3080,16 +3107,10 @@ pub(crate) fn resolve_core_mesher(
 
     if let Some(res) = resource {
         if let Ok(mesher) = res.clone().try_cast::<VoxelMesherTransvoxelGD>() {
-            let _ = mesher;
-            return Arc::new(TransvoxelMesher::new());
+            return Arc::new(mesher.bind().core_mesher());
         }
         if let Ok(mesher) = res.clone().try_cast::<VoxelMesherCubesGD>() {
-            let bound = mesher.bind();
-            return Arc::new(
-                voxel_core::meshers::CubesMesher::new()
-                    .with_greedy(bound.is_greedy())
-                    .with_type_channel(bound.color_channel_index().max(0) as usize),
-            );
+            return Arc::new(mesher.bind().core_mesher());
         }
         if let Ok(mesher) = res.clone().try_cast::<VoxelMesherBlockyGD>() {
             return mesher.bind().core_mesher();
@@ -3340,6 +3361,20 @@ fn replace_mesh_on_instance(
 }
 
 fn build_array_mesh(surfaces: &[PendingRenderSurface]) -> Option<Gd<ArrayMesh>> {
+    build_array_mesh_with_materials(surfaces, &[])
+}
+
+/// Assemble an `ArrayMesh` from resolved render surfaces, optionally
+/// attaching one `Material` per surface (`materials` is indexed by each
+/// surface's core `material_index` as positional slots: `None` entries and
+/// missing tail slots are left unassigned). Shared by the terrain render
+/// path (`build_array_mesh`, no materials — the terrain applies
+/// `material_override` on the `MeshInstance3D` instead) and the standalone
+/// mesher `build_mesh` funcs.
+pub(crate) fn build_array_mesh_with_materials(
+    surfaces: &[PendingRenderSurface],
+    materials: &[Option<Gd<Material>>],
+) -> Option<Gd<ArrayMesh>> {
     let mut array_mesh = ArrayMesh::new_gd();
     for surface in surfaces {
         if surface.indices.is_empty() {
@@ -3392,12 +3427,35 @@ fn build_array_mesh(surfaces: &[PendingRenderSurface]) -> Option<Gd<ArrayMesh>> 
             surface_index,
             &format!("material_{}", surface.material_index),
         );
+        // Attach the caller-provided material for this surface's slot, if any
+        // (upstream `VoxelMesher.build_mesh` semantics; a null entry or a
+        // missing tail slot leaves the surface unassigned).
+        if let Some(Some(material)) = materials.get(surface.material_index as usize) {
+            array_mesh.surface_set_material(surface_index, material);
+        }
     }
 
     if array_mesh.get_surface_count() == 0 {
         return None;
     }
     Some(array_mesh)
+}
+
+/// Build a standalone `ArrayMesh` from a mesher output, attaching `materials`
+/// per surface slot (positional `Option` slots; `None`/missing entries leave
+/// the surface unassigned). Shared assembly path for the `build_mesh`
+/// `#[func]`s of every mesher resource (Transvoxel/Cubes/Blocky); returns
+/// `None` when the mesher produced no renderable surface.
+pub(crate) fn build_mesh_from_output(
+    output: &voxel_core::meshers::MesherOutput,
+    materials: &[Option<Gd<Material>>],
+) -> Option<Gd<ArrayMesh>> {
+    let surfaces: Vec<PendingRenderSurface> = output
+        .surfaces
+        .iter()
+        .map(PendingRenderSurface::from_surface)
+        .collect();
+    build_array_mesh_with_materials(&surfaces, materials)
 }
 
 /// Builds a trimesh collision body for one block from its regular-only

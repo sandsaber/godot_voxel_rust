@@ -44,6 +44,125 @@ fn validate_shadow_side(side: i64) -> Result<usize, &'static str> {
     Ok(side as usize)
 }
 
+/// Extract the `Material` entries of a GDScript `materials: Material[]`
+/// argument (upstream `VoxelMesher.build_mesh`) as **positional slots**:
+/// result index `i` is the caller's entry `i`, with `None` for null or
+/// non-castable entries. Positions are preserved so a `[null, mat]` array
+/// leaves surface slot 0 without a material instead of shifting `mat` into
+/// slot 0.
+fn materials_from_var_array(materials: &VarArray) -> Vec<Option<Gd<Material>>> {
+    materials
+        .iter_shared()
+        .map(|item| item.try_to::<Gd<Material>>().ok())
+        .collect()
+}
+
+/// Build a core [`voxel_core::meshers::TransvoxelMesher`] from the GD
+/// configuration. Free function so the field mapping is engine-free testable.
+fn transvoxel_core_mesher_from_config(
+    sdf_channel: usize,
+    edge_clamp_margin: f32,
+    transitions_enabled: bool,
+) -> voxel_core::meshers::TransvoxelMesher {
+    voxel_core::meshers::TransvoxelMesher::new()
+        .with_sdf_channel(sdf_channel)
+        .with_edge_clamp_margin(edge_clamp_margin)
+        .with_transitions_enabled(transitions_enabled)
+}
+
+/// Map the pinned `VoxelMesherCubes.ColorMode` constants (0/1/2) onto the
+/// core enum. `None` for values outside the enum.
+fn cubes_color_mode_from_int(mode: i64) -> Option<voxel_core::meshers::CubesColorMode> {
+    use voxel_core::meshers::CubesColorMode;
+    match mode {
+        x if x == VoxelMesherCubesGD::COLOR_RAW => Some(CubesColorMode::Raw),
+        x if x == VoxelMesherCubesGD::COLOR_MESHER_PALETTE => Some(CubesColorMode::Palette),
+        x if x == VoxelMesherCubesGD::COLOR_SHADER_PALETTE => Some(CubesColorMode::ShaderPalette),
+        _ => None,
+    }
+}
+
+/// Mirror of upstream `ERR_FAIL_COND_MSG(params.palette.is_null(), "Palette
+/// mode is used but no palette was specified")` in the cubes build
+/// (`voxel_mesher_cubes.cpp`, both `COLOR_MESHER_PALETTE` and
+/// `COLOR_SHADER_PALETTE` branches): the palette color modes require an
+/// assigned palette resource. Pure function (engine-free testable).
+fn cubes_palette_mode_satisfied(color_mode: i64, has_palette: bool) -> bool {
+    color_mode == VoxelMesherCubesGD::COLOR_RAW || has_palette
+}
+
+/// Build a core [`voxel_core::meshers::CubesMesher`] from the GD
+/// configuration. Free function so the field mapping is engine-free testable.
+fn cubes_core_mesher_from_config(
+    color_mode: i64,
+    greedy: bool,
+    channel: usize,
+    palette: voxel_core::meshers::cubes::palette::ColorPalette,
+) -> voxel_core::meshers::CubesMesher {
+    let mode =
+        cubes_color_mode_from_int(color_mode).unwrap_or(voxel_core::meshers::CubesColorMode::Raw);
+    voxel_core::meshers::CubesMesher::new()
+        .with_color_mode(mode)
+        .with_greedy(greedy)
+        .with_type_channel(channel)
+        .with_palette(palette)
+}
+
+/// Minimum image-side voxel size accepted by `generate_mesh_from_image`
+/// (upstream asserts `voxel_size > 0.001`).
+const MIN_IMAGE_MESH_VOXEL_SIZE: f32 = 0.001;
+
+/// Validate a `generate_mesh_from_image` request. Mirrors the upstream
+/// assertions (valid non-empty uncompressed image, `voxel_size > 0.001`)
+/// plus the `MAX_GENERATED_IMAGE_PIXELS` script workload budget shared with
+/// the other image entry points. Pure function (engine-free testable).
+fn validate_image_mesh_request(
+    width: i32,
+    height: i32,
+    is_empty: bool,
+    is_compressed: bool,
+    voxel_size: f32,
+) -> Result<(), &'static str> {
+    if width <= 0 || height <= 0 || is_empty {
+        return Err("image must be non-empty with positive dimensions");
+    }
+    if is_compressed {
+        return Err("image format not supported: compressed images are rejected");
+    }
+    if i64::from(width) * i64::from(height) > crate::resources3::MAX_GENERATED_IMAGE_PIXELS {
+        return Err("image pixel count exceeds the script workload limit");
+    }
+    if !voxel_size.is_finite() || voxel_size <= MIN_IMAGE_MESH_VOXEL_SIZE {
+        return Err("voxel_size must be finite and greater than 0.001");
+    }
+    Ok(())
+}
+
+/// Map a row-major image pixel index to its X/Y coordinates in the padded
+/// voxel grid used by `generate_mesh_from_image`: X is unchanged, Y is
+/// flipped because image rows grow downwards while world Y grows upwards
+/// (upstream `voxel_mesher_cubes.cpp` comment: "Flip Y axis, since Y goes up
+/// in world space, but Y goes down in Image space"). Pure function
+/// (engine-free testable).
+fn image_pixel_to_padded_xy(index: usize, width: i32, height: i32, padding: i32) -> (i32, i32) {
+    let x = (index % width as usize) as i32;
+    let y = (index / width as usize) as i32;
+    (x + padding, (height - 1 - y) + padding)
+}
+
+/// Pack image pixels (any uncompressed format, already read as float colors)
+/// into raw `0xRRGGBBAA` voxel values for the color channel. Pure function
+/// (engine-free testable).
+fn image_pixels_to_raw_u32(colors: &[Color]) -> Vec<u32> {
+    colors
+        .iter()
+        .map(|c| {
+            voxel_core::math::Color8::from_color(voxel_core::math::Color::new(c.r, c.g, c.b, c.a))
+                .to_u32()
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // VoxelMesherTransvoxelGD — Resource wrapper for TransvoxelMesher config
 // ---------------------------------------------------------------------------
@@ -51,9 +170,21 @@ fn validate_shadow_side(side: i64) -> Result<usize, &'static str> {
 /// Configuration Resource for the transvoxel smooth terrain mesher.
 /// Exposes mesher settings to the Godot inspector.
 ///
-/// Wraps [`voxel_core::meshers::TransvoxelMesher`] — `build_vertex_count` runs
-/// the real transvoxel extraction over a `VoxelBufferGD` and returns the total
-/// vertex count, exercising the full mesher pipeline through the binding.
+/// Wraps [`voxel_core::meshers::TransvoxelMesher`] — `build_mesh`,
+/// `build_transition_mesh`, `build_vertex_count` and `build_triangle_count`
+/// run the real transvoxel extraction over a `VoxelBufferGD`, and the terrain
+/// resolves this resource into the core mesher via `core_mesher`.
+///
+/// Wired into the core mesher: `sdf_channel`, `edge_clamp_margin`,
+/// `transitions_enabled`.
+///
+/// Inert (stored and validated, but with no runtime effect yet):
+/// - `texturing_mode` 1/2 (`TEXTURES_MIXEL4_S4` / `TEXTURES_SINGLE_S4`) and
+///   `textures_ignore_air_voxels` — the core `transvoxel::texturing` material
+///   processors are not yet wired into the regular/transition passes (only
+///   `TEXTURES_NONE` produces data today).
+/// - `mesh_optimization_enabled` / `mesh_optimization_error_threshold` /
+///   `mesh_optimization_target_ratio` — no mesh optimizer is ported yet.
 #[derive(GodotClass)]
 #[class(base = Resource, tool, rename = VoxelMesherTransvoxel)]
 pub struct VoxelMesherTransvoxelGD {
@@ -257,25 +388,106 @@ impl VoxelMesherTransvoxelGD {
         self.transitions_enabled_value = enabled;
     }
 
+    /// Minimum padding required before the lower corner of the build region.
+    /// The transvoxel algorithm requires `MIN_PADDING` (1); re-declared from
+    /// the abstract base, which reports 0. Matches the upstream override.
+    #[func]
+    fn get_minimum_padding(&self) -> i32 {
+        voxel_core::meshers::transvoxel::MIN_PADDING
+    }
+
+    /// Maximum padding required after the upper corner of the build region.
+    /// The transvoxel algorithm requires `MAX_PADDING` (2); re-declared from
+    /// the abstract base, which reports 0. Matches the upstream override.
+    #[func]
+    fn get_maximum_padding(&self) -> i32 {
+        voxel_core::meshers::transvoxel::MAX_PADDING
+    }
+
+    /// Build the transvoxel mesh from a `VoxelBufferGD` into an `ArrayMesh`,
+    /// attaching `materials` per surface slot (upstream
+    /// `VoxelMesher.build_mesh`). `lod_hint` stays off — transition geometry
+    /// only exists between LOD neighbours, so a standalone mesh is
+    /// regular-cells only. Returns `null` on invalid input.
+    #[func]
+    fn build_mesh(
+        &self,
+        voxel_buffer: Gd<RefCounted>,
+        materials: VarArray,
+        _additional_data: VarDictionary,
+    ) -> Option<Gd<godot::classes::ArrayMesh>> {
+        if let Err(error) = validate_mesher_channel(self.sdf_channel) {
+            godot_error!("VoxelMesherTransvoxel.build_mesh: invalid SDF channel: {error}");
+            return None;
+        }
+        let Ok(buf) = voxel_buffer.try_cast::<crate::voxel_buffer::VoxelBufferGD>() else {
+            godot_error!("VoxelMesherTransvoxel.build_mesh: voxel_buffer must be a VoxelBuffer");
+            return None;
+        };
+        let bound = buf.bind();
+        let mesher = self.core_mesher();
+        let input = voxel_core::meshers::MesherInput::new(bound.core_buffer(), Vector3i::zero(), 0);
+        let mut output = voxel_core::meshers::MesherOutput::default();
+        voxel_core::meshers::VoxelMesher::build(&mesher, &mut output, &input);
+        crate::terrain::build_mesh_from_output(&output, &materials_from_var_array(&materials))
+    }
+
+    /// Generates only the part of the mesh that Transvoxel uses to connect
+    /// surfaces with different level of detail, for one `direction`
+    /// (0..=5, one of the block faces). Mainly for testing purposes. Matches
+    /// the pinned `VoxelMesherTransvoxel.build_transition_mesh`.
+    #[func]
+    fn build_transition_mesh(
+        &self,
+        voxel_buffer: Gd<RefCounted>,
+        direction: i64,
+    ) -> Option<Gd<godot::classes::ArrayMesh>> {
+        if let Err(error) = validate_shadow_side(direction) {
+            godot_error!("VoxelMesherTransvoxel.build_transition_mesh: {error}");
+            return None;
+        }
+        if let Err(error) = validate_mesher_channel(self.sdf_channel) {
+            godot_error!(
+                "VoxelMesherTransvoxel.build_transition_mesh: invalid SDF channel: {error}"
+            );
+            return None;
+        }
+        let Ok(buf) = voxel_buffer.try_cast::<crate::voxel_buffer::VoxelBufferGD>() else {
+            godot_error!(
+                "VoxelMesherTransvoxel.build_transition_mesh: voxel_buffer must be a VoxelBuffer"
+            );
+            return None;
+        };
+        let bound = buf.bind();
+        let mesher = self.core_mesher();
+        let input = voxel_core::meshers::MesherInput::new(bound.core_buffer(), Vector3i::zero(), 0);
+        let arrays = mesher.build_transition_mesh_for_direction(&input, direction as u8);
+        let mut output = voxel_core::meshers::MesherOutput::default();
+        output.surfaces.push(voxel_core::meshers::Surface::new(
+            voxel_core::meshers::SurfaceArrays::Transvoxel(arrays),
+            0,
+        ));
+        crate::terrain::build_mesh_from_output(&output, &[])
+    }
+
     /// Build the transvoxel mesh from a `VoxelBufferGD` and return the total
     /// vertex count. `buffer` must be a `VoxelBufferGD`; `lod_hint` toggles
-    /// transition-cell generation on the +X/+Z seam faces.
+    /// transition-cell generation on the seam faces. Honors the full mesher
+    /// configuration (`sdf_channel`, `edge_clamp_margin`,
+    /// `transitions_enabled`) via the same core mesher the terrain uses.
     ///
     /// Returns -1 if `buffer` is not a `VoxelBufferGD`.
     #[func]
     fn build_vertex_count(&self, buffer: Gd<RefCounted>, lod_hint: bool) -> i64 {
-        let sdf_channel = match validate_mesher_channel(self.sdf_channel) {
-            Ok(channel) => channel,
-            Err(error) => {
-                godot_error!("VoxelMesherTransvoxel: invalid SDF channel: {error}");
-                return -1;
-            }
-        };
         let Ok(buf) = buffer.try_cast::<crate::voxel_buffer::VoxelBufferGD>() else {
             return -1;
         };
+        if let Err(error) = validate_mesher_channel(self.sdf_channel) {
+            godot_error!("VoxelMesherTransvoxel: invalid SDF channel: {error}");
+            return -1;
+        }
         let bound = buf.bind();
-        let mesher = voxel_core::meshers::TransvoxelMesher::new().with_sdf_channel(sdf_channel);
+        let mesher = self.core_mesher();
         let mut input =
             voxel_core::meshers::MesherInput::new(bound.core_buffer(), Vector3i::zero(), 0);
         input.lod_hint = lod_hint;
@@ -284,27 +496,48 @@ impl VoxelMesherTransvoxelGD {
         output.total_vertex_count() as i64
     }
 
-    /// Build the transvoxel mesh and return the total triangle count.
+    /// Build the transvoxel mesh and return the total triangle count. Honors
+    /// the full mesher configuration like `build_vertex_count`.
     #[func]
     fn build_triangle_count(&self, buffer: Gd<RefCounted>, lod_hint: bool) -> i64 {
-        let sdf_channel = match validate_mesher_channel(self.sdf_channel) {
-            Ok(channel) => channel,
-            Err(error) => {
-                godot_error!("VoxelMesherTransvoxel: invalid SDF channel: {error}");
-                return -1;
-            }
-        };
         let Ok(buf) = buffer.try_cast::<crate::voxel_buffer::VoxelBufferGD>() else {
             return -1;
         };
+        if let Err(error) = validate_mesher_channel(self.sdf_channel) {
+            godot_error!("VoxelMesherTransvoxel: invalid SDF channel: {error}");
+            return -1;
+        }
         let bound = buf.bind();
-        let mesher = voxel_core::meshers::TransvoxelMesher::new().with_sdf_channel(sdf_channel);
+        let mesher = self.core_mesher();
         let mut input =
             voxel_core::meshers::MesherInput::new(bound.core_buffer(), Vector3i::zero(), 0);
         input.lod_hint = lod_hint;
         let mut output = voxel_core::meshers::MesherOutput::default();
         voxel_core::meshers::VoxelMesher::build(&mesher, &mut output, &input);
         output.total_triangle_count() as i64
+    }
+}
+
+impl VoxelMesherTransvoxelGD {
+    /// Pinned upstream default for the `edge_clamp_margin` property (0.02).
+    /// Associated constant so tests anchor the pinned default. (The core
+    /// mesher default stays 0.0 for parity-golden compatibility.)
+    #[cfg(test)]
+    pub(crate) const EDGE_CLAMP_MARGIN_DEFAULT: f32 = 0.02;
+
+    /// Build the engine-agnostic transvoxel mesher carrying this resource's
+    /// configuration. An invalid SDF channel silently falls back to the
+    /// default SDF channel (the loud validation happens in the `#[func]`
+    /// entry points; this path is also called per terrain re-mesh, where
+    /// per-block error spam would be harmful).
+    pub fn core_mesher(&self) -> voxel_core::meshers::TransvoxelMesher {
+        let sdf_channel = validate_mesher_channel(self.sdf_channel)
+            .unwrap_or(voxel_core::storage::ChannelId::Sdf.index());
+        transvoxel_core_mesher_from_config(
+            sdf_channel,
+            self.edge_clamp_margin_value,
+            self.transitions_enabled_value,
+        )
     }
 }
 
@@ -578,6 +811,22 @@ impl VoxelMesherBlockyGD {
         self.type_channel
     }
 
+    /// Minimum padding required before the lower corner of the build region.
+    /// The blocky mesher requires `PADDING` (1); re-declared from the abstract
+    /// base, which reports 0. Matches the upstream override.
+    #[func]
+    fn get_minimum_padding(&self) -> i32 {
+        voxel_core::meshers::blocky::mesher::PADDING
+    }
+
+    /// Maximum padding required after the upper corner of the build region.
+    /// The blocky mesher requires `PADDING` (1); re-declared from the abstract
+    /// base, which reports 0. Matches the upstream override.
+    #[func]
+    fn get_maximum_padding(&self) -> i32 {
+        voxel_core::meshers::blocky::mesher::PADDING
+    }
+
     /// Build a real `BlockyMesher` from this config and return the vertex
     /// count it produces for a `VoxelBufferGD` (empty library → 0 verts).
     /// Returns -1 if `buffer` is not a `VoxelBufferGD`.
@@ -601,6 +850,36 @@ impl VoxelMesherBlockyGD {
         voxel_core::meshers::VoxelMesher::build(mesher.as_ref(), &mut output, &input);
         output.total_vertex_count() as i64
     }
+
+    /// Build the blocky mesh from a `VoxelBufferGD` into an `ArrayMesh`,
+    /// attaching `materials` per surface slot (upstream
+    /// `VoxelMesher.build_mesh`). The library must be assigned and baked (see
+    /// `VoxelBlockyLibrary.bake`), otherwise the result is empty. Returns
+    /// `null` on invalid input.
+    ///
+    /// Deferred (documented, not wired): the six `shadow_occluder_*` flags —
+    /// the core `blocky::generate_shadow_occluders` pass exists but is not
+    /// yet part of the mesher build pipeline; and `tint_mode` — the
+    /// `TintSampler` (per-voxel color modulation) is a Phase 5 port. Both are
+    /// stored faithfully and validated, but have no runtime effect yet.
+    #[func]
+    fn build_mesh(
+        &self,
+        voxel_buffer: Gd<RefCounted>,
+        materials: VarArray,
+        _additional_data: VarDictionary,
+    ) -> Option<Gd<godot::classes::ArrayMesh>> {
+        let Ok(buf) = voxel_buffer.try_cast::<crate::voxel_buffer::VoxelBufferGD>() else {
+            godot_error!("VoxelMesherBlocky.build_mesh: voxel_buffer must be a VoxelBuffer");
+            return None;
+        };
+        let bound = buf.bind();
+        let mesher = self.core_mesher();
+        let input = voxel_core::meshers::MesherInput::new(bound.core_buffer(), Vector3i::zero(), 0);
+        let mut output = voxel_core::meshers::MesherOutput::default();
+        voxel_core::meshers::VoxelMesher::build(mesher.as_ref(), &mut output, &input);
+        crate::terrain::build_mesh_from_output(&output, &materials_from_var_array(&materials))
+    }
 }
 
 impl VoxelMesherBlockyGD {
@@ -612,10 +891,19 @@ impl VoxelMesherBlockyGD {
             .map(|library| library.bind().core_library())
     }
 
-    /// Build the engine-agnostic mesher, carrying the attached baked library.
+    /// Build the engine-agnostic mesher, carrying the attached baked library
+    /// plus the occlusion settings (`occlusion_enabled` / `occlusion_darkness`
+    /// are genuinely honored by the core mesher's AO pass). An invalid type
+    /// channel silently falls back to CHANNEL_TYPE (loud validation happens
+    /// in the `#[func]` entry points).
+    ///
+    /// Deferred (documented, not forwarded): the `shadow_occluder_*` flags
+    /// (core `generate_shadow_occluders` exists but is not wired into the
+    /// build pipeline) and `tint_mode` (TintSampler is a Phase 5 port).
     pub fn core_mesher(&self) -> std::sync::Arc<dyn voxel_core::meshers::VoxelMesher> {
         let library = self.core_library().unwrap_or_default();
-        let type_channel = self.type_channel.max(0) as usize;
+        let type_channel = validate_mesher_channel(self.type_channel)
+            .unwrap_or(voxel_core::storage::ChannelId::Type.index());
         std::sync::Arc::new(
             voxel_core::meshers::BlockyMesher::new(std::sync::Arc::new(library))
                 .with_type_channel(type_channel)
@@ -648,6 +936,10 @@ pub struct VoxelMesherCubesGD {
     opaque_material_resource: Option<Gd<Material>>,
     palette_resource: Option<Gd<Resource>>,
     transparent_material_resource: Option<Gd<Material>>,
+    /// Upstream aborts every palette-mode build without a palette
+    /// (`ERR_FAIL_COND_MSG`); the terrain resolve path builds per re-mesh, so
+    /// the diagnostic is reported once per resource instead of spamming.
+    palette_mode_error_reported: std::sync::atomic::AtomicBool,
     #[var(get = get_color_mode, set = set_color_mode)]
     color_mode: PhantomVar<i64>,
     #[var(get = is_greedy_meshing_enabled, set = set_greedy_meshing_enabled)]
@@ -666,12 +958,15 @@ impl IResource for VoxelMesherCubesGD {
         Self {
             base,
             greedy: true,
-            color_channel: 4,
+            // Extra knob, not pinned upstream (the C++ mesher always reads
+            // CHANNEL_COLOR); defaults to CHANNEL_COLOR (2).
+            color_channel: voxel_core::storage::ChannelId::Color.index() as i32,
             color_mode_value: Self::COLOR_RAW,
             greedy_meshing_enabled_value: true,
             opaque_material_resource: None,
             palette_resource: None,
             transparent_material_resource: None,
+            palette_mode_error_reported: std::sync::atomic::AtomicBool::new(false),
             color_mode: PhantomVar::default(),
             greedy_meshing_enabled: PhantomVar::default(),
             opaque_material: PhantomVar::default(),
@@ -795,6 +1090,145 @@ impl VoxelMesherCubesGD {
         self.transparent_material_resource = material;
     }
 
+    /// Sets one of the materials that will be used when building meshes
+    /// (upstream `set_material_by_index`): `MATERIAL_OPAQUE` (0) maps to
+    /// [member opaque_material], `MATERIAL_TRANSPARENT` (1) to
+    /// [member transparent_material]. Other indices are rejected.
+    #[func]
+    fn set_material_by_index(&mut self, id: i64, material: Gd<Material>) {
+        if id == Self::MATERIAL_OPAQUE {
+            self.opaque_material_resource = Some(material);
+        } else if id == Self::MATERIAL_TRANSPARENT {
+            self.transparent_material_resource = Some(material);
+        } else {
+            godot_error!(
+                "VoxelMesherCubes.set_material_by_index: id must be MATERIAL_OPAQUE (0) or MATERIAL_TRANSPARENT (1)"
+            );
+        }
+    }
+
+    /// Minimum padding required before the lower corner of the build region.
+    /// The cubes mesher requires `PADDING` (1); re-declared from the abstract
+    /// base, which reports 0. Matches the upstream override.
+    #[func]
+    fn get_minimum_padding(&self) -> i32 {
+        voxel_core::meshers::cubes::greedy::PADDING
+    }
+
+    /// Maximum padding required after the upper corner of the build region.
+    /// The cubes mesher requires `PADDING` (1); re-declared from the abstract
+    /// base, which reports 0. Matches the upstream override.
+    #[func]
+    fn get_maximum_padding(&self) -> i32 {
+        voxel_core::meshers::cubes::greedy::PADDING
+    }
+
+    /// Build the cubes mesh from a `VoxelBufferGD` into an `ArrayMesh`,
+    /// attaching `materials` per surface slot (opaque=0, transparent=1;
+    /// upstream `VoxelMesher.build_mesh`: a caller entry wins when the array
+    /// covers the slot with a valid material, otherwise the mesher's stored
+    /// `opaque_material`/`transparent_material` applies). Returns `null` on
+    /// invalid input, and when a palette color mode is active without an
+    /// assigned palette (upstream `ERR_FAIL_COND_MSG`).
+    #[func]
+    fn build_mesh(
+        &self,
+        voxel_buffer: Gd<RefCounted>,
+        materials: VarArray,
+        _additional_data: VarDictionary,
+    ) -> Option<Gd<godot::classes::ArrayMesh>> {
+        if !cubes_palette_mode_satisfied(self.color_mode_value, self.palette_resource.is_some()) {
+            godot_error!(
+                "VoxelMesherCubes.build_mesh: Palette mode is used but no palette was specified"
+            );
+            return None;
+        }
+        if let Err(error) = validate_mesher_channel(self.color_channel) {
+            godot_error!("VoxelMesherCubes.build_mesh: invalid color channel: {error}");
+            return None;
+        }
+        let Ok(buf) = voxel_buffer.try_cast::<crate::voxel_buffer::VoxelBufferGD>() else {
+            godot_error!("VoxelMesherCubes.build_mesh: voxel_buffer must be a VoxelBuffer");
+            return None;
+        };
+        let bound = buf.bind();
+        let mesher = self.core_mesher();
+        let input = voxel_core::meshers::MesherInput::new(bound.core_buffer(), Vector3i::zero(), 0);
+        let mut output = voxel_core::meshers::MesherOutput::default();
+        voxel_core::meshers::VoxelMesher::build(&mesher, &mut output, &input);
+        let materials = self.resolve_material_slots(&materials_from_var_array(&materials), &output);
+        crate::terrain::build_mesh_from_output(&output, &materials)
+    }
+
+    /// Generates a 1-voxel thick greedy mesh from pixels of an image (upstream
+    /// static `generate_mesh_from_image`). The image is converted to a padded
+    /// `w × h × 1` voxel grid on the color channel (Y flipped, since image Y
+    /// goes down while world Y goes up), meshed with a default cubes mesher
+    /// (raw colors + greedy merging), then centered on the origin and scaled
+    /// by `voxel_size`. Returns `null` on invalid input.
+    #[func]
+    fn generate_mesh_from_image(
+        image: Gd<godot::classes::Image>,
+        voxel_size: f32,
+    ) -> Option<Gd<godot::classes::ArrayMesh>> {
+        let width = image.get_width();
+        let height = image.get_height();
+        if let Err(error) = validate_image_mesh_request(
+            width,
+            height,
+            image.is_empty(),
+            image.is_compressed(),
+            voxel_size,
+        ) {
+            godot_error!("VoxelMesherCubes.generate_mesh_from_image: {error}");
+            return None;
+        }
+        // Read pixels as float colors (works for every uncompressed format),
+        // then pack into raw 0xRRGGBBAA voxel values.
+        let mut colors = Vec::with_capacity((width * height) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                colors.push(image.get_pixel(x, y));
+            }
+        }
+        let raw_values = image_pixels_to_raw_u32(&colors);
+
+        // Padded grid like upstream: image plane spans X/Y, one voxel thick
+        // along Z, with PADDING(1) on every side.
+        let padding = voxel_core::meshers::cubes::greedy::PADDING;
+        let mut voxels = voxel_core::storage::VoxelBuffer::with_size(Vector3i::new(
+            width + 2 * padding,
+            height + 2 * padding,
+            1 + 2 * padding,
+        ));
+        let channel = voxel_core::storage::ChannelId::Color.index();
+        let mut format = voxel_core::storage::VoxelFormat::new();
+        format.depths[channel] = voxel_core::storage::ChannelDepth::Bit32;
+        format.configure_buffer(&mut voxels);
+        for (index, &value) in raw_values.iter().enumerate() {
+            let (x, y) = image_pixel_to_padded_xy(index, width, height, padding);
+            voxels.set_voxel(value as u64, x, y, padding, channel);
+        }
+
+        let mesher = voxel_core::meshers::CubesMesher::new();
+        let input = voxel_core::meshers::MesherInput::new(&voxels, Vector3i::zero(), 0);
+        let mut output = voxel_core::meshers::MesherOutput::default();
+        voxel_core::meshers::VoxelMesher::build(&mesher, &mut output, &input);
+
+        // Center on the origin, then scale (upstream applies the centering
+        // offset first and the voxel_size scale second).
+        let centering =
+            godot::builtin::Vector3::new(-(width as f32) * 0.5, -(height as f32) * 0.5, -0.5)
+                * voxel_size;
+        let surfaces: Vec<crate::terrain::PendingRenderSurface> = output
+            .surfaces
+            .iter()
+            .map(crate::terrain::PendingRenderSurface::from_surface)
+            .map(|surface| surface.transformed(centering, voxel_size))
+            .collect();
+        crate::terrain::build_array_mesh_with_materials(&surfaces, &[])
+    }
+
     /// Whether greedy rectangle merging is enabled.
     #[func]
     pub fn is_greedy(&self) -> bool {
@@ -808,19 +1242,107 @@ impl VoxelMesherCubesGD {
     }
 
     /// Build a real `CubesMesher` from this config and return the vertex count
-    /// it produces for a `VoxelBufferGD`. Returns -1 if `buffer` is not a
+    /// it produces for a `VoxelBufferGD`. Honors the full configuration
+    /// (color mode, greedy toggle, color channel, palette) via the same core
+    /// mesher the terrain uses. Returns -1 if `buffer` is not a
     /// `VoxelBufferGD`.
     #[func]
     fn build_vertex_count(&self, buffer: Gd<RefCounted>) -> i64 {
         let Ok(buf) = buffer.try_cast::<crate::voxel_buffer::VoxelBufferGD>() else {
             return -1;
         };
+        if let Err(error) = validate_mesher_channel(self.color_channel) {
+            godot_error!("VoxelMesherCubes: invalid color channel: {error}");
+            return -1;
+        }
         let bound = buf.bind();
-        let mesher = voxel_core::meshers::CubesMesher::new();
+        let mesher = self.core_mesher();
         let input = voxel_core::meshers::MesherInput::new(bound.core_buffer(), Vector3i::zero(), 0);
         let mut output = voxel_core::meshers::MesherOutput::default();
         voxel_core::meshers::VoxelMesher::build(&mesher, &mut output, &input);
         output.total_vertex_count() as i64
+    }
+}
+
+impl VoxelMesherCubesGD {
+    /// Resolve the per-surface-slot materials for `build_mesh` exactly like
+    /// upstream `VoxelMesher::build_mesh`: the caller's entry wins when the
+    /// array covers the slot with a valid material; otherwise the mesher's
+    /// own stored material for that slot applies (upstream
+    /// `get_material_by_index` — see [`Self::material_by_index`]). This makes
+    /// `set_material_by_index` and the `opaque_material` /
+    /// `transparent_material` properties genuinely apply when `build_mesh` is
+    /// called without a materials array.
+    fn resolve_material_slots(
+        &self,
+        caller_materials: &[Option<Gd<Material>>],
+        output: &voxel_core::meshers::MesherOutput,
+    ) -> Vec<Option<Gd<Material>>> {
+        let slot_count = output
+            .surfaces
+            .iter()
+            .map(|surface| surface.material_index as usize + 1)
+            .max()
+            .unwrap_or(0)
+            .max(caller_materials.len());
+        (0..slot_count)
+            .map(|slot| {
+                caller_materials
+                    .get(slot)
+                    .cloned()
+                    .flatten()
+                    .or_else(|| self.material_by_index(slot))
+            })
+            .collect()
+    }
+
+    /// The mesher's own material for a surface slot (upstream
+    /// `VoxelMesherCubes::get_material_by_index`): `MATERIAL_OPAQUE` (0) maps
+    /// to [member opaque_material], `MATERIAL_TRANSPARENT` (1) to [member
+    /// transparent_material]. Other slots have none.
+    fn material_by_index(&self, slot: usize) -> Option<Gd<Material>> {
+        match slot {
+            0 => self.opaque_material_resource.clone(),
+            1 => self.transparent_material_resource.clone(),
+            _ => None,
+        }
+    }
+
+    /// Build the engine-agnostic cubes mesher carrying this resource's
+    /// configuration (color mode, greedy toggle, color channel and palette).
+    /// An attached `VoxelColorPalette` resource is forwarded as the core
+    /// palette; an invalid color channel silently falls back to CHANNEL_COLOR
+    /// (loud validation happens in the `#[func]` entry points; this path is
+    /// also called per terrain re-mesh, where per-block error spam would be
+    /// harmful).
+    pub fn core_mesher(&self) -> voxel_core::meshers::CubesMesher {
+        let palette = self
+            .palette_resource
+            .as_ref()
+            .and_then(|resource| resource.clone().try_cast::<VoxelColorPaletteGD>().ok())
+            .map(|palette| palette.bind().core_palette());
+        // Upstream aborts palette-mode builds without a palette; this runs on
+        // the terrain re-mesh path, so report once per resource and continue
+        // with the default palette (the standalone build_mesh aborts instead).
+        // `false` is passed because this branch only runs when resolution
+        // failed (no resource or a non-palette resource).
+        if palette.is_none()
+            && !cubes_palette_mode_satisfied(self.color_mode_value, false)
+            && !self
+                .palette_mode_error_reported
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            godot_error!("VoxelMesherCubes: Palette mode is used but no palette was specified");
+        }
+        let palette = palette.unwrap_or_default();
+        let channel = validate_mesher_channel(self.color_channel)
+            .unwrap_or(voxel_core::storage::ChannelId::Color.index());
+        cubes_core_mesher_from_config(
+            self.color_mode_value,
+            self.greedy_meshing_enabled_value,
+            channel,
+            palette,
+        )
     }
 }
 
@@ -835,6 +1357,14 @@ impl VoxelMesherCubesGD {
 pub struct VoxelColorPaletteGD {
     base: Base<Resource>,
     palette: voxel_core::meshers::cubes::palette::ColorPalette,
+    /// The pinned GDScript-facing `colors` property (see `get_colors` /
+    /// `set_colors`).
+    #[var(get = get_colors, set = set_colors)]
+    colors: PhantomVar<PackedColorArray>,
+    /// The pinned GDScript-facing `data` property (see `get_data` /
+    /// `set_data`).
+    #[var(get = get_data, set = set_data)]
+    data: PhantomVar<PackedInt32Array>,
 }
 
 #[godot_api]
@@ -843,6 +1373,8 @@ impl IResource for VoxelColorPaletteGD {
         Self {
             base,
             palette: voxel_core::meshers::cubes::palette::ColorPalette::default(),
+            colors: PhantomVar::default(),
+            data: PhantomVar::default(),
         }
     }
 }
@@ -854,32 +1386,37 @@ impl VoxelColorPaletteGD {
     #[constant]
     const MAX_COLORS: i64 = 256;
 
-    /// Set the RGBA color for palette entry `index` (0-255).
+    /// Sets the color at the given index (canonical pinned signature,
+    /// upstream `set_color(int, Color)`). Float components are stored as the
+    /// nearest 8-bit values. Out-of-range indices are rejected with an error.
     #[func]
-    fn set_color(&mut self, index: i32, r: i32, g: i32, b: i32, a: i32) {
-        if (0..256).contains(&index) {
-            let c = voxel_core::math::Color8::new(
-                r.clamp(0, 255) as u8,
-                g.clamp(0, 255) as u8,
-                b.clamp(0, 255) as u8,
-                a.clamp(0, 255) as u8,
-            );
-            self.palette.set_color8(index as u8, c);
+    fn set_color(&mut self, index: i32, color: Color) {
+        if let Err(error) = validate_palette_index(index) {
+            godot_error!("VoxelColorPalette.set_color: {error}");
+            return;
         }
+        self.palette.set_color(
+            index as usize,
+            voxel_core::math::Color::new(color.r, color.g, color.b, color.a),
+        );
     }
 
-    /// Get the RGBA color for palette entry `index`. Returns [r, g, b, a].
+    /// Gets the color at the given index (canonical pinned signature,
+    /// upstream `get_color(int) -> Color`). Out-of-range indices emit an error
+    /// and return Godot's default-constructed `Color` — opaque black —
+    /// matching upstream's `ERR_FAIL_INDEX_V(index, size, Color())`.
     #[func]
-    fn get_color(&self, index: i32) -> PackedInt32Array {
-        if (0..256).contains(&index) {
-            let c = self.palette.get_color8(index as u8);
-            PackedInt32Array::from(&[c.r as i32, c.g as i32, c.b as i32, c.a as i32][..])
-        } else {
-            PackedInt32Array::from(&[0, 0, 0, 255])
+    fn get_color(&self, index: i32) -> Color {
+        if let Err(error) = validate_palette_index(index) {
+            godot_error!("VoxelColorPalette.get_color: {error}");
+            return Color::from_rgba(0.0, 0.0, 0.0, 1.0);
         }
+        let color = self.palette.get_color(index as usize);
+        Color::from_rgba(color.r, color.g, color.b, color.a)
     }
 
-    /// Clear all entries to transparent black.
+    /// Clear all entries to transparent black (extra helper kept from the
+    /// pre-canonical binding; mirrors upstream `clear`).
     #[func]
     fn clear(&mut self) {
         self.palette.clear();
@@ -912,16 +1449,19 @@ impl VoxelColorPaletteGD {
         PackedColorArray::from(colors.as_slice())
     }
 
-    /// Replace all 256 colors (canonical `colors` property setter). Fewer than
-    /// 256 entries leave the remainder untouched, matching the engine-agnostic
-    /// `set_from_u32_array`. Matches `VoxelColorPalette::set_colors`.
+    /// Replace palette colors (canonical `colors` property setter). Matches
+    /// `VoxelColorPalette::set_colors`; up to 256 entries are written and the
+    /// remainder keeps its previous value (the engine-agnostic partial-write
+    /// semantics; upstream rejects arrays not exactly 256 long — a documented
+    /// deviation).
     #[func]
     fn set_colors(&mut self, colors: PackedColorArray) {
-        let raw = colors.as_slice();
-        for (i, c) in raw.iter().take(256).enumerate() {
-            self.palette
-                .set_color(i, voxel_core::math::Color::new(c.r, c.g, c.b, c.a));
-        }
+        let core_colors: Vec<voxel_core::math::Color> = colors
+            .as_slice()
+            .iter()
+            .map(|c| voxel_core::math::Color::new(c.r, c.g, c.b, c.a))
+            .collect();
+        self.palette.set_colors(&core_colors);
     }
 
     /// Packed 8-bit binary color data (canonical `data` property getter).
@@ -935,12 +1475,29 @@ impl VoxelColorPaletteGD {
     }
 
     /// Set packed 8-bit binary color data (canonical `data` property setter).
-    /// Accepts up to 256 packed `0xRRGGBBAA` integers. Matches
-    /// `VoxelColorPalette::set_data`.
+    /// Accepts up to 256 packed `0xRRGGBBAA` integers, matching
+    /// `VoxelColorPalette::set_data` for shorter arrays; deviation: arrays
+    /// longer than 256 are silently truncated where upstream rejects them
+    /// (`ERR_FAIL_COND(size > 256)`).
     #[func]
     fn set_data(&mut self, data: PackedInt32Array) {
         let u32s: Vec<u32> = data.as_slice().iter().map(|v| *v as u32).collect();
         self.palette.set_from_u32_array(&u32s);
+    }
+}
+
+/// Validate a palette index against `MAX_COLORS` (0..=255).
+fn validate_palette_index(index: i32) -> Result<usize, &'static str> {
+    if !(0..256).contains(&index) {
+        return Err("index must be within 0..=255 (MAX_COLORS is 256)");
+    }
+    Ok(index as usize)
+}
+
+impl VoxelColorPaletteGD {
+    /// Clone the engine-agnostic palette (used by the cubes mesher wiring).
+    pub(crate) fn core_palette(&self) -> voxel_core::meshers::cubes::palette::ColorPalette {
+        self.palette.clone()
     }
 }
 
@@ -2135,8 +2692,14 @@ impl VoxelInstanceLibraryItemGD {
 #[cfg(test)]
 mod tests {
     use super::{
-        validate_enum_int, validate_finite_float, validate_mesher_channel, validate_shadow_side,
+        cubes_color_mode_from_int, cubes_core_mesher_from_config, cubes_palette_mode_satisfied,
+        image_pixel_to_padded_xy, image_pixels_to_raw_u32, transvoxel_core_mesher_from_config,
+        validate_enum_int, validate_finite_float, validate_image_mesh_request,
+        validate_mesher_channel, validate_palette_index, validate_shadow_side, VoxelMesherCubesGD,
+        VoxelMesherTransvoxelGD,
     };
+    use voxel_core::meshers::CubesColorMode;
+    use voxel_core::meshers::VoxelMesher as _;
     use voxel_core::storage::voxel_buffer::MAX_CHANNELS;
 
     #[test]
@@ -2174,5 +2737,155 @@ mod tests {
         assert_eq!(validate_shadow_side(5), Ok(5));
         assert!(validate_shadow_side(-1).is_err());
         assert!(validate_shadow_side(6).is_err());
+    }
+
+    /// The GD transvoxel configuration must reach every core mesher field:
+    /// SDF channel, edge-clamp margin (clamped to the 0..=0.5 contract) and
+    /// the transitions gate.
+    #[test]
+    fn transvoxel_core_mesher_from_config_maps_all_fields() {
+        // Pinned GD defaults (edge_clamp_margin 0.02, transitions on).
+        let mesher = transvoxel_core_mesher_from_config(
+            voxel_core::storage::ChannelId::Sdf.index(),
+            VoxelMesherTransvoxelGD::EDGE_CLAMP_MARGIN_DEFAULT,
+            true,
+        );
+        assert_eq!(mesher.edge_clamp_margin(), 0.02);
+        assert!(mesher.transitions_enabled());
+
+        // Every field round-trips; the margin is clamped to [0, 0.5].
+        let mesher = transvoxel_core_mesher_from_config(3, 0.75, false);
+        assert_eq!(mesher.edge_clamp_margin(), 0.5);
+        assert!(!mesher.transitions_enabled());
+        assert_eq!(mesher.used_channels_mask(), 1u32 << 3);
+
+        // Non-finite margins fall back to 0.0 (no clamping).
+        let mesher = transvoxel_core_mesher_from_config(0, f32::NAN, true);
+        assert_eq!(mesher.edge_clamp_margin(), 0.0);
+    }
+
+    /// The GD cubes color-mode constants (0/1/2) map onto the core enum
+    /// variants, the palette is forwarded by value, and the greedy toggle +
+    /// color channel reach the core mesher.
+    #[test]
+    fn cubes_config_maps_all_color_modes_and_forwards_palette() {
+        assert_eq!(
+            cubes_color_mode_from_int(VoxelMesherCubesGD::COLOR_RAW),
+            Some(CubesColorMode::Raw)
+        );
+        assert_eq!(
+            cubes_color_mode_from_int(VoxelMesherCubesGD::COLOR_MESHER_PALETTE),
+            Some(CubesColorMode::Palette)
+        );
+        assert_eq!(
+            cubes_color_mode_from_int(VoxelMesherCubesGD::COLOR_SHADER_PALETTE),
+            Some(CubesColorMode::ShaderPalette)
+        );
+        assert_eq!(cubes_color_mode_from_int(3), None);
+        assert_eq!(cubes_color_mode_from_int(-1), None);
+
+        let mut palette = voxel_core::meshers::cubes::palette::ColorPalette::default();
+        palette.set_color8(7, voxel_core::math::Color8::new(1, 2, 3, 4));
+        let mesher = cubes_core_mesher_from_config(
+            VoxelMesherCubesGD::COLOR_MESHER_PALETTE,
+            false,
+            5,
+            palette.clone(),
+        );
+        assert_eq!(mesher.color_mode(), CubesColorMode::Palette);
+        assert!(!mesher.is_greedy());
+        assert_eq!(mesher.used_channels_mask(), 1u32 << 5);
+        assert_eq!(mesher.palette(), &palette);
+        // Unknown mode values fall back to the upstream default (COLOR_RAW).
+        let fallback = cubes_core_mesher_from_config(
+            99,
+            true,
+            2,
+            voxel_core::meshers::cubes::palette::ColorPalette::default(),
+        );
+        assert_eq!(fallback.color_mode(), CubesColorMode::Raw);
+    }
+
+    /// `generate_mesh_from_image` input validation: empty images, compressed
+    /// images, oversized pixel counts and non-finite / too-small voxel sizes
+    /// are all rejected; the pixel packing writes `0xRRGGBBAA`.
+    #[test]
+    fn cubes_generate_mesh_from_image_rejects_invalid_inputs() {
+        let ok = validate_image_mesh_request(16, 16, false, false, 1.0);
+        assert_eq!(ok, Ok(()));
+        // Empty / non-positive dimensions.
+        assert!(validate_image_mesh_request(0, 16, true, false, 1.0).is_err());
+        assert!(validate_image_mesh_request(16, -1, true, false, 1.0).is_err());
+        // Compressed images.
+        assert!(validate_image_mesh_request(16, 16, false, true, 1.0).is_err());
+        // Over the 65536-pixel script workload budget.
+        assert!(validate_image_mesh_request(256, 257, false, false, 1.0).is_err());
+        assert_eq!(
+            validate_image_mesh_request(256, 256, false, false, 1.0),
+            Ok(())
+        );
+        // voxel_size must be finite and greater than 0.001 (upstream bound).
+        assert!(validate_image_mesh_request(16, 16, false, false, 0.0).is_err());
+        assert!(validate_image_mesh_request(16, 16, false, false, 0.001).is_err());
+        assert!(validate_image_mesh_request(16, 16, false, false, f32::NAN).is_err());
+        assert!(validate_image_mesh_request(16, 16, false, false, f32::INFINITY).is_err());
+
+        // Pixel decode packs each float color as 0xRRGGBBAA (truncating
+        // conversion, matching the core Color8).
+        let packed = image_pixels_to_raw_u32(&[
+            godot::builtin::Color::from_rgba(1.0, 0.0, 0.0, 1.0),
+            godot::builtin::Color::from_rgba(0.0, 1.0, 0.0, 0.5),
+        ]);
+        assert_eq!(packed, vec![0xFF00_00FF, 0x00FF_007F]);
+    }
+
+    /// Pinned palette-index contract used by `set_color`/`get_color`.
+    #[test]
+    fn palette_index_validation_covers_the_256_entries() {
+        assert_eq!(validate_palette_index(0), Ok(0));
+        assert_eq!(validate_palette_index(255), Ok(255));
+        assert!(validate_palette_index(-1).is_err());
+        assert!(validate_palette_index(256).is_err());
+        assert!(validate_palette_index(i32::MAX).is_err());
+    }
+
+    /// Y-flip/pad indexing for `generate_mesh_from_image`: image rows grow
+    /// downwards while world Y grows upwards, so the top image row maps to
+    /// the highest voxel row; the grid padding shifts everything by one.
+    #[test]
+    fn image_pixel_to_padded_xy_flips_y_and_pads() {
+        // 8x8 image, padding 1: pixel (7, 0) — top-right — → voxel (8, 8).
+        assert_eq!(image_pixel_to_padded_xy(7, 8, 8, 1), (8, 8));
+        // Pixel (0, 7) — bottom-left — → voxel (1, 1).
+        assert_eq!(image_pixel_to_padded_xy(56, 8, 8, 1), (1, 1));
+        // Without padding: the Y flip alone (row 0 of a 3-row image → y 2).
+        assert_eq!(image_pixel_to_padded_xy(0, 4, 3, 0), (0, 2));
+    }
+
+    /// Upstream parity of the palette-mode guard: `COLOR_RAW` never needs a
+    /// palette; both palette modes do (upstream `ERR_FAIL_COND_MSG` fires in
+    /// the `COLOR_MESHER_PALETTE` and `COLOR_SHADER_PALETTE` branches).
+    #[test]
+    fn cubes_palette_mode_guard_mirrors_upstream() {
+        assert!(cubes_palette_mode_satisfied(
+            VoxelMesherCubesGD::COLOR_RAW,
+            false
+        ));
+        assert!(cubes_palette_mode_satisfied(
+            VoxelMesherCubesGD::COLOR_MESHER_PALETTE,
+            true
+        ));
+        assert!(cubes_palette_mode_satisfied(
+            VoxelMesherCubesGD::COLOR_SHADER_PALETTE,
+            true
+        ));
+        assert!(!cubes_palette_mode_satisfied(
+            VoxelMesherCubesGD::COLOR_MESHER_PALETTE,
+            false
+        ));
+        assert!(!cubes_palette_mode_satisfied(
+            VoxelMesherCubesGD::COLOR_SHADER_PALETTE,
+            false
+        ));
     }
 }
