@@ -74,25 +74,31 @@ fn validate_channel_id(value: i32) -> Result<i32, &'static str> {
     }
 }
 
+/// Saturating `i64 → i32` conversion for forwarding the pinned `seed`
+/// property into core noise configs. A plain `as` cast would wrap modulo
+/// 2³², silently producing a different seed; out-of-range values saturate
+/// to `i32::MAX`/`i32::MIN` instead. Free function so the behavior is
+/// pinnable in plain `cargo test`.
+fn saturating_seed_i32(seed: i64) -> i32 {
+    i32::try_from(seed).unwrap_or(if seed >= 0 { i32::MAX } else { i32::MIN })
+}
+
 // ---------------------------------------------------------------------------
 // Shared generate_block plumbing (pinned VoxelGenerator method)
 // ---------------------------------------------------------------------------
 
 /// Convert the pinned `generate_block` `origin_in_voxels` parameter (upstream
 /// binds it as `Vector3`) into the integer voxel origin used by the core
-/// generators. Components are rounded, mirroring Godot's `Vector3 → Vector3i`
-/// conversion; `as` saturates out-of-range and NaN inputs to 0.
+/// generators. Components are truncated toward zero, mirroring Godot's
+/// `Vector3 → Vector3i` conversion (and upstream's C++ cast); `as` saturates
+/// out-of-range inputs and maps NaN to 0.
 fn core_origin_from_vector3(origin: Vector3) -> voxel_core::math::Vector3i {
-    voxel_core::math::Vector3i::new(
-        origin.x.round() as i32,
-        origin.y.round() as i32,
-        origin.z.round() as i32,
-    )
+    voxel_core::math::Vector3i::new(origin.x as i32, origin.y as i32, origin.z as i32)
 }
 
 /// Run a core generator into the Godot-facing buffer. Shared body of the
 /// pinned `generate_block` method implemented by every concrete generator.
-fn generate_core_block_into_gd(
+pub(crate) fn generate_core_block_into_gd(
     generator: &dyn CoreVoxelGenerator,
     out_buffer: &mut Gd<crate::voxel_buffer::VoxelBufferGD>,
     origin_in_voxels: Vector3,
@@ -670,7 +676,7 @@ fn noise_generator_from_params(
 ) -> Noise {
     // Use NoiseConfig.build() to avoid direct fastnoise_lite dependency.
     let config = NoiseConfig {
-        seed: Some(seed as i32),
+        seed: Some(saturating_seed_i32(seed)),
         frequency: Some(frequency),
         ..NoiseConfig::default()
     };
@@ -688,6 +694,40 @@ fn noise_type_from_godot_enum(value: i32) -> Option<NoiseType> {
         3 => Some(NoiseType::Perlin),
         4 => Some(NoiseType::ValueCubic),
         5 => Some(NoiseType::Value),
+        _ => None,
+    }
+}
+
+/// Map a pinned `FastNoise2.NoiseType` enum value (0..=6) onto the
+/// fastnoise-lite sampler enum, mirroring `FastNoise2GD::build_sampler`:
+/// `TYPE_SIMPLEX`(1) maps to OpenSimplex2S, `TYPE_PERLIN`(2) to Perlin,
+/// `TYPE_VALUE`(3) to Value and `TYPE_CELLULAR`(4) to Cellular. The
+/// `TYPE_ENCODED_NODE_TREE`(5) and `TYPE_CELLULAR_VALUE`(6) sentinels have no
+/// fastnoise-lite equivalent and fall back to OpenSimplex2 there — mirrored
+/// here. NOTE: this encoding differs from `ZN_FastNoiseLite`'s for the same
+/// integers (e.g. 2 means Cellular there, Perlin here). Free function so the
+/// mapping is pinnable in tests.
+fn fastnoise2_noise_type_from_godot_enum(value: i32) -> Option<NoiseType> {
+    match value {
+        1 => Some(NoiseType::OpenSimplex2S),
+        2 => Some(NoiseType::Perlin),
+        3 => Some(NoiseType::Value),
+        4 => Some(NoiseType::Cellular),
+        // 0, 5 (encoded node tree) and 6 (cellular value): OpenSimplex2
+        // fallback, exactly like FastNoise2GD::build_sampler's catch-all.
+        _ => Some(NoiseType::OpenSimplex2),
+    }
+}
+
+/// Decode a resource's `get_noise_type` integer according to the resource's
+/// class: the two supported noise resources use different `NoiseType` enum
+/// encodings (see the two mapping functions). Any other class has no known
+/// encoding, so the decode yields `None` (sampler default) and the caller
+/// logs. Free function so the per-class dispatch is pinnable in tests.
+fn noise_type_from_resource_enum(class_name: &str, value: i32) -> Option<NoiseType> {
+    match class_name {
+        "ZN_FastNoiseLite" => noise_type_from_godot_enum(value),
+        "FastNoise2" => fastnoise2_noise_type_from_godot_enum(value),
         _ => None,
     }
 }
@@ -745,13 +785,17 @@ fn call_resource_get(resource: &Gd<Resource>, method: &str) -> Option<Variant> {
 
 /// Read a complete noise configuration from the user-assigned `noise`
 /// resource by calling its pinned getters (`get_seed`, `get_frequency`,
-/// `get_noise_type`, `get_fractal_*`). Works for any resource exposing them
-/// (`ZN_FastNoiseLite`, `FastNoise2`). Returns `None` when the resource does
-/// not provide at least `get_seed` and `get_frequency`.
+/// `get_noise_type`, `get_fractal_*`). Works for `ZN_FastNoiseLite` and
+/// `FastNoise2` resources — but note their `NoiseType` enums use *different*
+/// integer encodings, so `get_noise_type` is decoded per resource class (see
+/// [`noise_type_from_resource_enum`]). Any other resource class falls back to
+/// the sampler's default noise type (with an error logged). Returns `None`
+/// when the resource does not provide at least `get_seed` and
+/// `get_frequency`.
 ///
 /// NOTE: `Gd` values cannot exist under plain `cargo test`, so this function
 /// is deliberately a thin shell — everything testable lives in
-/// [`NoiseConfigParts`] and the two enum-mapping functions above.
+/// [`NoiseConfigParts`] and the enum-mapping functions above.
 fn noise_config_from_resource(resource: &Gd<Resource>) -> Option<NoiseConfig> {
     let seed: i32 = call_resource_get(resource, "get_seed")?.try_to().ok()?;
     let frequency: f32 = call_resource_get(resource, "get_frequency")?
@@ -760,6 +804,7 @@ fn noise_config_from_resource(resource: &Gd<Resource>) -> Option<NoiseConfig> {
     if !frequency.is_finite() || frequency <= 0.0 {
         return None;
     }
+    let class_name = resource.get_class().to_string();
     let read_i32 = |method: &str| -> Option<i32> {
         call_resource_get(resource, method).and_then(|variant| variant.try_to::<i32>().ok())
     };
@@ -768,10 +813,20 @@ fn noise_config_from_resource(resource: &Gd<Resource>) -> Option<NoiseConfig> {
             .and_then(|variant| variant.try_to::<f32>().ok())
             .filter(|value| value.is_finite())
     };
+    let noise_type = read_i32("get_noise_type").and_then(|value| {
+        let decoded = noise_type_from_resource_enum(&class_name, value);
+        if decoded.is_none() {
+            godot_error!(
+                "VoxelGeneratorNoise: noise resource of class '{class_name}' has no known \
+                 NoiseType encoding; using the sampler's default noise type"
+            );
+        }
+        decoded
+    });
     let parts = NoiseConfigParts {
         seed,
         frequency,
-        noise_type: read_i32("get_noise_type").and_then(noise_type_from_godot_enum),
+        noise_type,
         fractal_type: read_i32("get_fractal_type").and_then(fractal_type_from_godot_enum),
         fractal_octaves: read_i32("get_fractal_octaves").map(|octaves| octaves.max(1)),
         fractal_lacunarity: read_f32("get_fractal_lacunarity"),
@@ -993,7 +1048,7 @@ fn heightmap_generator_from_params(
 ) -> HeightmapNoise {
     HeightmapNoise {
         noise_config: NoiseConfig {
-            seed: Some(seed as i32),
+            seed: Some(saturating_seed_i32(seed)),
             frequency: Some(frequency),
             ..NoiseConfig::default()
         },
@@ -1143,7 +1198,7 @@ impl VoxelGeneratorHeightmap {
             return 0.0;
         }
         let config = NoiseConfig {
-            seed: Some(self.seed as i32),
+            seed: Some(saturating_seed_i32(self.seed)),
             frequency: Some(self.frequency_value),
             ..NoiseConfig::default()
         };
@@ -1338,6 +1393,21 @@ fn image_pixel_height(pixel: Color) -> f32 {
     pixel.r
 }
 
+/// Pure guard extracted from [`VoxelGeneratorImage::load_image_values`]: the
+/// reason an image cannot be loaded, or `None` when it can. Compressed images
+/// are rejected because pixel access would fail — upstream's `set_image`
+/// guards with `ERR_FAIL_COND(im->is_compressed())`. Free function so the
+/// guard is pinnable in plain `cargo test`.
+fn image_load_error(width: i32, height: i32, compressed: bool) -> Option<&'static str> {
+    if width <= 0 || height <= 0 {
+        return Some("image must have positive dimensions");
+    }
+    if compressed {
+        return Some("image must not be compressed (call decompress() first)");
+    }
+    None
+}
+
 /// Build the core image generator from the wrapper's parameters. Free
 /// function so the wiring (wrap mode, blur, full heightmap parameter block)
 /// is pinnable in plain `cargo test`.
@@ -1477,11 +1547,13 @@ impl VoxelGeneratorImage {
     }
 
     /// Extract the per-pixel red-channel heights. Returns `false` without
-    /// touching state when the image is empty.
+    /// touching state when the image is empty or compressed (upstream rejects
+    /// compressed images in `set_image` with `ERR_FAIL_COND`).
     fn load_image_values(&mut self, image: &Gd<GodotImage>) -> bool {
         let width = image.get_width();
         let height = image.get_height();
-        if width <= 0 || height <= 0 {
+        if let Some(reason) = image_load_error(width, height, image.is_compressed()) {
+            godot_error!("VoxelGeneratorImage.set_image: {reason}");
             return false;
         }
         let mut values = Vec::with_capacity((width * height) as usize);
@@ -1530,8 +1602,9 @@ impl VoxelGeneratorImage {
     }
 
     /// Canonical `blur_enabled` (pinned `VoxelGeneratorImage.xml`). When
-    /// enabled, loaded heights are smoothed with a radius-1 separable box
-    /// blur before generating terrain.
+    /// enabled, loaded heights are smoothed with upstream's 5-tap plus/cross
+    /// kernel (center + 4 orthogonal neighbours, weight 0.2 each, wrap-around
+    /// across image borders) before generating terrain.
     #[func]
     fn is_blur_enabled(&self) -> bool {
         self.blur_enabled_value
@@ -1588,6 +1661,81 @@ mod generator_contract_tests {
 
     fn origin(x: i32, y: i32, z: i32) -> voxel_core::math::Vector3i {
         voxel_core::math::Vector3i::new(x, y, z)
+    }
+
+    #[test]
+    fn noise_type_decoding_is_per_resource_class() {
+        // ZN_FastNoiseLite and FastNoise2 use DIFFERENT NoiseType encodings:
+        // the same integer must decode to different fastnoise-lite types
+        // depending on the assigned resource's class.
+        for (value, lite, fastnoise2) in [
+            (2, NoiseType::Cellular, NoiseType::Perlin),
+            (3, NoiseType::Perlin, NoiseType::Value),
+        ] {
+            assert_eq!(
+                noise_type_from_resource_enum("ZN_FastNoiseLite", value),
+                Some(lite)
+            );
+            assert_eq!(
+                noise_type_from_resource_enum("FastNoise2", value),
+                Some(fastnoise2),
+                "same int {value} must decode differently per class"
+            );
+        }
+        // FastNoise2's sentinels mirror build_sampler's OpenSimplex2 fallback;
+        // ZN_FastNoiseLite rejects out-of-range encodings.
+        assert_eq!(
+            noise_type_from_resource_enum("FastNoise2", 5),
+            Some(NoiseType::OpenSimplex2)
+        );
+        assert_eq!(
+            noise_type_from_resource_enum("ZN_FastNoiseLite", 5),
+            Some(NoiseType::Value)
+        );
+        assert_eq!(noise_type_from_resource_enum("ZN_FastNoiseLite", 9), None);
+        // Unknown classes fall back to the sampler default.
+        assert_eq!(noise_type_from_resource_enum("FastNoiseLite", 0), None);
+        assert_eq!(noise_type_from_resource_enum("Resource", 2), None);
+    }
+
+    #[test]
+    fn seed_forwarding_saturates_instead_of_wrapping() {
+        // A plain `as i32` cast would wrap 2^32 + 7 back to 7 (a different
+        // seed); the saturated conversion clamps to i32 bounds.
+        assert_eq!(saturating_seed_i32(7), 7);
+        assert_eq!(saturating_seed_i32(-3), -3);
+        assert_eq!(saturating_seed_i32(i64::from(i32::MAX)), i32::MAX);
+        assert_eq!(saturating_seed_i32(i64::from(i32::MAX) + 1), i32::MAX);
+        assert_eq!(saturating_seed_i32(i64::MAX), i32::MAX);
+        assert_eq!(saturating_seed_i32(i64::from(i32::MIN) - 1), i32::MIN);
+        assert_eq!(saturating_seed_i32(i64::MIN), i32::MIN);
+        // The generators forward the pinned seed through the saturating path.
+        let gen = heightmap_generator_from_params(
+            i64::from(i32::MAX) + 1,
+            0.02,
+            heightmap_params_from_godot(1, -5.0, 30.0, 1.0, Vector2i::new(0, 0)),
+        );
+        assert_eq!(gen.noise_config.seed, Some(i32::MAX));
+    }
+
+    #[test]
+    fn image_load_error_reports_empty_and_compressed_images() {
+        // The pure guard behind `load_image_values`: empty images and
+        // compressed images (upstream ERR_FAIL_COND(is_compressed)) are
+        // rejected, well-formed uncompressed ones are accepted.
+        assert_eq!(
+            image_load_error(0, 16, false),
+            Some("image must have positive dimensions")
+        );
+        assert_eq!(
+            image_load_error(16, -1, false),
+            Some("image must have positive dimensions")
+        );
+        assert_eq!(
+            image_load_error(16, 16, true),
+            Some("image must not be compressed (call decompress() first)")
+        );
+        assert_eq!(image_load_error(1, 1, false), None);
     }
 
     #[test]
@@ -1792,13 +1940,17 @@ mod generator_contract_tests {
         assert_eq!(repeating.height_at(0, 2), repeating.height_at(0, 0));
         assert_eq!(repeating.height_at(1, -1), repeating.height_at(1, 1));
 
-        // blur_enabled forwards into the core generator: a delta peak spreads.
+        // blur_enabled forwards into the core generator: a delta peak spreads
+        // to the cross neighbours only (upstream 5-tap kernel), not diagonals.
         let mut peak = vec![0.0; 9];
         peak[1 + 3] = 1.0; // 3x3, centre (1, 1).
         let blurred = image_generator_from_params(peak.clone(), [3, 3], false, true, params);
         let sharp = image_generator_from_params(peak, [3, 3], false, false, params);
         assert!(blurred.height_at(1, 1) < sharp.height_at(1, 1));
         assert!(blurred.height_at(0, 1) > sharp.height_at(0, 1));
+        assert!(blurred.height_at(1, 0) > sharp.height_at(1, 0));
+        assert_eq!(blurred.height_at(0, 0), sharp.height_at(0, 0));
+        assert_eq!(blurred.height_at(2, 2), sharp.height_at(2, 2));
     }
 
     #[test]
@@ -1857,13 +2009,18 @@ mod generator_contract_tests {
     }
 
     #[test]
-    fn generate_block_origin_rounds_half_away_from_zero() {
+    fn generate_block_origin_truncates_toward_zero() {
         // The pinned generate_block binds origin_in_voxels as Vector3
-        // (upstream VoxelGenerator.xml); the core consumes integers. Rounding
-        // matches f32::round (half away from zero).
+        // (upstream VoxelGenerator.xml); the core consumes integers. The
+        // conversion truncates toward zero, matching Godot's Vector3 →
+        // Vector3i cast (10.6 → 10, -2.5 → -2).
         assert_eq!(
-            core_origin_from_vector3(Vector3::new(1.6, -2.5, 3.49)),
-            origin(2, -3, 3)
+            core_origin_from_vector3(Vector3::new(10.6, -2.5, 3.49)),
+            origin(10, -2, 3)
+        );
+        assert_eq!(
+            core_origin_from_vector3(Vector3::new(-0.9, 0.9, -1.0)),
+            origin(0, 0, -1)
         );
     }
 }

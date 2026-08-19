@@ -551,33 +551,30 @@ pub enum ImageWrapMode {
     Repeat,
 }
 
-/// Radius-1 separable box blur (3-tap mean per axis, edges clamped) over a
-/// row-major `width * height` grid. Deterministic, allocation-only, and
-/// sum-preserving (edge clamping only duplicates boundary values). Backing of
-/// the pinned `VoxelGeneratorImage.blur_enabled` property.
-fn box_blur(values: Vec<f32>, width: i32, height: i32) -> Vec<f32> {
-    let w = width as usize;
-    let h = height as usize;
-    // Horizontal pass.
-    let mut horizontal = vec![0.0; values.len()];
-    for z in 0..h {
-        let row = z * w;
-        for x in 0..w {
-            let left = x.saturating_sub(1) + row;
-            let center = x + row;
-            let right = (x + 1).min(w - 1) + row;
-            horizontal[center] = (values[left] + values[center] + values[right]) / 3.0;
-        }
-    }
-    // Vertical pass.
+/// 5-tap plus/cross blur over a row-major `width * height` grid: the centre
+/// plus its 4 orthogonal neighbours, each weighted `0.2`, with wrap-around
+/// fetches across image borders (modulo indexing). Mirrors upstream
+/// `voxel_generator_image.cpp::get_height_blurred` + `get_height_repeat`
+/// exactly (upstream multiplies the 5-tap sum by `0.2f` and wraps via
+/// `math::wrap`). Sum-preserving, since every pixel contributes its full
+/// value to its own and its four neighbours' outputs. Backing of the pinned
+/// `VoxelGeneratorImage.blur_enabled` property.
+fn blur_heights(values: Vec<f32>, width: i32, height: i32) -> Vec<f32> {
+    let w = width;
+    let h = height;
+    // Wrap-around fetch, mirroring `get_height_repeat` (`math::wrap`).
+    let repeat = |values: &[f32], x: i32, z: i32| -> f32 {
+        values[(funcs::wrap_i32(x, w) + funcs::wrap_i32(z, h) * w) as usize]
+    };
     let mut blurred = vec![0.0; values.len()];
     for z in 0..h {
-        let up = z.saturating_sub(1) * w;
-        let row = z * w;
-        let down = (z + 1).min(h - 1) * w;
         for x in 0..w {
-            blurred[x + row] =
-                (horizontal[x + up] + horizontal[x + row] + horizontal[x + down]) / 3.0;
+            let sum = repeat(&values, x, z)
+                + repeat(&values, x + 1, z)
+                + repeat(&values, x - 1, z)
+                + repeat(&values, x, z + 1)
+                + repeat(&values, x, z - 1);
+            blurred[(x + z * w) as usize] = sum * 0.2;
         }
     }
     blurred
@@ -598,8 +595,9 @@ pub struct Image {
     size: Vector2i,
     /// Sampling behaviour outside the image extent.
     pub wrap: ImageWrapMode,
-    /// Apply a radius-1 separable box blur to values as they are loaded
-    /// (pinned `blur_enabled`; must be set before `set_image`).
+    /// Apply the upstream 5-tap plus/cross blur (wrap-around at borders) to
+    /// values as they are loaded (pinned `blur_enabled`; must be set before
+    /// `set_image`).
     pub blur_enabled: bool,
     /// Shared heightmap parameters (channel, range, iso_scale, offset).
     pub heightmap: HeightmapParams,
@@ -616,7 +614,7 @@ impl Image {
         }
         let clamped: Vec<f32> = values.iter().map(|v| v.clamp(0.0, 1.0)).collect();
         let clamped = if self.blur_enabled {
-            box_blur(clamped, width, height)
+            blur_heights(clamped, width, height)
         } else {
             clamped
         };
@@ -1312,21 +1310,50 @@ mod tests {
             }
             sum / 25.0
         };
-        // Edge clamping only duplicates boundary values, so the blur is
-        // sum-preserving: the mean is unchanged.
+        // The 5-tap kernel is sum-preserving (each pixel's value is spread
+        // over itself and its four neighbours with total weight 1), so the
+        // mean is unchanged.
         assert!(
             (mean(&blurred) - mean(&plain)).abs() < 1e-5,
             "blur changed the mean: {} vs {}",
             mean(&blurred),
             mean(&plain)
         );
-        // The delta peak is spread: centre lower, neighbours raised.
+        // The delta peak spreads to exactly the cross neighbours: upstream's
+        // `get_height_blurred` weights the centre and the 4 orthogonal taps by
+        // 0.2 each; diagonal pixels receive nothing.
+        assert!((blurred.height_at(2, 2) - 0.2).abs() < 1e-6);
+        assert!((blurred.height_at(3, 2) - 0.2).abs() < 1e-6);
+        assert!((blurred.height_at(1, 2) - 0.2).abs() < 1e-6);
+        assert!((blurred.height_at(2, 3) - 0.2).abs() < 1e-6);
+        assert!((blurred.height_at(2, 1) - 0.2).abs() < 1e-6);
+        assert_eq!(blurred.height_at(1, 1), 0.0, "diagonals stay untouched");
+        assert_eq!(blurred.height_at(3, 3), 0.0);
+        assert_eq!(blurred.height_at(0, 0), 0.0);
+    }
+
+    #[test]
+    fn image_blur_fetches_wrap_around_across_borders() {
+        // Upstream `get_height_repeat` wraps coordinates modulo the image
+        // size: a peak at the left edge must bleed into the right edge.
+        let mut peak = vec![0.0; 16];
+        peak[2 * 4] = 1.0; // 4x4, peak at (0, 2): index x + z * 4.
+        let mut blurred = Image::default();
+        blurred.blur_enabled = true;
+        assert!(blurred.set_image(peak, 4, 4));
+        // (3, 2) is the left peak's x-1 neighbour via wrap-around.
         assert!(
-            blurred.height_at(2, 2) < plain.height_at(2, 2),
-            "blur did not smooth the peak"
+            (blurred.height_at(3, 2) - 0.2).abs() < 1e-6,
+            "peak must wrap to the opposite edge, got {}",
+            blurred.height_at(3, 2)
         );
-        assert!(blurred.height_at(1, 2) > plain.height_at(1, 2));
-        assert!(blurred.height_at(2, 1) > plain.height_at(2, 1));
+        // Same vertically: peak at (2, 0) bleeds into (2, 3).
+        let mut peak_v = vec![0.0; 16];
+        peak_v[2] = 1.0; // 4x4, peak at (2, 0): index x + z * 4 = 2.
+        let mut blurred_v = Image::default();
+        blurred_v.blur_enabled = true;
+        assert!(blurred_v.set_image(peak_v, 4, 4));
+        assert!((blurred_v.height_at(2, 3) - 0.2).abs() < 1e-6);
     }
 
     #[test]

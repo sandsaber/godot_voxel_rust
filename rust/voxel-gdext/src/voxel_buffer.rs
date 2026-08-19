@@ -3101,6 +3101,26 @@ impl VoxelGeneratorGraphGD {
         result
     }
 
+    /// Generates a block of voxels within the specified world area (pinned
+    /// `generate_block`, upstream `VoxelGenerator.xml`). Same pattern as the
+    /// other concrete generators: build the core generator, run it into the
+    /// buffer, truncate the float origin via the shared helper.
+    #[func]
+    fn generate_block(
+        &self,
+        mut out_buffer: Gd<crate::voxel_buffer::VoxelBufferGD>,
+        origin_in_voxels: Vector3,
+        lod: i32,
+    ) {
+        let generator = self.create_core_generator();
+        crate::generators::generate_core_block_into_gd(
+            generator.as_ref(),
+            &mut out_buffer,
+            origin_in_voxels,
+            lod,
+        );
+    }
+
     /// Canonical `debug_analyze_range`: estimate the SDF output range over the
     /// axis-aligned box with corners `min_pos`/`max_pos`. Returns
     /// `Vector2(min, max)`; `Vector2(NAN, NAN)` (with an error log) on invalid
@@ -3169,7 +3189,9 @@ impl VoxelGeneratorGraphGD {
     /// plane spanned by the transform's X/Y axes (span `size` in world units,
     /// centered on the transform origin) and store each sample into the
     /// corresponding image pixel (samples centered on pixels). The image
-    /// should have a 32-bit float format and must not be compressed.
+    /// should have a 32-bit float format and must not be compressed. The
+    /// written pixel count is bounded by the shared
+    /// `MAX_GENERATED_IMAGE_PIXELS` script workload budget.
     #[func]
     fn generate_image_from_sdf(
         &self,
@@ -3182,6 +3204,13 @@ impl VoxelGeneratorGraphGD {
         let height = im.get_height();
         if width <= 0 || height <= 0 {
             godot_error!("VoxelGeneratorGraph.generate_image_from_sdf: image must not be empty");
+            return;
+        }
+        let pixel_count = i64::from(width) * i64::from(height);
+        if pixel_count > crate::resources3::MAX_GENERATED_IMAGE_PIXELS {
+            godot_error!(
+                "VoxelGeneratorGraph.generate_image_from_sdf: pixel count exceeds the script workload limit"
+            );
             return;
         }
         if !size.x.is_finite() || !size.y.is_finite() || size.x <= 0.0 || size.y <= 0.0 {
@@ -3654,7 +3683,7 @@ fn graph_compile_error_report(error: &voxel_core::generators::graph::TopoError) 
         ),
         TopoError::DanglingPort(id) => (
             i64::from(*id),
-            format!("node {id} has an input connected to a node that does not exist"),
+            format!("an input references node {id}, which does not exist"),
         ),
     }
 }
@@ -4024,7 +4053,10 @@ mod graph_generator_tests {
         assert_eq!(error, TopoError::DanglingPort(99));
         let (node_id, message) = graph_compile_error_report(&error);
         assert_eq!(node_id, 99, "dangling port should blame its node");
-        assert!(!message.is_empty());
+        // {id} in the message is the missing *referenced* node, so the text
+        // must describe it as referenced-not-existing (node 0 is the node
+        // holding the input; 99 is the one that does not exist).
+        assert_eq!(message, "an input references node 99, which does not exist");
 
         // Cycle: nodes 1 and 2 reference each other; no single node is to
         // blame, so the pinned report uses -1.

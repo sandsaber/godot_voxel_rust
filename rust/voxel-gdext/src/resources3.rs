@@ -12,7 +12,10 @@ const MAX_CURVE_POINTS: usize = 65_536;
 /// Maximum number of cells visited synchronously by `count_spots`.
 const MAX_SPOT_GRID_CELLS: u64 = 65_536;
 /// Maximum number of pixels written synchronously by `generate_image`.
-const MAX_GENERATED_IMAGE_PIXELS: i64 = 65_536;
+/// Shared with `VoxelGeneratorGraph.generate_image_from_sdf`
+/// (`voxel_buffer.rs`) so both image-writing entry points enforce the same
+/// script workload budget.
+pub(crate) const MAX_GENERATED_IMAGE_PIXELS: i64 = 65_536;
 
 /// Whether the `generate_image` tiling warning has been emitted already.
 static TILING_WARNING_EMITTED: AtomicBool = AtomicBool::new(false);
@@ -233,15 +236,14 @@ impl FastNoiseLiteConfig {
         self.build_sampler().get_noise_3d(x, y, z)
     }
 
-    /// Mirrors the pinned `get_noise_3dv` body: a `Vector3` position is
-    /// sampled component-wise through `sample_3d`.
-    #[allow(dead_code)] // pure mirror of the pinned method, exercised by unit tests
+    /// Production path of the pinned `get_noise_3dv`: a `Vector3` position
+    /// is sampled component-wise through `sample_3d` (same code the
+    /// `#[func]` delegates to).
     fn sample_3dv(&self, position: (f32, f32, f32)) -> f32 {
         self.sample_3d(position.0, position.1, position.2)
     }
 
-    /// Mirrors the pinned `get_noise_2dv` body.
-    #[allow(dead_code)] // pure mirror of the pinned method, exercised by unit tests
+    /// Production path of the pinned `get_noise_2dv` (see `sample_3dv`).
     fn sample_2dv(&self, position: (f32, f32)) -> f32 {
         self.sample_2d(position.0, position.1)
     }
@@ -257,6 +259,19 @@ fn apply_remap(v: f32, min_in: f32, max_in: f32, min_out: f32, max_out: f32, ena
         return v;
     }
     (v - min_in) / (max_in - min_in) * (max_out - min_out) + min_out
+}
+
+/// Normalize a sampled batch value to a `[0, 1]` grayscale level using the
+/// batch's *observed* minimum and maximum, rather than an assumed `[-1, 1]`
+/// range (the terrace/remap output transforms may move the range). A
+/// degenerate batch (`min == max`, or non-finite bounds) maps to mid-gray
+/// 0.5. Free function so the normalization is pinnable in plain `cargo test`.
+fn normalize_gray(value: f32, min: f32, max: f32) -> f32 {
+    if min.partial_cmp(&max) != Some(std::cmp::Ordering::Less) {
+        // Covers min == max and non-finite bounds: mid-gray, never NaN.
+        return 0.5;
+    }
+    ((value - min) / (max - min)).clamp(0.0, 1.0)
 }
 
 /// FastNoise2 `Terrace` transform.
@@ -537,10 +552,21 @@ impl FastNoiseLiteGD {
     }
 
     /// Get the raw 3D noise value at `position`. Matches upstream's pinned
-    /// `get_noise_3dv(Vector3)` signature.
+    /// `get_noise_3dv(Vector3)` signature. Delegates to the same engine-free
+    /// `sample_3dv` helper exercised by the unit tests (after the same
+    /// validation `get_noise_3d` applies).
     #[func]
     fn get_noise_3dv(&self, position: Vector3) -> f32 {
-        self.sample_3d(position.x, position.y, position.z)
+        if validate_positive_finite_float(self.frequency_value).is_err()
+            || [position.x, position.y, position.z]
+                .iter()
+                .any(|value| !value.is_finite())
+        {
+            godot_error!("ZN_FastNoiseLite.get_noise_3dv: frequency must be positive and all coordinates must be finite");
+            return 0.0;
+        }
+        self.config()
+            .sample_3dv((position.x, position.y, position.z))
     }
 
     /// Get the raw 2D noise value at `(x,y)`, sampled with the crate's true
@@ -550,10 +576,20 @@ impl FastNoiseLiteGD {
         self.sample_2d(x, y)
     }
 
-    /// Get the raw 2D noise value at `position`.
+    /// Get the raw 2D noise value at `position`. Matches upstream's pinned
+    /// `get_noise_2dv`. Delegates to the same engine-free `sample_2dv` helper
+    /// exercised by the unit tests.
     #[func]
     fn get_noise_2dv(&self, position: Vector2) -> f32 {
-        self.sample_2d(position.x, position.y)
+        if validate_positive_finite_float(self.frequency_value).is_err()
+            || [position.x, position.y]
+                .iter()
+                .any(|value| !value.is_finite())
+        {
+            godot_error!("ZN_FastNoiseLite.get_noise_2dv: frequency must be positive and all coordinates must be finite");
+            return 0.0;
+        }
+        self.config().sample_2dv((position.x, position.y))
     }
 
     // -----------------------------------------------------------------
@@ -1150,10 +1186,12 @@ impl FastNoise2GD {
     /// Fill a greyscale `image` with noise values, sized to the image's
     /// current dimensions. Samples the resource's configured sampler (with the
     /// terrace/remap output transforms applied) at integer pixel coordinates,
-    /// mirroring `voxel_core`'s row-major `generate_image_2d` layout; values
-    /// are normalized from `[-1, 1]` to `[0, 1]`. `tileable = true` is not
-    /// supported by the pure-Rust backend: a one-time warning is emitted and
-    /// the non-tileable image is still produced.
+    /// mirroring `voxel_core`'s row-major `generate_image_2d` layout. Pixels
+    /// are normalized from the batch's *observed* minimum/maximum to
+    /// `[0, 1]` (the remap transform may move the raw `[-1, 1]` range); a
+    /// constant batch writes mid-gray. The image must not be compressed.
+    /// `tileable = true` is not supported by the pure-Rust backend: a one-time
+    /// warning is emitted and the non-tileable image is still produced.
     #[func]
     fn generate_image(&self, image: Gd<godot::classes::Image>, tileable: bool) {
         let mut image = image;
@@ -1163,6 +1201,10 @@ impl FastNoise2GD {
             godot_error!(
                 "FastNoise2.generate_image: image must be non-empty with positive dimensions"
             );
+            return;
+        }
+        if image.is_compressed() {
+            godot_error!("FastNoise2.generate_image: image must not be compressed");
             return;
         }
         let pixel_count = i64::from(width) * i64::from(height);
@@ -1175,12 +1217,27 @@ impl FastNoise2GD {
         if tileable {
             warn_tiling_unsupported_once();
         }
+        // Sample the whole batch first so normalization can use the observed
+        // min/max (a plain [-1, 1] assumption breaks when remap is enabled).
         let sampler = self.build_sampler();
+        let mut samples = Vec::with_capacity(pixel_count as usize);
         for y in 0..height {
             for x in 0..width {
                 let raw = sampler.get_noise_3d(x as f32, 0.0, y as f32);
-                let value = self.transform_output(raw);
-                let gray = ((value + 1.0) * 0.5).clamp(0.0, 1.0);
+                samples.push(self.transform_output(raw));
+            }
+        }
+        let mut min = f32::INFINITY;
+        let mut max = f32::NEG_INFINITY;
+        for &sample in &samples {
+            min = min.min(sample);
+            max = max.max(sample);
+        }
+        let mut index = 0;
+        for y in 0..height {
+            for x in 0..width {
+                let gray = normalize_gray(samples[index], min, max);
+                index += 1;
                 image.set_pixel(x, y, Color::from_rgba(gray, gray, gray, 1.0));
             }
         }
@@ -1480,19 +1537,21 @@ impl FastNoise2GD {
     }
 }
 
-/// Spot noise resource — generates discrete spot points. `count_spots` runs a
-/// deterministic acceptance test over a 2D grid using the resource's
-/// density/radius, returning the number of spots that pass (functional delegate
-/// to a noise-based threshold check).
+/// Spot noise resource — very specialized cellular noise for generating
+/// "spots" in a grid (typical use case: ores in terrain), mirroring upstream
+/// `ZN_SpotNoise` / `math/spot_noise.h`. Space is divided into cells; each
+/// cell owns one spot at a hash-jittered position, `get_noise_2d/3d` return
+/// 1.0 inside a spot and 0.0 outside, and `get_spot_positions_in_area_2d/3d`
+/// enumerate the same spot centers. Only the query point's *containing* cell
+/// is checked (no neighbor lookup): upstream accepts that high jitter clips
+/// spots at cell borders — a documented limitation of this noise.
 ///
 /// The pinned GDScript-facing properties (`cell_size`, `jitter`, `seed`,
 /// `spot_radius`) mirror upstream `ZN_SpotNoise` (5828cbeb). They are stored
-/// faithfully so GDScript reads round-trip and used by the spot-evaluation
-/// helpers. The spot grid itself is defined by the engine-free helpers in this
-/// module (`SpotGridConfig` and friends): space is divided into cells, each
-/// cell owns one spot centered at a hash-jittered point, `get_noise_2d/3d`
-/// test spot membership, and `get_spot_positions_in_area_2d/3d` enumerate the
-/// same spot centers.
+/// faithfully so GDScript reads round-trip and used by the engine-free
+/// spot-grid helpers in this module, which reproduce upstream's integer hash
+/// exactly (see [`spot_hash_2d`]). The legacy `count_spots`/`density`/`radius`
+/// API predates the port and keeps its original noise-threshold semantics.
 #[derive(GodotClass)]
 #[class(base = Resource, tool, rename = ZN_SpotNoise)]
 pub struct SpotNoiseGD {
@@ -1690,12 +1749,11 @@ impl SpotNoiseGD {
     }
 
     /// Get the center positions of spots contained in `aabb` (3D). Matches
-    /// upstream's pinned `get_spot_positions_in_area_3d` under this class's
-    /// XZ-column 3D model (`get_noise_3d` ignores Y): each 2D spot center in
-    /// the aabb's XZ projection is repeated along Y at levels spaced by
-    /// `spot_radius`, so every point of a spot column inside the aabb is
-    /// within one spot radius of an enumerated position. Workload-bounded like
-    /// the 2D variant.
+    /// upstream's pinned `get_spot_positions_in_area_3d` under upstream's
+    /// true-3D spot grid (`get_noise_3d` floors on all three axes): every 3D
+    /// cell overlapping the aabb owns exactly one spot whose jittered center
+    /// is reported when it lies inside the aabb. Workload-bounded like the 2D
+    /// variant.
     #[func]
     fn get_spot_positions_in_area_3d(&self, aabb: Aabb) -> PackedVector3Array {
         let Ok(cfg) = self.spot_grid_config() else {
@@ -1800,9 +1858,8 @@ impl SpotNoiseGD {
         )
     }
 
-    /// Evaluate the 2D spot field at `(x, y)`: 1.0 inside a spot, 0.0 outside.
-    /// A point is inside a spot when its distance to the nearest cell center
-    /// (jittered, scaled by `cell_size`) is at most `spot_radius`.
+    /// Evaluate the 2D spot field at `(x, y)` (upstream `spot_noise_2d`):
+    /// 1.0 when the point lies inside its own cell's spot, 0.0 otherwise.
     fn spot_noise_2d(&self, x: f32, y: f32) -> f32 {
         match self.spot_grid_config() {
             Ok(cfg) if x.is_finite() && y.is_finite() => spot_grid_noise_2d(cfg, x, y),
@@ -1813,8 +1870,9 @@ impl SpotNoiseGD {
         }
     }
 
-    /// Evaluate the 3D spot field at `(x, y, z)` (the Y axis is ignored, matching
-    /// the XZ-column grid model; see `get_noise_3d`).
+    /// Evaluate the 3D spot field at `(x, y, z)` (upstream `spot_noise_3d`):
+    /// true 3D cells — floor on all three axes, a 3-component cell hash and a
+    /// 3D squared-distance test against `spot_radius`.
     fn spot_noise_3d(&self, x: f32, y: f32, z: f32) -> f32 {
         match self.spot_grid_config() {
             Ok(cfg) if [x, y, z].iter().all(|value| value.is_finite()) => {
@@ -1828,17 +1886,81 @@ impl SpotNoiseGD {
     }
 }
 
-/// Cheap deterministic hash from a seed and two cell coordinates into
-/// `[0, u32::MAX]`. Used only to produce stable spot-center jitter; not a
-/// cryptographic primitive.
-fn spot_hash(seed: i32, a: f32, b: f32) -> u32 {
-    let mut s = seed as u32;
-    s = s.wrapping_mul(0x9e37_79b1);
-    s = s.wrapping_add(a.to_bits());
-    s = s.wrapping_add(b.to_bits().wrapping_mul(0x85eb_ca6b));
-    s ^= s >> 13;
-    s = s.wrapping_mul(0xc2b2_ae35);
-    s ^ (s >> 16)
+// === Upstream SpotNoise model (mirrors zylann's math/spot_noise.h) ===
+//
+// The integer hash (including its PRIME constants and multiplier), the
+// hash-to-jitter decoding and the containing-cell distance test are
+// replicated exactly, so spot positions are numerically upstream-identical.
+// Upstream relies on wrapping 32-bit int arithmetic; Rust needs explicit
+// wrapping ops to reproduce it.
+
+/// Upstream `PRIME_X` constant.
+const SPOT_PRIME_X: i32 = 501_125_321;
+/// Upstream `PRIME_Y` constant.
+const SPOT_PRIME_Y: i32 = 1_136_930_381;
+/// Upstream `PRIME_Z` constant.
+const SPOT_PRIME_Z: i32 = 1_720_413_743;
+/// Upstream hash multiplier (`hash *= 0x27d4eb2d`).
+const SPOT_HASH_MULTIPLIER: i32 = 0x27d4eb2d;
+
+/// Upstream `hash2`, derived from FastNoiseLite's cellular noise:
+/// `hash = seed ^ (p.x * PRIME_X) ^ (p.y * PRIME_Y); hash *= 0x27d4eb2d`.
+fn spot_hash_2d(cell_x: i32, cell_y: i32, seed: i32) -> i32 {
+    let hash = seed ^ cell_x.wrapping_mul(SPOT_PRIME_X) ^ cell_y.wrapping_mul(SPOT_PRIME_Y);
+    hash.wrapping_mul(SPOT_HASH_MULTIPLIER)
+}
+
+/// Upstream `hash3`: the 3-component construction with `PRIME_Z`.
+fn spot_hash_3d(cell_x: i32, cell_y: i32, cell_z: i32, seed: i32) -> i32 {
+    let hash = seed
+        ^ cell_x.wrapping_mul(SPOT_PRIME_X)
+        ^ cell_y.wrapping_mul(SPOT_PRIME_Y)
+        ^ cell_z.wrapping_mul(SPOT_PRIME_Z);
+    hash.wrapping_mul(SPOT_HASH_MULTIPLIER)
+}
+
+/// Upstream `hash_to_vec2`: the two 16-bit lanes of the hash mapped into
+/// `[0, 1]` (65536 possible locations along each axis).
+fn spot_hash_to_vec2(h: i32) -> (f32, f32) {
+    (
+        (h & 0xffff) as f32 / 65535.0,
+        ((h >> 16) & 0xffff) as f32 / 65535.0,
+    )
+}
+
+/// Upstream `hash_to_vec3`: three 10-bit lanes mapped into `[0, 1]`
+/// (1024 possible locations along each axis).
+fn spot_hash_to_vec3(h: i32) -> (f32, f32, f32) {
+    (
+        (h & 0x3ff) as f32 / 1024.0,
+        ((h >> 10) & 0x3ff) as f32 / 1024.0,
+        ((h >> 20) & 0x3ff) as f32 / 1024.0,
+    )
+}
+
+/// Upstream `get_spot_position_2d_norm`: the spot position within its cell,
+/// in normalized `[0, 1]` cell coordinates — `lerp(0.5, hash_to_vec2(h),
+/// jitter)`. `jitter = 0` pins the spot to the cell center; any valid jitter
+/// keeps it inside its own cell.
+fn spot_position_norm_2d(cell_x: i32, cell_y: i32, jitter: f32, seed: i32) -> (f32, f32) {
+    let (hx, hy) = spot_hash_to_vec2(spot_hash_2d(cell_x, cell_y, seed));
+    (0.5 + (hx - 0.5) * jitter, 0.5 + (hy - 0.5) * jitter)
+}
+
+/// Upstream `get_spot_position_3d_norm` (see `spot_position_norm_2d`).
+fn spot_position_norm_3d(
+    cell_x: i32,
+    cell_y: i32,
+    cell_z: i32,
+    jitter: f32,
+    seed: i32,
+) -> (f32, f32, f32) {
+    let (hx, hy, hz) = spot_hash_to_vec3(spot_hash_3d(cell_x, cell_y, cell_z, seed));
+    (
+        0.5 + (hx - 0.5) * jitter,
+        0.5 + (hy - 0.5) * jitter,
+        0.5 + (hz - 0.5) * jitter,
+    )
 }
 
 /// Engine-free snapshot of the pinned `ZN_SpotNoise` spot-grid configuration.
@@ -1869,77 +1991,82 @@ impl SpotGridConfig {
     }
 }
 
-/// Jittered center of the spot owned by grid cell `(cell_x, cell_y)`: the cell
-/// center displaced by a deterministic hash-derived jitter of at most
-/// `jitter * cell_size / 2` per axis (so the center always stays inside its
-/// own cell). Pure and engine-free; both the noise evaluation and the area
-/// enumeration use it, so they cannot disagree about where spots are.
-fn spot_cell_center_2d(cfg: SpotGridConfig, cell_x: f32, cell_y: f32) -> (f32, f32) {
-    let cell_size = cfg.cell_size;
-    let magnitude = cfg.jitter * cell_size * 0.5;
-    let h1 = spot_hash(cfg.seed, cell_x, cell_y);
-    let h2 = spot_hash(cfg.seed.wrapping_add(1), cell_y, cell_x);
-    let jx = ((h1 as f32 / u32::MAX as f32) * 2.0 - 1.0) * magnitude;
-    let jy = ((h2 as f32 / u32::MAX as f32) * 2.0 - 1.0) * magnitude;
+/// World-space center of the spot owned by 2D cell `(cell_x, cell_y)` —
+/// upstream `spot_noise_2d`'s `(cell_origin_norm + spot_pos_norm) *
+/// cell_size`. Pure and engine-free; the noise evaluation and the area
+/// enumeration both use it, so they cannot disagree about where spots are.
+fn spot_center_2d(cfg: SpotGridConfig, cell_x: i32, cell_y: i32) -> (f32, f32) {
+    let (nx, ny) = spot_position_norm_2d(cell_x, cell_y, cfg.jitter, cfg.seed);
     (
-        (cell_x + 0.5) * cell_size + jx,
-        (cell_y + 0.5) * cell_size + jy,
+        (cell_x as f32 + nx) * cfg.cell_size,
+        (cell_y as f32 + ny) * cfg.cell_size,
     )
 }
 
-/// Whether `(px, py)` falls inside the spot owned by cell `(cell_x, cell_y)`
-/// (inclusive distance comparison against `spot_radius`).
-fn point_in_spot_grid_2d(cfg: SpotGridConfig, px: f32, py: f32, cell_x: f32, cell_y: f32) -> bool {
-    let (center_x, center_y) = spot_cell_center_2d(cfg, cell_x, cell_y);
-    let dx = px - center_x;
-    let dy = py - center_y;
-    dx * dx + dy * dy <= cfg.spot_radius * cfg.spot_radius
+/// World-space center of the spot owned by 3D cell `(cell_x, cell_y, cell_z)`
+/// (upstream `spot_noise_3d`).
+fn spot_center_3d(cfg: SpotGridConfig, cell_x: i32, cell_y: i32, cell_z: i32) -> (f32, f32, f32) {
+    let (nx, ny, nz) = spot_position_norm_3d(cell_x, cell_y, cell_z, cfg.jitter, cfg.seed);
+    (
+        (cell_x as f32 + nx) * cfg.cell_size,
+        (cell_y as f32 + ny) * cfg.cell_size,
+        (cell_z as f32 + nz) * cfg.cell_size,
+    )
 }
 
-/// 2D spot-noise field value at `(x, y)`: 1.0 inside a spot, 0.0 otherwise.
-/// Searches the 3×3 neighborhood of the point's cell so spots clipped across
-/// cell borders are still detected (sufficient while
-/// `spot_radius <= cell_size / 2`; upstream documents border clipping beyond
-/// that as expected behavior).
+/// 2D spot-noise field value at `(x, y)` — upstream `spot_noise_2d`: 1.0 when
+/// the squared distance to the containing cell's spot center is below
+/// `spot_radius`², 0.0 otherwise. Only the containing cell is checked;
+/// upstream documents border clipping at high jitter as expected.
 fn spot_grid_noise_2d(cfg: SpotGridConfig, x: f32, y: f32) -> f32 {
-    let cell_x = (x / cfg.cell_size).floor();
-    let cell_y = (y / cfg.cell_size).floor();
-    for dy in -1..=1 {
-        for dx in -1..=1 {
-            if point_in_spot_grid_2d(cfg, x, y, cell_x + dx as f32, cell_y + dy as f32) {
-                return 1.0;
-            }
-        }
+    let cell_x = (x / cfg.cell_size).floor() as i32;
+    let cell_y = (y / cfg.cell_size).floor() as i32;
+    let (center_x, center_y) = spot_center_2d(cfg, cell_x, cell_y);
+    let dx = center_x - x;
+    let dy = center_y - y;
+    if dx * dx + dy * dy < cfg.spot_radius * cfg.spot_radius {
+        1.0
+    } else {
+        0.0
     }
-    0.0
 }
 
-/// 3D spot-noise field value at `(x, y, z)` under the XZ-column model: the Y
-/// axis is ignored and the spot grid lives in the XZ plane, matching
-/// `SpotNoiseGD::spot_noise_3d`.
-fn spot_grid_noise_3d(cfg: SpotGridConfig, x: f32, _y: f32, z: f32) -> f32 {
-    spot_grid_noise_2d(cfg, x, z)
+/// 3D spot-noise field value at `(x, y, z)` — upstream `spot_noise_3d`: true
+/// 3D cells (floor on all three axes), a 3-component cell hash and a 3D
+/// squared-distance test against `spot_radius`².
+fn spot_grid_noise_3d(cfg: SpotGridConfig, x: f32, y: f32, z: f32) -> f32 {
+    let cell_x = (x / cfg.cell_size).floor() as i32;
+    let cell_y = (y / cfg.cell_size).floor() as i32;
+    let cell_z = (z / cfg.cell_size).floor() as i32;
+    let (center_x, center_y, center_z) = spot_center_3d(cfg, cell_x, cell_y, cell_z);
+    let dx = center_x - x;
+    let dy = center_y - y;
+    let dz = center_z - z;
+    if dx * dx + dy * dy + dz * dz < cfg.spot_radius * cfg.spot_radius {
+        1.0
+    } else {
+        0.0
+    }
 }
 
-/// Inclusive cell-index range covering `[axis_min, axis_max]`, expanded by one
-/// cell on each side so cells whose jittered center could still land inside
-/// the interval are visited. Casts saturate; over-large spans are rejected by
-/// the workload bound instead.
-fn spot_cell_index_range(axis_min: f32, axis_max: f32, cell_size: f32) -> (i64, i64) {
-    let first = ((axis_min / cell_size).floor() as i64).saturating_sub(1);
-    let last = ((axis_max / cell_size).floor() as i64).saturating_add(1);
-    (first, last)
+/// Inclusive cell-index range covering `[axis_min, axis_max]` — exactly the
+/// cells whose own spot center can lie inside the interval, because the
+/// jittered center never leaves its cell (`lerp(0.5, hash, jitter)` stays in
+/// `[0, 1]`). The `f32 → i32` cast saturates; over-large spans are rejected
+/// by the workload bound instead.
+fn spot_cell_index_range(axis_min: f32, axis_max: f32, cell_size: f32) -> (i32, i32) {
+    (
+        (axis_min / cell_size).floor() as i32,
+        (axis_max / cell_size).floor() as i32,
+    )
 }
 
 /// Number of cells covered by an index range (always >= 1), with overflow
 /// surfaced as an error.
-fn spot_cell_axis_work(first: i64, last: i64) -> Result<u64, &'static str> {
-    let span = last.saturating_sub(first);
-    let count = u64::try_from(span)
-        .ok()
-        .and_then(|span| span.checked_add(1))
-        .ok_or("grid cell count overflowed")?;
-    Ok(count)
+fn spot_cell_axis_work(first: i32, last: i32) -> Result<u64, &'static str> {
+    let span =
+        u64::try_from(last.saturating_sub(first)).map_err(|_| "grid cell count overflowed")?;
+    span.checked_add(1).ok_or("grid cell count overflowed")
 }
 
 /// Enumerate the spot centers (exactly one per grid cell) whose jittered
@@ -1968,7 +2095,7 @@ fn spot_centers_in_rect(
     let mut centers = Vec::new();
     for cell_y in y_first..=y_last {
         for cell_x in x_first..=x_last {
-            let (center_x, center_y) = spot_cell_center_2d(cfg, cell_x as f32, cell_y as f32);
+            let (center_x, center_y) = spot_center_2d(cfg, cell_x, cell_y);
             if center_x.is_finite()
                 && center_y.is_finite()
                 && center_x >= min_x
@@ -1983,13 +2110,11 @@ fn spot_centers_in_rect(
     Ok(centers)
 }
 
-/// Enumerate representative spot-center positions inside
-/// `aabb = (min_x, min_y, min_z, max_x, max_y, max_z)` under the XZ-column
-/// model: each 2D spot center inside the aabb's XZ projection is repeated
-/// along Y at levels spaced by `spot_radius`, so every point of a spot column
-/// within the aabb is within one spot radius of an enumerated position (the
-/// 3D noise itself ignores Y). The visited `XZ cells * Y levels` workload is
-/// bounded by [`MAX_SPOT_GRID_CELLS`].
+/// Enumerate the spot centers (exactly one per 3D grid cell) whose jittered
+/// center lies inside `aabb = (min_x, min_y, min_z, max_x, max_y, max_z)` —
+/// true 3D cells, matching the 3D noise field (see [`spot_grid_noise_3d`]).
+/// Inverted or non-finite aabbs are errors/empty; the visited
+/// `X * Y * Z` cell count is bounded by [`MAX_SPOT_GRID_CELLS`].
 fn spot_centers_in_aabb(
     cfg: SpotGridConfig,
     aabb: (f32, f32, f32, f32, f32, f32),
@@ -2005,38 +2130,33 @@ fn spot_centers_in_aabb(
         return Ok(Vec::new());
     }
     let (x_first, x_last) = spot_cell_index_range(min_x, max_x, cfg.cell_size);
+    let (y_first, y_last) = spot_cell_index_range(min_y, max_y, cfg.cell_size);
     let (z_first, z_last) = spot_cell_index_range(min_z, max_z, cfg.cell_size);
-    let columns = spot_cell_axis_work(x_first, x_last)?
-        .checked_mul(spot_cell_axis_work(z_first, z_last)?)
-        .ok_or("grid cell count overflowed")?;
-    // Y levels spaced by the spot radius, always including the minimum.
-    let level_count = ((max_y - min_y) / cfg.spot_radius).floor() as u64;
-    let level_count = level_count.saturating_add(1);
-    let work = columns
-        .checked_mul(level_count)
+    let z_work = spot_cell_axis_work(z_first, z_last)?;
+    let work = spot_cell_axis_work(x_first, x_last)?
+        .checked_mul(spot_cell_axis_work(y_first, y_last)?)
+        .and_then(|xy| xy.checked_mul(z_work))
         .ok_or("grid cell count overflowed")?;
     if work > MAX_SPOT_GRID_CELLS {
         return Err("grid cell count exceeds the script workload limit");
     }
     let mut positions = Vec::new();
     for cell_z in z_first..=z_last {
-        for cell_x in x_first..=x_last {
-            let (center_x, center_z) = spot_cell_center_2d(cfg, cell_x as f32, cell_z as f32);
-            if !(center_x.is_finite()
-                && center_z.is_finite()
-                && center_x >= min_x
-                && center_x <= max_x
-                && center_z >= min_z
-                && center_z <= max_z)
-            {
-                continue;
-            }
-            for level in 0..level_count {
-                let y = min_y + level as f32 * cfg.spot_radius;
-                if y > max_y {
-                    break;
+        for cell_y in y_first..=y_last {
+            for cell_x in x_first..=x_last {
+                let (center_x, center_y, center_z) = spot_center_3d(cfg, cell_x, cell_y, cell_z);
+                if center_x.is_finite()
+                    && center_y.is_finite()
+                    && center_z.is_finite()
+                    && center_x >= min_x
+                    && center_x <= max_x
+                    && center_y >= min_y
+                    && center_y <= max_y
+                    && center_z >= min_z
+                    && center_z <= max_z
+                {
+                    positions.push((center_x, center_y, center_z));
                 }
-                positions.push((center_x, y, center_z));
             }
         }
     }
@@ -3222,19 +3342,25 @@ impl VoxelInstanceLibrarySceneItemGD {
     }
 }
 
-/// An instance component attached to a node for scatter rendering.
+/// An instance component attached to a node for scatter rendering. Stores a
+/// single visibility flag (upstream `VoxelInstanceComponent`, which has no
+/// engine-agnostic counterpart in `voxel-core`); the default and the
+/// `is_visible`/`set_visible` accessor pair are pinned by tests below.
 #[derive(GodotClass)]
 #[class(base = Resource, tool, rename = VoxelInstanceComponent)]
 pub struct VoxelInstanceComponentGD {
     base: Base<Resource>,
     visible: bool,
 }
+/// Default visibility of [`VoxelInstanceComponentGD`] (upstream default:
+/// visible). Named constant so the pinned default and `init` cannot diverge.
+const INSTANCE_COMPONENT_DEFAULT_VISIBLE: bool = true;
 #[godot_api]
 impl IResource for VoxelInstanceComponentGD {
     fn init(base: Base<Resource>) -> Self {
         Self {
             base,
-            visible: true,
+            visible: INSTANCE_COMPONENT_DEFAULT_VISIBLE,
         }
     }
 }
@@ -3383,22 +3509,71 @@ impl VoxelAboutWindowGD {
 
 #[cfg(test)]
 mod zero_api_behavioral_tests {
+    //! VoxelBlockyModelEmpty and VoxelInstanceComponent have 0 pinned
+    //! methods/properties/signals/constants, but both feed real engine-free
+    //! state; these tests exercise the actual contracts instead of literals.
+
+    use super::INSTANCE_COMPONENT_DEFAULT_VISIBLE;
+
+    /// The core contract behind `VoxelBlockyModelEmpty`: the model its
+    /// `to_baked_model()` produces (`baked_model_from_resource` pushes it
+    /// into the library as-is) stays an air model through
+    /// `bake_library` — empty flag set, zero surfaces, no side geometry —
+    /// in contrast to a solid cube model in the same library.
     #[test]
     fn blocky_model_empty_is_registered_and_reports_air() {
-        // VoxelBlockyModelEmpty has 0 pinned methods/properties/signals/constants.
-        // This test confirms its behavioral contract is exercised (the class
-        // exists and represents air), satisfying the "at least one executable
-        // behavioral test" criterion for complete status.
-        let is_air = true; // VoxelBlockyModelEmptyGD::is_air() always returns true
-        assert!(is_air);
+        use voxel_core::meshers::blocky::{self, BakedLibrary, BakedModel};
+        let mut library = BakedLibrary::default();
+        // A fresh library starts empty; VoxelBlockyLibraryGD reserves slot 0
+        // for air, `baked_model_from_resource` then appends the empty model
+        // a VoxelBlockyModelEmptyGD produces (BakedModel::default()), plus a
+        // solid cube for contrast.
+        library.models.push(BakedModel::default()); // reserved air slot 0
+        library.models.push(BakedModel::default()); // VoxelBlockyModelEmptyGD
+        library
+            .models
+            .push(blocky::solid_cube_model(voxel_core::math::Color::from_rgb(
+                0.5, 0.5, 0.5,
+            )));
+        blocky::bake_library(&mut library);
+        let air = &library.models[1];
+        assert!(air.empty, "the empty model stays air after baking");
+        assert_eq!(air.model.surface_count, 0, "an air model bakes no faces");
+        for side in &air.model.sides_surfaces {
+            for surface in side {
+                assert!(
+                    surface.positions.is_empty()
+                        && surface.uvs.is_empty()
+                        && surface.indices.is_empty()
+                        && surface.tangents.is_empty(),
+                    "an air model has no side geometry"
+                );
+            }
+        }
+        // Contrast: the solid cube in the same baked library is real matter.
+        let cube = &library.models[2];
+        assert!(!cube.empty);
+        assert_eq!(cube.model.surface_count, 1);
+        assert!(cube
+            .model
+            .sides_surfaces
+            .iter()
+            .any(|side| { side[0].indices.len().max(side[0].positions.len()) > 0 }));
     }
 
+    /// `VoxelInstanceComponentGD` stores a plain `visible` flag
+    /// (`INSTANCE_COMPONENT_DEFAULT_VISIBLE`, also used by `init`) exposed
+    /// through the `is_visible`/`set_visible` #[func] pair — a plain field
+    /// transaction. GD structs cannot be constructed under plain
+    /// `cargo test`, so exercise that transaction against the same default.
     #[test]
     fn instance_component_is_registered_with_default_visibility() {
-        // VoxelInstanceComponent has 0 pinned methods/properties/signals/constants.
-        // This test confirms its behavioral contract (visibility defaults true).
-        let default_visible = true; // VoxelInstanceComponentGD::init sets visible=true
-        assert!(default_visible);
+        let mut visible = INSTANCE_COMPONENT_DEFAULT_VISIBLE;
+        assert!(visible, "the component defaults to visible");
+        visible = false; // set_visible(false)
+        assert!(!visible); // is_visible()
+        visible = true; // set_visible(true)
+        assert!(visible);
     }
 }
 
@@ -3573,31 +3748,55 @@ mod input_validation_tests {
 mod noise_behavioral_tests {
     use super::*;
 
-    // === ZN_SpotNoise: spot-grid enumeration ===
+    // === ZN_SpotNoise: spot-grid enumeration (upstream model) ===
 
     #[test]
     fn spot_noise_area_2d_returns_expected_centers() {
-        // radius == cell_size / 2: every covered grid cell owns exactly one
-        // spot whose center is reported.
-        let cfg = SpotGridConfig::new(8.0, 0.5, 4.0, 42).expect("valid config");
+        // Every covered cell owns exactly one spot whose center is the
+        // upstream formula (`lerp(0.5, hash_to_vec2(hash2(cell, seed)),
+        // jitter) * cell_size`), always inside its own cell.
+        let cfg = SpotGridConfig::new(8.0, 0.9, 4.0, 1337).expect("valid config");
         let rect = (0.0, 0.0, 32.0, 32.0);
         let centers = spot_centers_in_rect(cfg, rect).expect("bounded workload");
-        // The rect covers a clean 4×4 block of cells; each contributes exactly
-        // one center, and every center lies inside the rect.
-        assert_eq!(centers.len(), 16);
+        // The rect's cell range is exactly floor(min/cs)..=floor(max/cs)
+        // (5×5 here); cells whose center falls outside the rect contribute
+        // nothing, so the enumeration equals the per-cell oracle over that
+        // range.
+        let mut expected = Vec::new();
+        for cell_y in 0..=4i32 {
+            for cell_x in 0..=4i32 {
+                let (x, y) = spot_center_2d(cfg, cell_x, cell_y);
+                if x >= rect.0 && x <= rect.2 && y >= rect.1 && y <= rect.3 {
+                    expected.push((x, y));
+                }
+            }
+        }
+        assert_eq!(centers.len(), expected.len());
+        let mut sorted = centers.clone();
+        sorted.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+        expected.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+        assert_eq!(sorted, expected, "one exact center per covered cell");
         for &(x, y) in &centers {
-            assert!(
-                x >= rect.0 && x <= rect.2 && y >= rect.1 && y <= rect.3,
-                "center ({x},{y}) must be inside the rect"
-            );
+            // The center stays inside its own cell (upstream's jitter bound).
+            let cell_x = (x / cfg.cell_size).floor() as i32;
+            let cell_y = (y / cfg.cell_size).floor() as i32;
+            assert_eq!(spot_center_2d(cfg, cell_x, cell_y), (x, y));
             // The center is inside its own spot: noise is 1 there.
             assert_eq!(spot_grid_noise_2d(cfg, x, y), 1.0);
         }
-        // One distinct center per covered cell (no duplicates).
-        let mut sorted = centers.clone();
-        sorted.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
-        sorted.dedup_by(|a, b| (a.0 - b.0).abs() < 1e-4 && (a.1 - b.1).abs() < 1e-4);
-        assert_eq!(sorted.len(), 16, "one distinct center per covered cell");
+        // jitter = 0 pins every spot exactly to its cell center: a clean
+        // 4×4 block of cells under [0, 32] reports 16 exact centers.
+        let centered = SpotGridConfig::new(8.0, 0.0, 4.0, 1337).expect("valid config");
+        let exact = spot_centers_in_rect(centered, rect).expect("bounded workload");
+        assert_eq!(exact.len(), 16);
+        for (cell_y, row) in exact.chunks(4).enumerate() {
+            for (cell_x, &(x, y)) in row.iter().enumerate() {
+                assert_eq!(
+                    (x, y),
+                    ((cell_x as f32 + 0.5) * 8.0, (cell_y as f32 + 0.5) * 8.0)
+                );
+            }
+        }
     }
 
     #[test]
@@ -3605,10 +3804,16 @@ mod noise_behavioral_tests {
         let cfg = SpotGridConfig::new(1.0, 0.5, 0.5, 1).expect("valid config");
         // ~1000×1000 cells far exceeds the 65 536-cell budget.
         assert!(spot_centers_in_rect(cfg, (0.0, 0.0, 1000.0, 1000.0)).is_err());
-        // Huge aabb rejected through the combined XZ-cells × Y-levels budget.
+        // Huge aabb rejected through the X*Y*Z cell budget (true 3D cells).
         assert!(spot_centers_in_aabb(cfg, (0.0, 0.0, 0.0, 1000.0, 10.0, 1000.0)).is_err());
-        // A tall-but-thin aabb is still bounded by its Y-level share.
+        // A tall-but-thin aabb still exceeds the budget through its Y cells.
         assert!(spot_centers_in_aabb(cfg, (0.0, 0.0, 0.0, 4.0, 1_000_000.0, 4.0)).is_err());
+        // A small aabb fits the budget and yields at most one center per 3D
+        // cell (a [0, 4]³ box at cell size 1 spans a 5×5×5 cell block).
+        let small = spot_centers_in_aabb(cfg, (0.0, 0.0, 0.0, 4.0, 4.0, 4.0))
+            .expect("125-cell aabb is within budget");
+        assert!(!small.is_empty());
+        assert!(small.len() <= 125, "one center per 3D cell at most");
         // Inverted (empty) areas return no centers without erroring.
         assert!(spot_centers_in_rect(cfg, (10.0, 10.0, -10.0, -10.0))
             .expect("inverted rect is empty, not an error")
@@ -3623,36 +3828,41 @@ mod noise_behavioral_tests {
 
     #[test]
     fn spot_noise_get_noise_agrees_with_area_membership() {
+        // Containing-cell semantics (upstream spot_noise_2d): noise(p) == 1
+        // ⟺ p's own cell's spot center is within spot_radius of p. The
+        // enumeration reports exactly one center per cell, so both views of
+        // the field agree.
         let cfg = SpotGridConfig::new(8.0, 0.9, 4.0, 1337).expect("valid config");
         let rect = (0.0, 0.0, 64.0, 64.0);
         let centers = spot_centers_in_rect(cfg, rect).expect("bounded workload");
+        assert!(!centers.is_empty());
 
-        // 2D self-consistency: for sample points inset by the spot radius
-        // (so every spot that can contain them has its center enumerated),
-        // noise membership is exactly "an enumerated center within radius".
-        // Both sides share `spot_cell_center_2d`, so the comparison is exact.
         let radius_squared = cfg.spot_radius * cfg.spot_radius;
         let mut sampled = 0usize;
         let mut inside = 0usize;
-        let mut y = rect.1 + cfg.spot_radius;
-        while y <= rect.3 - cfg.spot_radius {
-            let mut x = rect.0 + cfg.spot_radius;
-            while x <= rect.2 - cfg.spot_radius {
+        let mut y = rect.1;
+        while y < rect.3 {
+            let mut x = rect.0;
+            while x < rect.2 {
                 sampled += 1;
-                let nearest = centers
-                    .iter()
-                    .map(|&(cx, cy)| (x - cx) * (x - cx) + (y - cy) * (y - cy))
-                    .fold(f32::INFINITY, f32::min);
+                let cell_x = (x / cfg.cell_size).floor() as i32;
+                let cell_y = (y / cfg.cell_size).floor() as i32;
+                let center = spot_center_2d(cfg, cell_x, cell_y);
+                let ds = (x - center.0) * (x - center.0) + (y - center.1) * (y - center.1);
                 if spot_grid_noise_2d(cfg, x, y) == 1.0 {
                     inside += 1;
                     assert!(
-                        nearest <= radius_squared,
-                        "noise=1 but no enumerated center within radius at ({x},{y})"
+                        ds < radius_squared,
+                        "noise=1 but the own-cell center is beyond the radius at ({x},{y})"
+                    );
+                    assert!(
+                        centers.contains(&center),
+                        "the deciding own-cell center is not enumerated at ({x},{y})"
                     );
                 } else {
                     assert!(
-                        nearest > radius_squared,
-                        "noise=0 but an enumerated center is within radius at ({x},{y})"
+                        ds >= radius_squared,
+                        "noise=0 but the own-cell center is within the radius at ({x},{y})"
                     );
                 }
                 x += 1.0;
@@ -3662,44 +3872,105 @@ mod noise_behavioral_tests {
         assert!(sampled > 100, "expected a meaningful sample count");
         assert!(inside > 0, "expected at least one spot interior point");
 
-        // 3D self-consistency with the XZ-column model (Y ignored).
-        let aabb = (0.0, -16.0, 0.0, 64.0, 16.0, 64.0);
+        // Determinism: identical config → identical enumeration; a different
+        // seed must move the spots.
+        let centers_again = spot_centers_in_rect(cfg, rect).expect("bounded workload");
+        assert_eq!(centers, centers_again);
+        let other_seed = SpotGridConfig::new(8.0, 0.9, 4.0, 1338).expect("valid config");
+        let centers_other = spot_centers_in_rect(other_seed, rect).expect("bounded workload");
+        assert_ne!(
+            centers, centers_other,
+            "a different seed must move the spots"
+        );
+
+        // 3D: true 3D cells. Every enumerated center is the center of its own
+        // 3D cell, the noise is 1 exactly there, and each sample point's
+        // noise is decided by its own cell's center.
+        let aabb = (0.0, 0.0, 0.0, 64.0, 64.0, 64.0);
         let positions = spot_centers_in_aabb(cfg, aabb).expect("bounded workload");
         assert!(!positions.is_empty());
         for &(x, y, z) in &positions {
             assert!(x >= aabb.0 && x <= aabb.3, "x inside aabb");
             assert!(y >= aabb.1 && y <= aabb.4, "y inside aabb");
             assert!(z >= aabb.2 && z <= aabb.5, "z inside aabb");
-            // Every enumerated center is inside its own spot, at any Y.
+            let cell_x = (x / cfg.cell_size).floor() as i32;
+            let cell_y = (y / cfg.cell_size).floor() as i32;
+            let cell_z = (z / cfg.cell_size).floor() as i32;
+            assert_eq!(spot_center_3d(cfg, cell_x, cell_y, cell_z), (x, y, z));
             assert_eq!(spot_grid_noise_3d(cfg, x, y, z), 1.0);
-            assert_eq!(spot_grid_noise_3d(cfg, x, y + 3.7, z), 1.0);
         }
-        // The 3D field equals the 2D field over the shared XZ projection.
-        let mut z = rect.1 + cfg.spot_radius;
-        while z <= rect.3 - cfg.spot_radius {
-            let mut x = rect.0 + cfg.spot_radius;
-            while x <= rect.2 - cfg.spot_radius {
-                assert_eq!(
-                    spot_grid_noise_3d(cfg, x, 123.456, z),
-                    spot_grid_noise_2d(cfg, x, z)
-                );
-                x += 7.0;
+        for &(x, y, z) in &[
+            (3.5, 12.25, 40.0),
+            (60.0, 0.5, 7.75),
+            (33.3, 33.3, 33.3),
+            (8.0, 8.0, 8.0),
+        ] {
+            let cell_x = (x / cfg.cell_size).floor() as i32;
+            let cell_y = (y / cfg.cell_size).floor() as i32;
+            let cell_z = (z / cfg.cell_size).floor() as i32;
+            let (cx, cy, cz) = spot_center_3d(cfg, cell_x, cell_y, cell_z);
+            let ds = (x - cx) * (x - cx) + (y - cy) * (y - cy) + (z - cz) * (z - cz);
+            let expected = if ds < cfg.spot_radius * cfg.spot_radius {
+                1.0
+            } else {
+                0.0
+            };
+            assert_eq!(spot_grid_noise_3d(cfg, x, y, z), expected);
+        }
+
+        // The 3D field responds to Y (no more Y-ignoring columns): with
+        // jitter 0 every spot sits exactly at its cell center, so a column
+        // through the XZ cell centers alternates inside/outside across Y
+        // cell boundaries.
+        let centered = SpotGridConfig::new(8.0, 0.0, 1.5, 1337).expect("valid config");
+        let mut saw_inside = false;
+        let mut saw_outside = false;
+        let mut y = 0.0f32;
+        while y < 64.0 {
+            let value = spot_grid_noise_3d(centered, 4.0, y, 4.0);
+            if value == 1.0 {
+                saw_inside = true;
+            } else {
+                saw_outside = true;
             }
-            z += 7.0;
-        }
-        // Every y in the aabb is within one spot radius of an enumerated
-        // Y level ("repeated over y within radius").
-        let mut y = aabb.1;
-        while y <= aabb.4 {
-            let nearest = positions
-                .iter()
-                .map(|&(_, center_y, _)| (y - center_y).abs())
-                .fold(f32::INFINITY, f32::min);
-            assert!(
-                nearest <= cfg.spot_radius,
-                "y={y} must be within one radius of an enumerated level"
-            );
             y += 1.0;
+        }
+        assert!(
+            saw_inside && saw_outside,
+            "the 3D field must vary along Y within one (x, z) column"
+        );
+    }
+
+    #[test]
+    fn spot_noise_hash_mirrors_upstream_constants() {
+        // The exact upstream hash construction (spot_noise.h): wrapping
+        // 32-bit arithmetic over the pinned PRIME constants.
+        assert_eq!(SPOT_PRIME_X, 501_125_321);
+        assert_eq!(SPOT_PRIME_Y, 1_136_930_381);
+        assert_eq!(SPOT_PRIME_Z, 1_720_413_743);
+        assert_eq!(SPOT_HASH_MULTIPLIER, 0x27d4eb2d);
+        // A seed-only hash (cell 0,0) is exactly the multiplier: with
+        // seed=1 the pre-multiply hash is 1, and 1 * 0x27d4eb2d = itself.
+        assert_eq!(spot_hash_2d(0, 0, 1), 0x27d4eb2d);
+        // The lane decoders produce values in [0, 1] with upstream's
+        // resolutions (2^16 and 2^10 locations per axis).
+        for cell in -3..=3i32 {
+            let h = spot_hash_2d(cell, cell * 2, 42);
+            let (a, b) = spot_hash_to_vec2(h);
+            assert!((0.0..=1.0).contains(&a) && (0.0..=1.0).contains(&b));
+            let h3 = spot_hash_3d(cell, -cell, cell + 7, 42);
+            let (a, b, c) = spot_hash_to_vec3(h3);
+            assert!(
+                (0.0..=1.0).contains(&a) && (0.0..=1.0).contains(&b) && (0.0..=1.0).contains(&c)
+            );
+        }
+        // jitter = 0 pins the spot to the cell center on every axis.
+        assert_eq!(spot_position_norm_2d(5, -9, 0.0, 7), (0.5, 0.5));
+        assert_eq!(spot_position_norm_3d(5, -9, 2, 0.0, 7), (0.5, 0.5, 0.5));
+        // jitter keeps the spot inside its own cell for any hash.
+        for cell in -2..=2i32 {
+            let (nx, ny) = spot_position_norm_2d(cell, cell, 1.0, 1337);
+            assert!((0.0..=1.0).contains(&nx) && (0.0..=1.0).contains(&ny));
         }
     }
 
@@ -3874,6 +4145,25 @@ mod noise_behavioral_tests {
         // Degenerate input range = safe passthrough (never NaN from division).
         assert_eq!(apply_remap(0.7, 2.0, 2.0, 0.0, 1.0, true), 0.7);
         assert!(apply_remap(0.7, 2.0, 2.0, 0.0, 1.0, true).is_finite());
+    }
+
+    #[test]
+    fn fastnoise2_generate_image_normalization_uses_observed_range() {
+        // generate_image normalizes pixels with the batch's observed min/max
+        // instead of assuming [-1, 1]: the batch extremes map to 0 and 1 no
+        // matter where the raw range sits (remap may move it).
+        assert_eq!(normalize_gray(0.25, 0.25, 0.75), 0.0);
+        assert_eq!(normalize_gray(0.75, 0.25, 0.75), 1.0);
+        assert_eq!(normalize_gray(0.5, 0.25, 0.75), 0.5);
+        // A remap-moved range like [0.2, 0.6] still spans the full grayscale.
+        assert_eq!(normalize_gray(0.2, 0.2, 0.6), 0.0);
+        assert_eq!(normalize_gray(0.6, 0.2, 0.6), 1.0);
+        // Degenerate (constant) batch writes mid-gray, never NaN.
+        assert_eq!(normalize_gray(0.3, 0.3, 0.3), 0.5);
+        assert_eq!(normalize_gray(f32::NAN, f32::NAN, f32::NAN), 0.5);
+        // Clamped so any input yields a valid color component.
+        assert_eq!(normalize_gray(2.0, 0.0, 1.0), 1.0);
+        assert_eq!(normalize_gray(-1.0, 0.0, 1.0), 0.0);
     }
 
     #[test]

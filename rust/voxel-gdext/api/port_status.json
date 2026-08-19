@@ -22,7 +22,7 @@
    "status": "partial",
    "binding_state": "registered",
    "registered_name": "FastNoise2",
-   "evidence": "Full pinned surface present: all 6 methods and 22 properties with pinned defaults, all 33 constants, remap applied with the upstream Remap formula and terrace with the upstream Terrace construction (smoothness normalized to [0,1]), generate_image implemented (non-tileable; tiling logs a one-time warning). Honest partial: this port substitutes the pure-Rust fastnoise-lite engine for the C++ FastNoise2 library (no numeric parity, get_simd_level always scalar), encoded_node_tree is stored but not decoded, and cellular index-based lookups approximate via distance variants.",
+   "evidence": "Full pinned surface present: all 6 methods and 22 properties with pinned defaults, all 33 constants, remap applied with the upstream Remap formula and terrace with the upstream Terrace construction (smoothness normalized to [0,1]), generate_image implemented (compressed images rejected, pixels normalized by the observed sample range, non-tileable; tiling logs a one-time warning) and covered by the api smoke test. Honest partial: this port substitutes the pure-Rust fastnoise-lite engine for the C++ FastNoise2 library (no numeric parity, get_simd_level always scalar), encoded_node_tree is stored but not decoded, and cellular index-based lookups approximate via distance variants.",
    "source_paths": [
     "upstream:doc/classes/FastNoise2.xml",
     "rust/voxel-gdext/src/resources3.rs"
@@ -30,7 +30,8 @@
    "behavioral_tests": [
     "rust/voxel-gdext/src/resources3.rs#fastnoise2_constants_match_pinned_enum_values",
     "rust/voxel-gdext/src/resources3.rs#fastnoise2_remap_transforms_output_range",
-    "rust/voxel-gdext/src/resources3.rs#fastnoise2_terrace_smoothness_extremes"
+    "rust/voxel-gdext/src/resources3.rs#fastnoise2_terrace_smoothness_extremes",
+    "rust/voxel-gdext/smoke_test/api_test.gd#fastnoise2_generate_image_writes_pixels"
    ]
   },
   {
@@ -320,7 +321,7 @@
    "status": "complete",
    "binding_state": "registered",
    "registered_name": "VoxelGenerator",
-   "evidence": "Pinned surface complete: generate_block(out_buffer, origin_in_voxels: Vector3, lod) is exposed on the base and overridden on every concrete generator (origin type matches the pinned XML and upstream C++). Abstract base body is a faithful no-op; concrete overrides run the core generator into the buffer. gdext 0.5.4 cannot inherit user-defined classes, so every inherited pinned member is re-declared on the concrete class (flat Resource base) and the terrain accepts generators via per-type casts. Behavioral test pins the generate_block contract (solid/air fill and SDF sign flip) via the core-backed free functions.",
+   "evidence": "Pinned surface complete: generate_block(out_buffer, origin_in_voxels: Vector3, lod) is exposed on the base and overridden on every concrete generator class (origin type matches the pinned XML and upstream C++; truncating Vector3i conversion like Godot). Abstract base body is a faithful no-op; concrete overrides run the core generator into the buffer. gdext 0.5.4 cannot inherit user-defined classes, so concrete generators keep a flat Resource base with inherited pinned members re-declared. Behavioral test pins the generate_block contract (solid/air fill and SDF sign flip) via the core-backed free functions.",
    "source_paths": [
     "upstream:doc/classes/VoxelGenerator.xml",
     "rust/voxel-gdext/src/resources2.rs"
@@ -350,7 +351,7 @@
    "status": "partial",
    "binding_state": "registered",
    "registered_name": "VoxelGeneratorGraph",
-   "evidence": "Feasible pinned subset implemented and tested: clear, compile returning the pinned {success, node_id, message} report, debug_analyze_range via core interval analysis, raycast_sdf_approx with stride/step bounds, debug_load_waves_preset, debug_measure_microseconds_per_voxel, generate_image_from_sdf, all seven pinned members with validation (use_xz_caching genuinely gates the core XZ cache), TEXTURE_MODE constants and the node_name_changed signal declaration. Remaining blockers: bake_sphere_bumpmap/bake_sphere_normalmap need panorama baking support absent from the core, and get_main_function requires the VoxelGraphFunction registry rework (separate stage).",
+   "evidence": "Feasible pinned subset implemented and tested: clear, compile returning the pinned {success, node_id, message} report, debug_analyze_range via core interval analysis, raycast_sdf_approx with stride/step bounds, debug_load_waves_preset, debug_measure_microseconds_per_voxel, generate_image_from_sdf (65 536-pixel budget), generate_block, all seven pinned members with validation (use_xz_caching is wired to the core XZ-prefix cache flag with output-equivalence tested; the other five are stored-but-inert pending core culling support), TEXTURE_MODE constants and the node_name_changed signal declaration. Remaining blockers: bake_sphere_bumpmap/bake_sphere_normalmap need panorama baking support absent from the core, and get_main_function requires the VoxelGraphFunction registry rework (separate stage).",
    "source_paths": [
     "upstream:doc/classes/VoxelGeneratorGraph.xml",
     "rust/voxel-gdext/src/voxel_buffer.rs"
@@ -381,7 +382,7 @@
    "status": "complete",
    "binding_state": "registered",
    "registered_name": "VoxelGeneratorImage",
-   "evidence": "Pinned surface complete: image property (void set_image pinned name, get_image) storing the last assigned Image, blur_enabled wired to a deterministic core box blur, height_range pinned override default 200, red-channel sampling (upstream reads red, not luminance), repeat-by-default wrap, inherited channel/height_start/iso_scale/offset all forwarded, plus generate_block. gdext 0.5.4 cannot inherit user-defined classes, so every inherited pinned member is re-declared on the concrete class (flat Resource base) and the terrain accepts generators via per-type casts. Behavioral test pins red-channel reading, clamp/repeat wrap, iso/offset forwarding and the blur flag; the core blur has its own unit tests.",
+   "evidence": "Pinned surface complete: image property (void set_image pinned name, get_image) storing the last assigned Image with compressed images rejected like upstream, blur_enabled wired to the upstream 5-tap cross kernel with wrap-around fetches, height_range pinned override default 200, red-channel sampling (upstream reads red, not luminance), repeat-by-default wrap, inherited channel/height_start/iso_scale/offset all forwarded, plus generate_block. gdext 0.5.4 cannot inherit user-defined classes, so inherited pinned members are re-declared on the concrete class (flat Resource base). Behavioral test pins red-channel reading, clamp/repeat wrap, iso/offset forwarding and the blur flag; the core blur has its own wrap-around unit tests.",
    "source_paths": [
     "upstream:doc/classes/VoxelGeneratorImage.xml",
     "rust/voxel-gdext/src/generators.rs"
@@ -406,7 +407,7 @@
    "status": "complete",
    "binding_state": "registered",
    "registered_name": "VoxelGeneratorNoise",
-   "evidence": "Pinned surface complete: channel, height_start, height_range and the required noise resource plus generate_block. The assigned noise resource (ZN_FastNoiseLite or FastNoise2) now drives generation through its ClassDB getters; own seed/frequency remain the documented fallback when no resource is assigned. Core NoiseConfig honors fractal passthrough. Behavioral tests pin determinism per configuration, seed divergence and channel wiring.",
+   "evidence": "Pinned surface complete: channel, height_start, height_range and the required noise resource plus generate_block. The assigned noise resource drives generation through its ClassDB getters with per-class enum decoding (ZN_FastNoiseLite and FastNoise2 encodings differ and are mapped separately); unknown resource classes log and fall back to the sampler default. Own seed/frequency remain the documented fallback when no resource is assigned. Core NoiseConfig honors fractal passthrough. Behavioral tests pin determinism per configuration, seed divergence, channel wiring and the per-class noise-type decode.",
    "source_paths": [
     "upstream:doc/classes/VoxelGeneratorNoise.xml",
     "rust/voxel-gdext/src/generators.rs"
@@ -458,7 +459,7 @@
    "status": "partial",
    "binding_state": "registered",
    "registered_name": "VoxelGraphFunction",
-   "evidence": "The pinned API is a node-type registry with an edge list (32 methods, 44 NodeTypeID constants, IO definitions, sub-graph function nodes); the core graph is an AST with embedded ports and no per-node metadata or connection objects. Structural gap, scheduled as its own later stage; the current binding keeps only the extras (set_name/get_name, compile_and_sample) that the graph editor addon drives.",
+   "evidence": "The pinned API is a node-type registry with an edge list (32 methods, 58 constants (57 NodeTypeIDs + NODE_TYPE_COUNT), IO definitions, sub-graph function nodes); the core graph is an AST with embedded ports and no per-node metadata or connection objects. Structural gap, scheduled as its own later stage; the current binding keeps only the extras (set_name/get_name, compile_and_sample) that the graph editor addon drives.",
    "source_paths": [
     "upstream:doc/classes/VoxelGraphFunction.xml",
     "rust/voxel-gdext/src/resources2.rs"
@@ -919,7 +920,7 @@
    "status": "complete",
    "binding_state": "registered",
    "registered_name": "ZN_SpotNoise",
-   "evidence": "Pinned surface complete and functional: get_noise_2d/2dv/3d/3dv plus get_spot_positions_in_area_2d/3d implemented on shared cell/jitter machinery with a bounded workload (workload guard), and cell_size/jitter/seed/spot_radius properties with pinned defaults. Noise evaluation and area enumeration share bit-identical centers, so membership self-consistency holds exactly while spot_radius <= cell_size/2 (upstream's documented border limitation beyond). Jitter hash is a Rust-side deterministic substitute for upstream's RNG (documented approximation). Behavioral tests pin expected centers, workload bounds and noise/enumeration agreement in 2D and 3D.",
+   "evidence": "Pinned surface complete and functional against the upstream model: 2D checks only the containing cell and 3D uses true 3D cells (floor on all axes, 3-component hash, 3D squared distance), matching util/noise/spot_noise.h at the pinned commit. The jitter hash and lane decoders mirror upstream's exact wrapping-32-bit math, so spot centers are numerically upstream-identical. get_spot_positions_in_area_2d/3d enumerate one center per covered cell with a 65 536-cell workload bound; noise evaluation and enumeration share the same centers, so per-cell membership agreement is exact. Behavioral tests pin expected centers (including the jitter=0 exact case), workload bounds, noise/enumeration agreement and the upstream hash constants.",
    "source_paths": [
     "upstream:doc/classes/ZN_SpotNoise.xml",
     "rust/voxel-gdext/src/resources3.rs"
@@ -927,7 +928,8 @@
    "behavioral_tests": [
     "rust/voxel-gdext/src/resources3.rs#spot_noise_get_noise_agrees_with_area_membership",
     "rust/voxel-gdext/src/resources3.rs#spot_noise_area_2d_returns_expected_centers",
-    "rust/voxel-gdext/src/resources3.rs#spot_noise_area_workload_is_bounded"
+    "rust/voxel-gdext/src/resources3.rs#spot_noise_area_workload_is_bounded",
+    "rust/voxel-gdext/src/resources3.rs#spot_noise_hash_mirrors_upstream_constants"
    ]
   },
   {
