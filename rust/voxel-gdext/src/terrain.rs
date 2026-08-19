@@ -3364,15 +3364,16 @@ fn build_array_mesh(surfaces: &[PendingRenderSurface]) -> Option<Gd<ArrayMesh>> 
     build_array_mesh_with_materials(surfaces, &[])
 }
 
-/// Assemble an `ArrayMesh` from resolved render surfaces, optionally attaching
-/// one `Material` per surface (`materials` is indexed by each surface's core
-/// `material_index`; missing entries are simply left unassigned). Shared by
-/// the terrain render path (`build_array_mesh`, no materials — the terrain
-/// applies `material_override` on the `MeshInstance3D` instead) and the
-/// standalone mesher `build_mesh` funcs.
+/// Assemble an `ArrayMesh` from resolved render surfaces, optionally
+/// attaching one `Material` per surface (`materials` is indexed by each
+/// surface's core `material_index` as positional slots: `None` entries and
+/// missing tail slots are left unassigned). Shared by the terrain render
+/// path (`build_array_mesh`, no materials — the terrain applies
+/// `material_override` on the `MeshInstance3D` instead) and the standalone
+/// mesher `build_mesh` funcs.
 pub(crate) fn build_array_mesh_with_materials(
     surfaces: &[PendingRenderSurface],
-    materials: &[Gd<Material>],
+    materials: &[Option<Gd<Material>>],
 ) -> Option<Gd<ArrayMesh>> {
     let mut array_mesh = ArrayMesh::new_gd();
     for surface in surfaces {
@@ -3427,8 +3428,9 @@ pub(crate) fn build_array_mesh_with_materials(
             &format!("material_{}", surface.material_index),
         );
         // Attach the caller-provided material for this surface's slot, if any
-        // (upstream `VoxelMesher.build_mesh` semantics).
-        if let Some(material) = materials.get(surface.material_index as usize) {
+        // (upstream `VoxelMesher.build_mesh` semantics; a null entry or a
+        // missing tail slot leaves the surface unassigned).
+        if let Some(Some(material)) = materials.get(surface.material_index as usize) {
             array_mesh.surface_set_material(surface_index, material);
         }
     }
@@ -3440,12 +3442,13 @@ pub(crate) fn build_array_mesh_with_materials(
 }
 
 /// Build a standalone `ArrayMesh` from a mesher output, attaching `materials`
-/// per surface slot. Shared assembly path for the `build_mesh` `#[func]`s of
-/// every mesher resource (Transvoxel/Cubes/Blocky); returns `None` when the
-/// mesher produced no renderable surface.
+/// per surface slot (positional `Option` slots; `None`/missing entries leave
+/// the surface unassigned). Shared assembly path for the `build_mesh`
+/// `#[func]`s of every mesher resource (Transvoxel/Cubes/Blocky); returns
+/// `None` when the mesher produced no renderable surface.
 pub(crate) fn build_mesh_from_output(
     output: &voxel_core::meshers::MesherOutput,
-    materials: &[Gd<Material>],
+    materials: &[Option<Gd<Material>>],
 ) -> Option<Gd<ArrayMesh>> {
     let surfaces: Vec<PendingRenderSurface> = output
         .surfaces

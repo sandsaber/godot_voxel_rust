@@ -120,15 +120,16 @@ checkout build it first via the driver:
 
 ```sh
 cd rust
-./voxel-gdext/smoke_test/run_smoke_test.sh          # builds library + runs all 7 checks
+./voxel-gdext/smoke_test/run_smoke_test.sh          # builds library + runs all 8 checks
 # (api_test, runtime paging, smoke scene, runtime correctness,
-#  3-LOD variable LOD, blocky terrain, instancer streaming)
+#  3-LOD variable LOD, blocky terrain, instancer streaming, mesher API)
 ```
 
 It runs `api_test.gd` (class registration + `#[func]` surface),
 `runtime_scene.tscn` (terrain + generator + viewer paging), `smoke_test.tscn`,
-and `runtime_correctness.tscn` (remesh, unload, invalid-input safety and
-persistence). Requires `godot` (4.7+) on `PATH`.
+`runtime_correctness.tscn` (remesh, unload, invalid-input safety and
+persistence), and `mesher_api.tscn` (mesher build/material/palette behavior
+and `VoxelRaycastResult` members). Requires `godot` (4.7+) on `PATH`.
 
 ## Conventions
 

@@ -45,12 +45,15 @@ fn validate_shadow_side(side: i64) -> Result<usize, &'static str> {
 }
 
 /// Extract the `Material` entries of a GDScript `materials: Material[]`
-/// argument (upstream `VoxelMesher.build_mesh`). Non-material entries are
-/// skipped; the result is indexed by each surface's material slot.
-fn materials_from_var_array(materials: &VarArray) -> Vec<Gd<Material>> {
+/// argument (upstream `VoxelMesher.build_mesh`) as **positional slots**:
+/// result index `i` is the caller's entry `i`, with `None` for null or
+/// non-castable entries. Positions are preserved so a `[null, mat]` array
+/// leaves surface slot 0 without a material instead of shifting `mat` into
+/// slot 0.
+fn materials_from_var_array(materials: &VarArray) -> Vec<Option<Gd<Material>>> {
     materials
         .iter_shared()
-        .filter_map(|item| item.try_to::<Gd<Material>>().ok())
+        .map(|item| item.try_to::<Gd<Material>>().ok())
         .collect()
 }
 
@@ -77,6 +80,15 @@ fn cubes_color_mode_from_int(mode: i64) -> Option<voxel_core::meshers::CubesColo
         x if x == VoxelMesherCubesGD::COLOR_SHADER_PALETTE => Some(CubesColorMode::ShaderPalette),
         _ => None,
     }
+}
+
+/// Mirror of upstream `ERR_FAIL_COND_MSG(params.palette.is_null(), "Palette
+/// mode is used but no palette was specified")` in the cubes build
+/// (`voxel_mesher_cubes.cpp`, both `COLOR_MESHER_PALETTE` and
+/// `COLOR_SHADER_PALETTE` branches): the palette color modes require an
+/// assigned palette resource. Pure function (engine-free testable).
+fn cubes_palette_mode_satisfied(color_mode: i64, has_palette: bool) -> bool {
+    color_mode == VoxelMesherCubesGD::COLOR_RAW || has_palette
 }
 
 /// Build a core [`voxel_core::meshers::CubesMesher`] from the GD
@@ -124,6 +136,18 @@ fn validate_image_mesh_request(
         return Err("voxel_size must be finite and greater than 0.001");
     }
     Ok(())
+}
+
+/// Map a row-major image pixel index to its X/Y coordinates in the padded
+/// voxel grid used by `generate_mesh_from_image`: X is unchanged, Y is
+/// flipped because image rows grow downwards while world Y grows upwards
+/// (upstream `voxel_mesher_cubes.cpp` comment: "Flip Y axis, since Y goes up
+/// in world space, but Y goes down in Image space"). Pure function
+/// (engine-free testable).
+fn image_pixel_to_padded_xy(index: usize, width: i32, height: i32, padding: i32) -> (i32, i32) {
+    let x = (index % width as usize) as i32;
+    let y = (index / width as usize) as i32;
+    (x + padding, (height - 1 - y) + padding)
 }
 
 /// Pack image pixels (any uncompressed format, already read as float colors)
@@ -1096,7 +1120,11 @@ impl VoxelMesherCubesGD {
 
     /// Build the cubes mesh from a `VoxelBufferGD` into an `ArrayMesh`,
     /// attaching `materials` per surface slot (opaque=0, transparent=1;
-    /// upstream `VoxelMesher.build_mesh`). Returns `null` on invalid input.
+    /// upstream `VoxelMesher.build_mesh`: a caller entry wins when the array
+    /// covers the slot with a valid material, otherwise the mesher's stored
+    /// `opaque_material`/`transparent_material` applies). Returns `null` on
+    /// invalid input, and when a palette color mode is active without an
+    /// assigned palette (upstream `ERR_FAIL_COND_MSG`).
     #[func]
     fn build_mesh(
         &self,
@@ -1104,6 +1132,12 @@ impl VoxelMesherCubesGD {
         materials: VarArray,
         _additional_data: VarDictionary,
     ) -> Option<Gd<godot::classes::ArrayMesh>> {
+        if !cubes_palette_mode_satisfied(self.color_mode_value, self.palette_resource.is_some()) {
+            godot_error!(
+                "VoxelMesherCubes.build_mesh: Palette mode is used but no palette was specified"
+            );
+            return None;
+        }
         if let Err(error) = validate_mesher_channel(self.color_channel) {
             godot_error!("VoxelMesherCubes.build_mesh: invalid color channel: {error}");
             return None;
@@ -1117,7 +1151,8 @@ impl VoxelMesherCubesGD {
         let input = voxel_core::meshers::MesherInput::new(bound.core_buffer(), Vector3i::zero(), 0);
         let mut output = voxel_core::meshers::MesherOutput::default();
         voxel_core::meshers::VoxelMesher::build(&mesher, &mut output, &input);
-        crate::terrain::build_mesh_from_output(&output, &materials_from_var_array(&materials))
+        let materials = self.resolve_material_slots(&materials_from_var_array(&materials), &output);
+        crate::terrain::build_mesh_from_output(&output, &materials)
     }
 
     /// Generates a 1-voxel thick greedy mesh from pixels of an image (upstream
@@ -1166,16 +1201,8 @@ impl VoxelMesherCubesGD {
         format.depths[channel] = voxel_core::storage::ChannelDepth::Bit32;
         format.configure_buffer(&mut voxels);
         for (index, &value) in raw_values.iter().enumerate() {
-            let x = (index % width as usize) as i32;
-            let y = (index / width as usize) as i32;
-            // Flip Y axis: image rows go down, world Y goes up.
-            voxels.set_voxel(
-                value as u64,
-                x + padding,
-                (height - 1 - y) + padding,
-                padding,
-                channel,
-            );
+            let (x, y) = image_pixel_to_padded_xy(index, width, height, padding);
+            voxels.set_voxel(value as u64, x, y, padding, channel);
         }
 
         let mesher = voxel_core::meshers::CubesMesher::new();
@@ -1233,6 +1260,49 @@ impl VoxelMesherCubesGD {
 }
 
 impl VoxelMesherCubesGD {
+    /// Resolve the per-surface-slot materials for `build_mesh` exactly like
+    /// upstream `VoxelMesher::build_mesh`: the caller's entry wins when the
+    /// array covers the slot with a valid material; otherwise the mesher's
+    /// own stored material for that slot applies (upstream
+    /// `get_material_by_index` — see [`Self::material_by_index`]). This makes
+    /// `set_material_by_index` and the `opaque_material` /
+    /// `transparent_material` properties genuinely apply when `build_mesh` is
+    /// called without a materials array.
+    fn resolve_material_slots(
+        &self,
+        caller_materials: &[Option<Gd<Material>>],
+        output: &voxel_core::meshers::MesherOutput,
+    ) -> Vec<Option<Gd<Material>>> {
+        let slot_count = output
+            .surfaces
+            .iter()
+            .map(|surface| surface.material_index as usize + 1)
+            .max()
+            .unwrap_or(0)
+            .max(caller_materials.len());
+        (0..slot_count)
+            .map(|slot| {
+                caller_materials
+                    .get(slot)
+                    .cloned()
+                    .flatten()
+                    .or_else(|| self.material_by_index(slot))
+            })
+            .collect()
+    }
+
+    /// The mesher's own material for a surface slot (upstream
+    /// `VoxelMesherCubes::get_material_by_index`): `MATERIAL_OPAQUE` (0) maps
+    /// to [member opaque_material], `MATERIAL_TRANSPARENT` (1) to [member
+    /// transparent_material]. Other slots have none.
+    fn material_by_index(&self, slot: usize) -> Option<Gd<Material>> {
+        match slot {
+            0 => self.opaque_material_resource.clone(),
+            1 => self.transparent_material_resource.clone(),
+            _ => None,
+        }
+    }
+
     /// Build the engine-agnostic cubes mesher carrying this resource's
     /// configuration (color mode, greedy toggle, color channel and palette).
     /// An attached `VoxelColorPalette` resource is forwarded as the core
@@ -2602,10 +2672,11 @@ impl VoxelInstanceLibraryItemGD {
 #[cfg(test)]
 mod tests {
     use super::{
-        cubes_color_mode_from_int, cubes_core_mesher_from_config, image_pixels_to_raw_u32,
-        transvoxel_core_mesher_from_config, validate_enum_int, validate_finite_float,
-        validate_image_mesh_request, validate_mesher_channel, validate_palette_index,
-        validate_shadow_side, VoxelMesherCubesGD, VoxelMesherTransvoxelGD,
+        cubes_color_mode_from_int, cubes_core_mesher_from_config, cubes_palette_mode_satisfied,
+        image_pixel_to_padded_xy, image_pixels_to_raw_u32, transvoxel_core_mesher_from_config,
+        validate_enum_int, validate_finite_float, validate_image_mesh_request,
+        validate_mesher_channel, validate_palette_index, validate_shadow_side, VoxelMesherCubesGD,
+        VoxelMesherTransvoxelGD,
     };
     use voxel_core::meshers::CubesColorMode;
     use voxel_core::meshers::VoxelMesher as _;
@@ -2756,5 +2827,45 @@ mod tests {
         assert!(validate_palette_index(-1).is_err());
         assert!(validate_palette_index(256).is_err());
         assert!(validate_palette_index(i32::MAX).is_err());
+    }
+
+    /// Y-flip/pad indexing for `generate_mesh_from_image`: image rows grow
+    /// downwards while world Y grows upwards, so the top image row maps to
+    /// the highest voxel row; the grid padding shifts everything by one.
+    #[test]
+    fn image_pixel_to_padded_xy_flips_y_and_pads() {
+        // 8x8 image, padding 1: pixel (7, 0) — top-right — → voxel (8, 8).
+        assert_eq!(image_pixel_to_padded_xy(7, 8, 8, 1), (8, 8));
+        // Pixel (0, 7) — bottom-left — → voxel (1, 1).
+        assert_eq!(image_pixel_to_padded_xy(56, 8, 8, 1), (1, 1));
+        // Without padding: the Y flip alone (row 0 of a 3-row image → y 2).
+        assert_eq!(image_pixel_to_padded_xy(0, 4, 3, 0), (0, 2));
+    }
+
+    /// Upstream parity of the palette-mode guard: `COLOR_RAW` never needs a
+    /// palette; both palette modes do (upstream `ERR_FAIL_COND_MSG` fires in
+    /// the `COLOR_MESHER_PALETTE` and `COLOR_SHADER_PALETTE` branches).
+    #[test]
+    fn cubes_palette_mode_guard_mirrors_upstream() {
+        assert!(cubes_palette_mode_satisfied(
+            VoxelMesherCubesGD::COLOR_RAW,
+            false
+        ));
+        assert!(cubes_palette_mode_satisfied(
+            VoxelMesherCubesGD::COLOR_MESHER_PALETTE,
+            true
+        ));
+        assert!(cubes_palette_mode_satisfied(
+            VoxelMesherCubesGD::COLOR_SHADER_PALETTE,
+            true
+        ));
+        assert!(!cubes_palette_mode_satisfied(
+            VoxelMesherCubesGD::COLOR_MESHER_PALETTE,
+            false
+        ));
+        assert!(!cubes_palette_mode_satisfied(
+            VoxelMesherCubesGD::COLOR_SHADER_PALETTE,
+            false
+        ));
     }
 }

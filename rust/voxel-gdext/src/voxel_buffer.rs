@@ -2651,25 +2651,29 @@ pub struct VoxelRaycastResultGD {
     prev_y: i32,
     #[var]
     prev_z: i32,
-    distance: f32,
+    /// Backing field for the pinned `distance` property (the PhantomVar
+    /// below owns the Godot-facing name).
+    distance_value: f32,
     #[var]
     normal_x: i32,
     #[var]
     normal_y: i32,
     #[var]
     normal_z: i32,
-    /// The pinned GDScript-facing read-only `distance` property.
+    /// The pinned GDScript-facing read-only `distance` property. The
+    /// PhantomVar field name is the registered Godot property name, so it
+    /// must stay exactly `distance`.
     #[var(get = get_distance, no_set)]
-    distance_prop: PhantomVar<f32>,
+    distance: PhantomVar<f32>,
     /// The pinned GDScript-facing read-only `normal` property.
     #[var(get = get_normal, no_set)]
-    normal_prop: PhantomVar<Vector3>,
+    normal: PhantomVar<Vector3>,
     /// The pinned GDScript-facing read-only `position` property.
     #[var(get = get_position, no_set)]
-    position_prop: PhantomVar<godot::builtin::Vector3i>,
+    position: PhantomVar<godot::builtin::Vector3i>,
     /// The pinned GDScript-facing read-only `previous_position` property.
     #[var(get = get_previous_position, no_set)]
-    previous_position_prop: PhantomVar<godot::builtin::Vector3i>,
+    previous_position: PhantomVar<godot::builtin::Vector3i>,
 }
 
 /// Pack a core raycast hit into the pinned `VoxelRaycastResult` member tuple
@@ -2713,14 +2717,14 @@ impl IRefCounted for VoxelRaycastResultGD {
             prev_x: 0,
             prev_y: 0,
             prev_z: 0,
-            distance: 0.0,
+            distance_value: 0.0,
             normal_x: 0,
             normal_y: 0,
             normal_z: 0,
-            distance_prop: PhantomVar::default(),
-            normal_prop: PhantomVar::default(),
-            position_prop: PhantomVar::default(),
-            previous_position_prop: PhantomVar::default(),
+            distance: PhantomVar::default(),
+            normal: PhantomVar::default(),
+            position: PhantomVar::default(),
+            previous_position: PhantomVar::default(),
         }
     }
 }
@@ -2731,7 +2735,8 @@ impl VoxelRaycastResultGD {
     /// non-zero normal). A default-constructed result reports no hit.
     #[func]
     fn did_hit(&self) -> bool {
-        self.distance > 0.0 && (self.normal_x != 0 || self.normal_y != 0 || self.normal_z != 0)
+        self.distance_value > 0.0
+            && (self.normal_x != 0 || self.normal_y != 0 || self.normal_z != 0)
     }
 
     /// The hit position as a packed array [x, y, z].
@@ -2749,7 +2754,7 @@ impl VoxelRaycastResultGD {
     /// representing the hit voxel (upstream default `0.0`).
     #[func]
     fn get_distance(&self) -> f32 {
-        self.distance
+        self.distance_value
     }
 
     /// Unit vector pointing away from the surface that was hit (upstream
@@ -2792,11 +2797,16 @@ mod raycast_result_tests {
     use voxel_core::math::{Vector3f, Vector3i};
 
     #[test]
-    fn raycast_result_defaults_match_pinned_members() {
-        // A freshly-initialized result carries all-zero fields, so packing a
-        // zero hit must yield exactly the pinned upstream member defaults:
+    fn raycast_result_pack_fn_maps_zero_hit_to_member_defaults() {
+        // The pack fn maps a core hit onto the pinned member tuple; a zero
+        // hit must yield exactly the pinned upstream member defaults:
         // distance 0.0, normal Vector3(0,0,0), position Vector3i(0,0,0),
-        // previous_position Vector3i(0,0,0).
+        // previous_position Vector3i(0,0,0). (Class-init defaults are
+        // pinned by the Godot smoke test `raycast_result_members`.)
+        raycast_result_pack_assertions();
+    }
+
+    fn raycast_result_pack_assertions() {
         let zero_hit = VoxelRaycastHit {
             position: Vector3i::new(0, 0, 0),
             previous_position: Vector3i::new(0, 0, 0),
