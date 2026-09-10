@@ -1,111 +1,133 @@
 extends Node3D
-## 3-LOD Variable LOD integration check (Phase C step C1).
-##
-## Builds a `VoxelLodTerrain` with `lod_count = 3` (the production Variable LOD
-## planner path), a Waves generator, and a viewer, then verifies that the
-## multi-LOD paging pipeline produces mesh blocks and reacts to viewer
-## movement across negative coordinates. The acceptance criteria:
-##
-##  - the terrain reports `lod_count == 3`;
-##  - paging converges to a nonzero mesh block count (visual demand paged in);
-##  - moving the viewer to fresh coordinates (including negatives) keeps the
-##    route reactive (block count stays nonzero / refreshes);
-##  - the route never panics or emits a fatal Rust diagnostic during paging.
-##
-## This is a headless integration check (no renderer needed); it relies on the
-## production `try_process` multi-LOD path being the planner cutover.
+## Exercise actual viewer motion and the active LOD frontier, including a
+## translated/rotated terrain. Payload residency alone is not visual coverage.
 
 const CONVERGENCE_TIMEOUT_MSEC := 20_000
-const REPORT_INTERVAL_MSEC := 2_000
-const MOVE_AT_FRAME := 30
+const STABLE_MSEC := 250
+const DESTINATION := Vector3(-96.0, 0.0, -96.0)
 
-var terrain: Node
-var viewer: Node
-var frames := 0
+var terrain: Node3D
+var viewer: Node3D
 var failures := 0
 var deadline_msec := 0
-var next_report_msec := 0
-var converged_once := false
-var pre_move_count := 0
+var stable_since := 0
+var moved_at := 0
+var previous_locations: Dictionary = {}
+var before_move: Dictionary = {}
+var finished := false
 
 
 func _ready() -> void:
-	var now := Time.get_ticks_msec()
-	deadline_msec = now + CONVERGENCE_TIMEOUT_MSEC
-	next_report_msec = now + REPORT_INTERVAL_MSEC
-	print("[variable_lod_3] building 3-LOD VoxelLodTerrain + viewer + generator")
-	terrain = ClassDB.instantiate("VoxelLodTerrain")
-	if terrain == null:
-		_fail("VoxelLodTerrain class is missing")
+	terrain = ClassDB.instantiate("VoxelLodTerrain") as Node3D
+	viewer = ClassDB.instantiate("VoxelViewer") as Node3D
+	var generator := ClassDB.instantiate("VoxelGeneratorWaves") as Resource
+	if terrain == null or viewer == null or generator == null:
+		_fail("required classes are missing")
 		_finish()
 		return
-	# Configure the LOD count BEFORE adding the node to the tree: _ready()
-	# constructs the Variable LOD core with this count and rejects later changes.
 	terrain.set_lod_count(3)
-	if terrain.has_method("set_generate_collisions"):
-		terrain.set_generate_collisions(true)
-	elif terrain.has_method("set_generate_collision"):
-		terrain.set_generate_collision(true)
+	terrain.set_generate_collision(true)
+	terrain.set_generator(generator)
+	terrain.position = Vector3(300.0, 0.0, 200.0)
+	terrain.rotation.y = PI / 2.0
+	viewer.set_view_distance(64)
+	terrain.add_child(viewer)
 	add_child(terrain)
-	var lod_count := int(terrain.get_lod_count())
-	if lod_count == 3:
-		print("[variable_lod_3] PASS lod_count == 3")
-	else:
-		_fail("lod_count == 3 (got %d)" % lod_count)
-	var gen: Resource = ClassDB.instantiate("VoxelGeneratorWaves")
-	if gen:
-		terrain.set_generator(gen)
-	else:
-		_fail("VoxelGeneratorWaves class is missing")
-	viewer = ClassDB.instantiate("VoxelViewer")
-	if viewer:
-		terrain.add_child(viewer)
-		if viewer.has_method("set_world_position"):
-			viewer.set_world_position(Vector3(0.0, 0.0, 0.0))
-	else:
-		_fail("VoxelViewer class is missing")
-	print("[variable_lod_3] scene ready, generator + viewer assigned")
+	viewer.global_position = terrain.to_global(Vector3.ZERO)
+	if terrain.get_lod_count() != 3:
+		_fail("lod_count must be 3")
+	deadline_msec = Time.get_ticks_msec() + CONVERGENCE_TIMEOUT_MSEC
+	stable_since = Time.get_ticks_msec()
+
+
+func _locations() -> Dictionary:
+	var packed: PackedInt32Array = terrain.get_mesh_block_locations()
+	var result: Dictionary = {}
+	for i in range(0, packed.size(), 4):
+		result[Vector4i(packed[i], packed[i + 1], packed[i + 2], packed[i + 3])] = true
+	return result
+
+
+func _same_locations(a: Dictionary, b: Dictionary) -> bool:
+	if a.size() != b.size():
+		return false
+	for key in a:
+		if not b.has(key):
+			return false
+	return true
+
+
+func _has_difference(a: Dictionary, b: Dictionary) -> bool:
+	for key in a:
+		if not b.has(key):
+			return true
+	return false
+
+
+func _check_active_frontier() -> void:
+	var active: Array[AABB] = []
+	var colliders := 0
+	for child in terrain.get_children():
+		if not child is MeshInstance3D:
+			continue
+		var mesh := child as MeshInstance3D
+		if mesh.visible and mesh.mesh != null:
+			var parts := String(mesh.name).split("_")
+			var lod := int(parts[1].trim_prefix("lod"))
+			var bounds := AABB(mesh.position, Vector3.ONE * float(16 << lod))
+			for other in active:
+				if bounds.intersects(other):
+					_fail("active parent/child meshes overlap")
+			active.append(bounds)
+		for body in mesh.get_children():
+			if body is StaticBody3D and body.collision_layer != 0:
+				colliders += 1
+	if active.is_empty():
+		_fail("active visual coverage is empty")
+	if colliders == 0:
+		_fail("active collision coverage is empty")
 
 
 func _process(_delta: float) -> void:
-	frames += 1
+	if finished or terrain == null or viewer == null:
+		return
 	var now := Time.get_ticks_msec()
-	var bc := int(terrain.get_mesh_block_count())
-	if not converged_once and bc > 0:
-		converged_once = true
-		pre_move_count = bc
-		print("[variable_lod_3] PASS nonzero mesh upload — mesh_block_count=%d" % bc)
-	if frames == MOVE_AT_FRAME and viewer != null:
-		# Move the viewer to a fresh position crossing negative coordinates so
-		# the multi-LOD route must page out the old demand and page in new blocks
-		# (exercises split/join ordering across LODs and negative-coordinate
-		# canonicalization).
-		if viewer.has_method("set_world_position"):
-			viewer.set_world_position(Vector3(-96.0, 0.0, -96.0))
-		print("[variable_lod_3] viewer moved to (-96, 0, -96) at frame %d" % frames)
-	if now >= next_report_msec:
-		print("[variable_lod_3] elapsed_ms=%d — mesh_block_count=%d" % [
-			CONVERGENCE_TIMEOUT_MSEC - (deadline_msec - now), bc
-		])
-		next_report_msec = now + REPORT_INTERVAL_MSEC
-	# Finish once we converged AND have observed the post-move state for a while.
-	if converged_once and frames > MOVE_AT_FRAME + 15:
-		if bc > 0:
-			print("[variable_lod_3] PASS route reactive after move — mesh_block_count=%d (pre-move=%d)" % [bc, pre_move_count])
-		else:
-			_fail("route reactive after move (mesh_block_count dropped to 0)")
-		_finish()
-	elif now >= deadline_msec:
-		if not converged_once:
-			_fail("nonzero mesh upload within %d ms (last count=%d)" % [CONVERGENCE_TIMEOUT_MSEC, bc])
+	var locations := _locations()
+	if not _same_locations(locations, previous_locations):
+		previous_locations = locations
+		stable_since = now
+	if not locations.is_empty() and now - stable_since >= STABLE_MSEC:
+		if moved_at == 0:
+			_check_active_frontier()
+			# The transformed terrain must still page around its local origin.
+			var near_origin := false
+			for key in locations:
+				if key.w == 0 and abs(key.x) <= 2 and abs(key.z) <= 2:
+					near_origin = true
+			if not near_origin:
+				_fail("viewer was not converted to terrain-local coordinates")
+			before_move = locations.duplicate()
+			viewer.global_position = terrain.to_global(DESTINATION)
+			if not viewer.position.is_equal_approx(DESTINATION):
+				_fail("viewer movement readback failed")
+			moved_at = now
+			stable_since = now
+			print("[variable_lod_3] viewer moved; checking entered AND exited blocks")
+		elif now - moved_at >= STABLE_MSEC and _has_difference(locations, before_move) and _has_difference(before_move, locations):
+			_check_active_frontier()
+			print("[variable_lod_3] PASS paging changed the resident block set after actual motion")
+			_finish()
+	if now >= deadline_msec:
+		_fail("paging/movement did not converge before deadline")
 		_finish()
 
 
 func _fail(message: String) -> void:
-	print("[variable_lod_3] FAIL %s" % message)
+	print("[variable_lod_3] FAIL ", message)
 	failures += 1
 
 
 func _finish() -> void:
+	finished = true
 	print("[variable_lod_3] DONE with %d failure(s)" % failures)
 	get_tree().quit(1 if failures > 0 else 0)

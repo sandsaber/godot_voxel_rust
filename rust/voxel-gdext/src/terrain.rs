@@ -24,7 +24,7 @@ use voxel_core::meshers::{
 };
 use voxel_core::storage::{ChannelDepth, ChannelId, VoxelData, VoxelDataBlock, VoxelFormat};
 use voxel_core::terrain::{
-    MeshDemand, SaveFlushError, TransitionMask, ViewerUpdate, VoxelTerrainCore,
+    CoverageFeature, MeshDemand, SaveFlushError, TransitionMask, ViewerUpdate, VoxelTerrainCore,
     VoxelTerrainDataView, VoxelTerrainEvent, VoxelTerrainRuntimeError,
 };
 
@@ -109,17 +109,23 @@ impl MeshBlockRenderId {
     }
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RenderActivity {
+    pub(crate) visuals: bool,
+    pub(crate) collisions: bool,
+}
+
 /// Pure version bookkeeping for the Godot renderer. Keeping this separate
 /// from node ownership makes stale-event handling unit-testable.
 ///
 /// In addition to per-block mesh revisions, the state tracks the latest
 /// renderer topology (C2: feature activations/deactivations and per-block LOD
-/// transition masks). Topology updates never produce a mesh upload — they only
-/// advance the topology revision and refresh the stored transition mask for a
-/// block — so a topology-only event is observably distinct from a remesh.
+/// transition masks). Payload residency is independent from the active
+/// coverage frontier: topology changes visibility/physics without a remesh.
 #[derive(Debug, Default)]
 pub(crate) struct RenderState {
     revisions: HashMap<MeshBlockRenderId, u64>,
+    activity: HashMap<MeshBlockRenderId, RenderActivity>,
     /// Monotonic topology revision, advanced whenever a
     /// [`VoxelTerrainEvent::RenderTopologyChanged`] event is consumed.
     topology_revision: u64,
@@ -183,6 +189,8 @@ impl RenderState {
     }
 
     pub(crate) fn remove(&mut self, location: MeshBlockLocation) -> bool {
+        self.activity
+            .remove(&MeshBlockRenderId::from_location(location));
         self.transition_masks
             .remove(&MeshBlockRenderId::from_location(location));
         self.revisions
@@ -192,6 +200,7 @@ impl RenderState {
 
     pub(crate) fn reset(&mut self) {
         self.revisions.clear();
+        self.activity.clear();
         self.transition_masks.clear();
         self.topology_revision = 0;
     }
@@ -210,6 +219,7 @@ impl RenderState {
 pub(crate) struct RenderedMeshBlock {
     pub(crate) revision: u64,
     pub(crate) instance: Gd<MeshInstance3D>,
+    pub(crate) activity: RenderActivity,
 }
 
 /// Owned render data copied while the core is borrowed, then uploaded only
@@ -434,9 +444,14 @@ pub(crate) enum PendingRenderOp {
         /// Regular-only collision geometry (C4). Empty when collision is not
         /// requested or the mesher produced no collision surface.
         collision: PendingCollisionGeometry,
+        activity: RenderActivity,
     },
     Remove {
         id: MeshBlockRenderId,
+    },
+    SetActivity {
+        id: MeshBlockRenderId,
+        activity: RenderActivity,
     },
     /// Refreshes the LOD transition mask of an already-rendered block without
     /// re-uploading its mesh (C3). A topology-only event produces this op
@@ -475,19 +490,28 @@ pub(crate) fn reduce_render_events(
                     continue;
                 }
 
-                if upload.visual_state() != PayloadState::NonEmpty {
-                    if state.remove(key.location) {
+                if upload.visual_state() != PayloadState::NonEmpty
+                    && upload.collision_state() != PayloadState::NonEmpty
+                {
+                    if state.revisions.remove(&id).is_some() {
                         pending.push(PendingRenderOp::Remove { id });
                     }
                     continue;
                 }
                 let output = upload.output();
-                let surfaces: Vec<PendingRenderSurface> = output
+                let mut surfaces: Vec<PendingRenderSurface> = output
                     .surfaces
                     .iter()
                     .map(PendingRenderSurface::from_surface)
                     .collect();
-                let collision = PendingCollisionGeometry::from_output(output, &surfaces);
+                let collision = if upload.features().collisions {
+                    PendingCollisionGeometry::from_output(output, &surfaces)
+                } else {
+                    PendingCollisionGeometry::default()
+                };
+                if upload.visual_state() != PayloadState::NonEmpty {
+                    surfaces.clear();
+                }
                 if state.accept(key) {
                     // C3: apply the latest stored transition mask (defaulting
                     // to NONE) for this block at upload time so the instance is
@@ -499,6 +523,7 @@ pub(crate) fn reduce_render_events(
                         surfaces,
                         transition_mask,
                         collision,
+                        activity: state.activity.get(&id).copied().unwrap_or_default(),
                     });
                 }
             }
@@ -511,7 +536,7 @@ pub(crate) fn reduce_render_events(
                 {
                     continue;
                 }
-                if state.remove(key.location) {
+                if state.revisions.remove(&id).is_some() {
                     pending.push(PendingRenderOp::Remove { id });
                 }
             }
@@ -528,6 +553,29 @@ pub(crate) fn reduce_render_events(
             // only already-rendered blocks receive a mask refresh.
             VoxelTerrainEvent::RenderTopologyChanged(batch) => {
                 if state.accept_topology(batch.revision, &batch.transition_masks) {
+                    for group in &batch.groups {
+                        // A payload can be ready well before it is active.
+                        // Keep inactive parents/children resident for later
+                        // split/join, and switch visuals and physics separately.
+                        for (locations, active) in
+                            [(&group.deactivate, false), (&group.activate, true)]
+                        {
+                            for location in locations {
+                                let id = MeshBlockRenderId::from_location(*location);
+                                let activity = state.activity.entry(id).or_default();
+                                match group.feature {
+                                    CoverageFeature::Visual => activity.visuals = active,
+                                    CoverageFeature::Collision => activity.collisions = active,
+                                }
+                                if state.revisions.contains_key(&id) {
+                                    pending.push(PendingRenderOp::SetActivity {
+                                        id,
+                                        activity: *activity,
+                                    });
+                                }
+                            }
+                        }
+                    }
                     for (location, mask) in &batch.transition_masks {
                         let id = MeshBlockRenderId::from_location(*location);
                         if state.revision(id).is_some() {
@@ -830,6 +878,7 @@ impl INode3D for VoxelTerrain {
         }
         let viewers = collect_child_viewers(
             self.base().get_children().iter_shared(),
+            self.base().get_global_transform(),
             "VoxelTerrain",
             |viewer_distance| clamp_view_distance(i64::from(viewer_distance)),
             self.generate_collision,
@@ -1613,16 +1662,14 @@ mod render_state_tests {
     }
 
     #[test]
-    fn fixed_topology_event_is_not_reduced_as_geometry_before_renderer_composition() {
+    fn fixed_topology_activation_changes_activity_without_reupload() {
         let position = Vector3i::zero();
         let location = MeshBlockLocation::new(position, 0);
         let mut state = RenderState::default();
         assert!(state.accept(key(position, 0, 7)));
         assert_eq!(state.topology_revision(), 0);
 
-        // A topology batch with no transition masks is consumed (advances the
-        // stored topology revision) but produces zero renderer operations — it
-        // must never become a geometry upload.
+        // Activation must reach the renderer without uploading geometry again.
         let operations = reduce_render_events(
             &mut state,
             vec![VoxelTerrainEvent::RenderTopologyChanged(
@@ -1640,7 +1687,16 @@ mod render_state_tests {
             )],
         );
 
-        assert!(operations.is_empty());
+        assert!(matches!(
+            operations.as_slice(),
+            [PendingRenderOp::SetActivity {
+                activity: RenderActivity {
+                    visuals: true,
+                    collisions: false
+                },
+                ..
+            }]
+        ));
         // C2: the topology batch is no longer dropped silently — the stored
         // topology revision advanced to at least the batch's revision.
         assert!(state.topology_revision() >= 3);
@@ -1806,6 +1862,7 @@ mod render_state_tests {
                     surfaces,
                     transition_mask: _,
                     collision: _,
+                    activity: _,
                 } if *id == MeshBlockRenderId::new(position, 0) && *revision == key.revision => {
                     Some(surfaces)
                 }
@@ -2260,6 +2317,7 @@ impl VoxelTerrain {
     #[func]
     fn set_generate_collision(&mut self, enabled: bool) {
         self.generate_collision = enabled;
+        self.refresh_collision_bodies();
     }
 
     /// Set a voxel's SDF value at world position. Triggers a re-mesh of the
@@ -3045,7 +3103,7 @@ impl VoxelTerrain {
     fn refresh_collision_bodies(&mut self) {
         let settings = self.collision_settings();
         for rendered in self.mesh_instances.values_mut() {
-            apply_collision_settings_to_instance(&mut rendered.instance, settings);
+            apply_render_activity(rendered, self.generate_collision, settings);
         }
     }
 }
@@ -3160,8 +3218,40 @@ impl VoxelTerrain {
 /// Apply one reduced render operation to the Godot-side mesh instance map.
 /// Shared between `VoxelTerrain` and `VoxelLodTerrain` so both runtimes keep
 /// identical upload/remove semantics without duplicating logic.
+fn viewer_in_terrain_space(
+    terrain_transform: Transform3D,
+    world_position: Vector3,
+    horizontal: i32,
+    vertical: i32,
+) -> Result<(Vector3i, i32, i32), &'static str> {
+    let determinant = terrain_transform.basis.determinant();
+    if !terrain_transform.is_finite() || !determinant.is_finite() || determinant == 0.0 {
+        return Err("terrain transform is singular or non-finite");
+    }
+    let inverse = terrain_transform.affine_inverse();
+    if !inverse.is_finite() {
+        return Err("terrain inverse is non-finite");
+    }
+    let position = world_to_voxel_position(inverse * world_position)?;
+    // Transform the world-space viewer box conservatively into the terrain
+    // axes. This covers rotation, nonuniform scale and reflected terrain.
+    let extents = Vector3::new(
+        horizontal.max(0) as f32,
+        vertical.max(0) as f32,
+        horizontal.max(0) as f32,
+    );
+    let extents = inverse.basis.rows.map(|row| row.abs().dot(extents));
+    if extents.iter().any(|v| !v.is_finite()) {
+        return Err("viewer extents are non-finite");
+    }
+    let horizontal = clamp_view_distance(extents[0].max(extents[2]).ceil() as i64);
+    let vertical = clamp_view_distance(extents[1].ceil() as i64);
+    Ok((position, horizontal, vertical))
+}
+
 pub(crate) fn collect_child_viewers<I>(
     children: I,
+    terrain_transform: Transform3D,
     log_prefix: &str,
     mut distance: impl FnMut(i32) -> i32,
     generate_collision: bool,
@@ -3174,18 +3264,20 @@ where
     for child in children {
         if let Ok(viewer) = child.try_cast::<VoxelViewer>() {
             let viewer = viewer.bind();
-            let pos = viewer.get_world_position();
-            let Ok(world_position_voxels) = world_to_voxel_position(pos) else {
-                godot_error!(
-                    "{log_prefix}.process: viewer position must be finite and within i32 range"
-                );
+            let horizontal = viewer.view_distance_voxels();
+            let vertical =
+                viewer_vertical_distance(horizontal, viewer.get_view_distance_vertical_ratio());
+            let Ok((world_position_voxels, horizontal, vertical)) = viewer_in_terrain_space(
+                terrain_transform,
+                viewer.get_world_position(),
+                horizontal,
+                vertical,
+            ) else {
+                godot_error!("{log_prefix}.process: terrain transform/viewer must be finite, invertible and within coordinate range");
                 continue;
             };
-            let view_distance = distance(viewer.view_distance_voxels());
-            let vertical = distance(viewer_vertical_distance(
-                viewer.view_distance_voxels(),
-                viewer.get_view_distance_vertical_ratio(),
-            ));
+            let view_distance = distance(horizontal);
+            let vertical = distance(vertical);
             viewers.push(ViewerUpdate {
                 id,
                 world_position_voxels,
@@ -3218,54 +3310,82 @@ pub(crate) fn apply_pending_render_op(
             surfaces,
             transition_mask,
             collision,
-        } => match mesh_instances.entry(id) {
-            std::collections::hash_map::Entry::Occupied(mut occupied) => {
-                let rendered = occupied.get_mut();
-                debug_assert!(rendered.revision < revision);
-                if replace_mesh_on_instance(
-                    &mut rendered.instance,
-                    &surfaces,
-                    material_override,
-                    generate_collision,
-                    transition_mask,
-                    &collision,
-                    &id,
-                    collision_settings,
-                ) {
-                    rendered.revision = revision;
-                } else {
-                    rendered.instance.queue_free();
-                    occupied.remove();
+            activity,
+        } => {
+            let rendered = mesh_instances.entry(id).or_insert_with(|| {
+                // A MeshInstance3D without a mesh remains a valid parent for
+                // collision-only blocks. Geometry and physics have separate
+                // activity; neither owns the lifetime of the other feature.
+                let mut instance = MeshInstance3D::new_alloc();
+                let stride = 16i32 * (1i32 << id.lod_index);
+                let p = id.position_in_blocks * stride;
+                instance.set_position(Vector3::new(p.x as f32, p.y as f32, p.z as f32));
+                instance.set_name(&format!(
+                    "mesh_lod{}_{}_{}_{}",
+                    id.lod_index,
+                    id.position_in_blocks.x,
+                    id.position_in_blocks.y,
+                    id.position_in_blocks.z
+                ));
+                instance.set_visible(false);
+                base.add_child(&instance);
+                RenderedMeshBlock {
+                    revision: 0,
+                    instance,
+                    activity,
                 }
+            });
+            let mesh = build_array_mesh(&surfaces);
+            if let Some(mesh) = mesh {
+                rendered.instance.set_mesh(&mesh);
+            } else {
+                rendered
+                    .instance
+                    .set_mesh(Gd::<godot::classes::Mesh>::null_arg());
             }
-            std::collections::hash_map::Entry::Vacant(vacant) => {
-                if let Some(instance) = upload_mesh_block(
-                    id,
-                    &surfaces,
-                    base,
-                    material_override,
-                    generate_collision,
-                    transition_mask,
-                    &collision,
-                    collision_settings,
-                ) {
-                    vacant.insert(RenderedMeshBlock { revision, instance });
-                }
+            if let Some(material) = material_override {
+                rendered.instance.set_material_override(material);
             }
-        },
+            apply_transition_mask(&mut rendered.instance, transition_mask);
+            clear_block_collision(&mut rendered.instance);
+            if !collision.is_empty() {
+                create_block_collision(&mut rendered.instance, &collision, &id, collision_settings);
+            }
+            rendered.revision = revision;
+            rendered.activity = activity;
+            apply_render_activity(rendered, generate_collision, collision_settings);
+        }
         PendingRenderOp::Remove { id } => {
             if let Some(mut old) = mesh_instances.remove(&id) {
                 old.instance.queue_free();
             }
         }
-        // C3: refresh the LOD transition mask of an already-rendered block
-        // without re-uploading its mesh. Mesh/node identity is preserved.
+        PendingRenderOp::SetActivity { id, activity } => {
+            if let Some(rendered) = mesh_instances.get_mut(&id) {
+                rendered.activity = activity;
+                apply_render_activity(rendered, generate_collision, collision_settings);
+            }
+        }
         PendingRenderOp::UpdateTransitionMask { id, mask } => {
             if let Some(rendered) = mesh_instances.get_mut(&id) {
                 apply_transition_mask(&mut rendered.instance, mask);
             }
         }
     }
+}
+
+pub(crate) fn apply_render_activity(
+    rendered: &mut RenderedMeshBlock,
+    generate_collision: bool,
+    collision_settings: CollisionBodySettings,
+) {
+    let visible = rendered.activity.visuals && rendered.instance.get_mesh().is_some();
+    rendered.instance.set_visible(visible);
+    apply_collision_settings_to_instance(
+        &mut rendered.instance,
+        collision_settings,
+        generate_collision && rendered.activity.collisions,
+    );
 }
 
 /// Shader-side name of the per-instance LOD transition mask uniform (C3). The
@@ -3280,84 +3400,6 @@ const TRANSITION_MASK_SHADER_PARAM: &str = "u_transition_mask";
 pub(crate) fn apply_transition_mask(instance: &mut Gd<MeshInstance3D>, mask: TransitionMask) {
     let value = mask.bits() as i64;
     instance.set_instance_shader_parameter(TRANSITION_MASK_SHADER_PARAM, &value.to_variant());
-}
-
-/// Upload all material-grouped arrays as one `ArrayMesh` child at the matching
-/// block and LOD position. Shared between the fixed-LOD and Variable-LOD
-/// terrain nodes.
-///
-/// `transition_mask` (C3) is applied as the instance's CUSTOM1 shader
-/// parameter at upload time so the block is born with the correct LOD mask.
-/// `collision` (C4) carries the regular-only collision geometry; when non-empty
-/// it is turned into a dedicated `StaticBody3D`+`ConcavePolygonShape3D` child
-/// instead of deriving collision from the visual mesh (which would include LOD
-/// transition triangles).
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn upload_mesh_block(
-    id: MeshBlockRenderId,
-    surfaces: &[PendingRenderSurface],
-    base: &mut Gd<Node3D>,
-    material_override: Option<&Gd<Material>>,
-    generate_collision: bool,
-    transition_mask: TransitionMask,
-    collision: &PendingCollisionGeometry,
-    collision_settings: CollisionBodySettings,
-) -> Option<Gd<MeshInstance3D>> {
-    let array_mesh = build_array_mesh(surfaces)?;
-    let block_size = 16i32;
-    let lod_stride = 1i32 << id.lod_index;
-    let origin = Vector3::new(
-        (id.position_in_blocks.x * block_size * lod_stride) as f32,
-        (id.position_in_blocks.y * block_size * lod_stride) as f32,
-        (id.position_in_blocks.z * block_size * lod_stride) as f32,
-    );
-
-    let mut instance = MeshInstance3D::new_alloc();
-    instance.set_mesh(&array_mesh);
-    instance.set_position(origin);
-    if let Some(mat) = material_override {
-        instance.set_material_override(mat);
-    }
-    apply_transition_mask(&mut instance, transition_mask);
-    if generate_collision {
-        create_block_collision(&mut instance, collision, &id, collision_settings);
-    }
-    let instance_name = format!(
-        "mesh_lod{}_{}_{}_{}",
-        id.lod_index, id.position_in_blocks.x, id.position_in_blocks.y, id.position_in_blocks.z
-    );
-    instance.set_name(&instance_name);
-    let _ = base;
-    base.add_child(&instance);
-    Some(instance)
-}
-
-/// Rebuild the `ArrayMesh` on an existing instance so remesh does not change
-/// the Godot node identity (scripts holding the MeshInstance keep working).
-#[allow(clippy::too_many_arguments)]
-fn replace_mesh_on_instance(
-    instance: &mut Gd<MeshInstance3D>,
-    surfaces: &[PendingRenderSurface],
-    material_override: Option<&Gd<Material>>,
-    generate_collision: bool,
-    transition_mask: TransitionMask,
-    collision: &PendingCollisionGeometry,
-    id: &MeshBlockRenderId,
-    collision_settings: CollisionBodySettings,
-) -> bool {
-    let Some(array_mesh) = build_array_mesh(surfaces) else {
-        return false;
-    };
-    instance.set_mesh(&array_mesh);
-    if let Some(mat) = material_override {
-        instance.set_material_override(mat);
-    }
-    apply_transition_mask(instance, transition_mask);
-    clear_block_collision(instance);
-    if generate_collision {
-        create_block_collision(instance, collision, id, collision_settings);
-    }
-    true
 }
 
 fn build_array_mesh(surfaces: &[PendingRenderSurface]) -> Option<Gd<ArrayMesh>> {
@@ -3458,14 +3500,9 @@ pub(crate) fn build_mesh_from_output(
     build_array_mesh_with_materials(&surfaces, materials)
 }
 
-/// Builds a trimesh collision body for one block from its regular-only
-/// collision geometry (C4). When the mesher produced an explicit collision
-/// surface (or a regular prefix of the first visual surface) the body is
-/// backed by a `ConcavePolygonShape3D` fed from that geometry — never from the
-/// full visual `ArrayMesh`, which would include LOD transition triangles. When
-/// no collision surface was produced, the helper falls back to Godot's visual
-/// `create_trimesh_collision` so a collision-enabled fixed-LOD terrain whose
-/// mesher does not separate collision still gets a collider.
+/// Builds a physics body from the collision payload, independently of
+/// whether this block has a visual mesh. Transvoxel payloads contain only
+/// regular triangles, never LOD transition skirts.
 pub(crate) fn create_block_collision(
     instance: &mut Gd<MeshInstance3D>,
     collision: &PendingCollisionGeometry,
@@ -3473,11 +3510,6 @@ pub(crate) fn create_block_collision(
     settings: CollisionBodySettings,
 ) {
     if collision.is_empty() {
-        // No separate collision surface: keep the legacy visual-derived
-        // trimesh so collision-enabled terrain without a dedicated collision
-        // surface remains functional.
-        instance.create_trimesh_collision();
-        apply_collision_settings_to_instance(instance, settings);
         return;
     }
     let mut shape = ConcavePolygonShape3D::new_gd();
@@ -3523,14 +3555,15 @@ fn clear_block_collision(instance: &mut Gd<MeshInstance3D>) {
 pub(crate) fn apply_collision_settings_to_instance(
     instance: &mut Gd<MeshInstance3D>,
     settings: CollisionBodySettings,
+    active: bool,
 ) {
     let children = instance.get_children();
     for child in children.iter_shared() {
         let Ok(mut body) = child.try_cast::<StaticBody3D>() else {
             continue;
         };
-        body.set_collision_layer(settings.layer);
-        body.set_collision_mask(settings.mask);
+        body.set_collision_layer(if active { settings.layer } else { 0 });
+        body.set_collision_mask(if active { settings.mask } else { 0 });
         let body_children = body.get_children();
         for body_child in body_children.iter_shared() {
             let Ok(shape_node) = body_child.try_cast::<CollisionShape3D>() else {
@@ -3833,5 +3866,346 @@ impl VoxelTerrainReplicatorGD {
     fn parent_terrain(&self) -> Option<Gd<VoxelTerrain>> {
         let parent = self.base().get_parent()?;
         parent.try_cast::<VoxelTerrain>().ok()
+    }
+}
+
+#[cfg(test)]
+mod review_probes {
+    use super::*;
+    use voxel_core::terrain::{
+        CoverageFeature, FeatureTopologyGroup, RenderTopologyBatch, TopologyOperation,
+    };
+
+    #[test]
+    fn review_deactivation_must_change_renderer_state() {
+        let location = MeshBlockLocation::new(Vector3i::zero(), 0);
+        let mut state = RenderState::default();
+        state.accept(MeshBlockKey {
+            location,
+            revision: 1,
+        });
+        let ops = reduce_render_events(
+            &mut state,
+            vec![VoxelTerrainEvent::RenderTopologyChanged(
+                RenderTopologyBatch {
+                    revision: 1,
+                    groups: vec![FeatureTopologyGroup {
+                        feature: CoverageFeature::Visual,
+                        operation: TopologyOperation::RootDeactivate,
+                        anchor: location,
+                        activate: vec![],
+                        deactivate: vec![location],
+                    }],
+                    transition_masks: vec![],
+                },
+            )],
+        );
+        assert!(
+            !ops.is_empty(),
+            "deactivation of uploaded geometry must hide or remove its renderer instance"
+        );
+    }
+}
+
+#[cfg(test)]
+mod review_collision_probe {
+    use super::*;
+    use voxel_core::meshers::{
+        BlockMeshOutput, MeshArraysPool, MeshBuildFeatures, MesherInput, MesherOutput, VoxelMesher,
+    };
+    struct Empty;
+    impl VoxelMesher for Empty {
+        fn build(&self, _: &mut MesherOutput, _: &MesherInput<'_>) {}
+    }
+    #[test]
+    fn review_collision_only_payload_must_reach_godot() {
+        let mut data = VoxelData::new();
+        data.set_bounds(voxel_core::math::Box3i::new(
+            Vector3i::splat(-128),
+            Vector3i::splat(256),
+        ));
+        data.set_streaming_enabled(false);
+        data.set_full_load_completed(true);
+        let mut core = VoxelTerrainCore::new_generator_only(
+            data,
+            MeshingDependency::new(Arc::new(Empty), None),
+        );
+        let viewer = ViewerUpdate {
+            id: 1,
+            world_position_voxels: Vector3i::zero(),
+            horizontal_view_distance_voxels: 16,
+            vertical_view_distance_voxels: 16,
+            demand: MeshDemand {
+                visuals: false,
+                collisions: true,
+            },
+        };
+        core.try_process(&[viewer]).unwrap();
+        let position = *core.mesh_blocks().keys().next().unwrap();
+        let key = MeshBlockKey {
+            location: MeshBlockLocation::new(position, 0),
+            revision: core.mesh_blocks()[&position].requested_revision.unwrap(),
+        };
+        let mut output = MesherOutput::default();
+        output.collision_surface.positions = vec![
+            voxel_core::math::Vector3f::new(0.0, 0.0, 0.0),
+            voxel_core::math::Vector3f::new(1.0, 0.0, 0.0),
+            voxel_core::math::Vector3f::new(0.0, 0.0, 1.0),
+        ];
+        output.collision_surface.indices = vec![0, 1, 2];
+        core.try_apply_mesh_output(BlockMeshOutput::new(
+            key,
+            MeshBuildFeatures {
+                visuals: false,
+                collisions: true,
+                variable_lod: false,
+            },
+            output,
+            Arc::new(MeshArraysPool::new()),
+            false,
+        ))
+        .unwrap();
+        let events: Vec<_> = core
+            .try_process(&[])
+            .unwrap()
+            .into_iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    VoxelTerrainEvent::MeshBlockEntered(_) | VoxelTerrainEvent::MeshBlockUpdated(_)
+                )
+            })
+            .collect();
+        assert!(
+            events.iter().any(|e| match e {
+                VoxelTerrainEvent::MeshBlockEntered(u) | VoxelTerrainEvent::MeshBlockUpdated(u) =>
+                    u.collision_state() == PayloadState::NonEmpty,
+                _ => false,
+            }),
+            "test setup must carry a nonempty collision payload"
+        );
+        let ops = reduce_render_events(&mut RenderState::default(), events);
+        assert!(
+            !ops.is_empty(),
+            "nonempty collision-only payload was dropped by the renderer bridge"
+        );
+    }
+}
+
+#[cfg(test)]
+mod topology_and_transform_regressions {
+    use super::*;
+    use voxel_core::terrain::{FeatureTopologyGroup, RenderTopologyBatch, TopologyOperation};
+
+    fn group(
+        feature: CoverageFeature,
+        operation: TopologyOperation,
+        parent: MeshBlockLocation,
+        activate: Vec<MeshBlockLocation>,
+        deactivate: Vec<MeshBlockLocation>,
+    ) -> FeatureTopologyGroup {
+        FeatureTopologyGroup {
+            feature,
+            operation,
+            anchor: parent,
+            activate,
+            deactivate,
+        }
+    }
+
+    #[test]
+    fn split_join_switches_features_independently_without_reupload() {
+        let parent = MeshBlockLocation::new(Vector3i::zero(), 1);
+        let children: Vec<_> = (0..8)
+            .map(|i| MeshBlockLocation::new(Vector3i::new(i & 1, (i >> 1) & 1, (i >> 2) & 1), 0))
+            .collect();
+        let mut state = RenderState::default();
+        for location in std::iter::once(parent).chain(children.iter().copied()) {
+            state.accept(MeshBlockKey {
+                location,
+                revision: 1,
+            });
+        }
+        let mut send = |revision, groups| {
+            reduce_render_events(
+                &mut state,
+                vec![VoxelTerrainEvent::RenderTopologyChanged(
+                    RenderTopologyBatch {
+                        revision,
+                        groups,
+                        transition_masks: vec![],
+                    },
+                )],
+            )
+        };
+        send(
+            1,
+            vec![
+                group(
+                    CoverageFeature::Visual,
+                    TopologyOperation::RootActivate,
+                    parent,
+                    vec![parent],
+                    vec![],
+                ),
+                group(
+                    CoverageFeature::Collision,
+                    TopologyOperation::RootActivate,
+                    parent,
+                    vec![parent],
+                    vec![],
+                ),
+            ],
+        );
+        let split = send(
+            2,
+            vec![group(
+                CoverageFeature::Visual,
+                TopologyOperation::Split,
+                parent,
+                children.clone(),
+                vec![parent],
+            )],
+        );
+        assert_eq!(split.len(), 9);
+        assert!(split
+            .iter()
+            .all(|op| matches!(op, PendingRenderOp::SetActivity { .. })));
+        assert!(matches!(
+            split.first(),
+            Some(PendingRenderOp::SetActivity {
+                activity: RenderActivity {
+                    visuals: false,
+                    collisions: true
+                },
+                ..
+            })
+        ));
+        assert!(split.iter().skip(1).all(|op| matches!(
+            op,
+            PendingRenderOp::SetActivity {
+                activity: RenderActivity {
+                    visuals: true,
+                    collisions: false
+                },
+                ..
+            }
+        )));
+        let join = send(
+            3,
+            vec![group(
+                CoverageFeature::Visual,
+                TopologyOperation::Join,
+                parent,
+                vec![parent],
+                children.clone(),
+            )],
+        );
+        assert_eq!(join.len(), 9);
+        assert!(matches!(
+            join.last(),
+            Some(PendingRenderOp::SetActivity {
+                activity: RenderActivity {
+                    visuals: true,
+                    collisions: true
+                },
+                ..
+            })
+        ));
+        // A late split cannot reactivate the children after the join.
+        assert!(send(
+            2,
+            vec![group(
+                CoverageFeature::Visual,
+                TopologyOperation::Split,
+                parent,
+                children.clone(),
+                vec![parent]
+            )]
+        )
+        .is_empty());
+        assert!(state.activity[&MeshBlockRenderId::from_location(parent)].visuals);
+        for child in children {
+            assert!(!state.activity[&MeshBlockRenderId::from_location(child)].visuals);
+            assert_eq!(
+                state.revision(MeshBlockRenderId::from_location(child)),
+                Some(1)
+            );
+        }
+    }
+
+    #[test]
+    fn activation_before_payload_is_kept_until_exit() {
+        let location = MeshBlockLocation::new(Vector3i::zero(), 0);
+        let id = MeshBlockRenderId::from_location(location);
+        let mut state = RenderState::default();
+        let ops = reduce_render_events(
+            &mut state,
+            vec![VoxelTerrainEvent::RenderTopologyChanged(
+                RenderTopologyBatch {
+                    revision: 1,
+                    groups: vec![group(
+                        CoverageFeature::Collision,
+                        TopologyOperation::RootActivate,
+                        location,
+                        vec![location],
+                        vec![],
+                    )],
+                    transition_masks: vec![],
+                },
+            )],
+        );
+        assert!(ops.is_empty());
+        assert_eq!(
+            state.activity[&id],
+            RenderActivity {
+                visuals: false,
+                collisions: true
+            }
+        );
+        state.accept(MeshBlockKey {
+            location,
+            revision: 1,
+        });
+        assert!(state.activity[&id].collisions);
+        reduce_render_events(
+            &mut state,
+            vec![VoxelTerrainEvent::MeshBlockExited(location)],
+        );
+        assert!(!state.activity.contains_key(&id));
+    }
+
+    #[test]
+    fn viewer_coordinates_and_extents_follow_terrain_transform() {
+        let transform = Transform3D {
+            basis: Basis::from_diagonal(2.0, 4.0, -2.0),
+            origin: Vector3::new(1000.0, 20.0, -500.0),
+        };
+        let local = Vector3::new(-3.5, 2.5, 4.5);
+        let (position, horizontal, vertical) =
+            viewer_in_terrain_space(transform, transform * local, 64, 32).unwrap();
+        assert_eq!(position, Vector3i::new(-4, 2, 4));
+        assert_eq!((horizontal, vertical), (32, 8));
+        let rotation = Transform3D {
+            basis: Basis::from_rows(
+                Vector3::new(0.0, -1.0, 0.0),
+                Vector3::new(1.0, 0.0, 0.0),
+                Vector3::new(0.0, 0.0, 1.0),
+            ),
+            origin: Vector3::new(15.0, 20.0, 25.0),
+        };
+        let (position, h, v) = viewer_in_terrain_space(rotation, rotation * local, 64, 16).unwrap();
+        assert_eq!(position, Vector3i::new(-4, 2, 4));
+        assert_eq!((h, v), (64, 64));
+        assert!(viewer_in_terrain_space(
+            Transform3D {
+                basis: Basis::from_diagonal(0.0, 1.0, 1.0),
+                origin: Vector3::ZERO
+            },
+            Vector3::ZERO,
+            1,
+            1
+        )
+        .is_err());
     }
 }

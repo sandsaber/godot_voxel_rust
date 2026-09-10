@@ -527,8 +527,50 @@ func _run_persistence_checks() -> void:
 		)
 
 
+func _run_collision_only_checks() -> void:
+	print("=== runtime correctness: collision-only demand ===")
+	var terrain := ClassDB.instantiate("VoxelTerrain") as Node3D
+	var viewer := ClassDB.instantiate("VoxelViewer") as Node3D
+	var generator := ClassDB.instantiate("VoxelGeneratorWaves") as Resource
+	if terrain == null or viewer == null or generator == null:
+		_ok(false, "collision-only terrain dependencies exist")
+		return
+	terrain.set_generator(generator)
+	terrain.set_generate_collision(true)
+	viewer.set_view_distance(48)
+	viewer.set_requires_visuals(false)
+	viewer.set_requires_collisions(true)
+	terrain.add_child(viewer)
+	add_child(terrain)
+	var deadline := Time.get_ticks_msec() + WAIT_TIMEOUT_MSEC
+	var has_collider := false
+	while Time.get_ticks_msec() < deadline and not has_collider:
+		await get_tree().process_frame
+		for child in terrain.get_children():
+			if child is MeshInstance3D:
+				for body in child.get_children():
+					if body is StaticBody3D and body.collision_layer != 0:
+						has_collider = true
+	_ok(has_collider, "collision-only viewer receives active physics bodies")
+	var has_visual := false
+	for child in terrain.get_children():
+		if child is MeshInstance3D and child.visible:
+			has_visual = true
+	_ok(not has_visual, "collision-only viewer does not activate visual meshes")
+	viewer.set_requires_visuals(true)
+	deadline = Time.get_ticks_msec() + WAIT_TIMEOUT_MSEC
+	while Time.get_ticks_msec() < deadline and not has_visual:
+		await get_tree().process_frame
+		for child in terrain.get_children():
+			if child is MeshInstance3D and child.visible and child.mesh != null:
+				has_visual = true
+	_ok(has_visual, "visual demand activates the retained terrain")
+	_ok(await _queue_free_and_wait(terrain), "collision-only terrain fully frees")
+
+
 func _run() -> void:
 	await _run_lifecycle_checks()
+	await _run_collision_only_checks()
 	await _run_persistence_checks()
 	print("=== runtime correctness result: %d failure(s) ===" % failures)
 	get_tree().quit(1 if failures > 0 else 0)

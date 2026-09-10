@@ -192,6 +192,40 @@ pub struct MesherOutput {
 }
 
 impl MesherOutput {
+    /// Normalize meshers which reuse visual triangles for physics. Do this
+    /// before feature readiness is classified, so collision-only demand has
+    /// the same payload contract as a mesher with a dedicated collider.
+    pub(crate) fn copy_visuals_to_collision(&mut self) -> bool {
+        if !self.collision_surface.positions.is_empty()
+            || !self.collision_surface.indices.is_empty()
+            || self.collision_surface.submesh_vertex_end >= 0
+            || self.collision_surface.submesh_index_end >= 0
+        {
+            return true;
+        }
+        let mut collision = CollisionSurface::default();
+        for surface in &self.surfaces {
+            let (positions, indices) = match &surface.arrays {
+                SurfaceArrays::Transvoxel(a) => (&a.vertices, &a.indices),
+                SurfaceArrays::Cubes(a) => (&a.positions, &a.indices),
+                SurfaceArrays::Blocky(a) => (&a.positions, &a.indices),
+                SurfaceArrays::Empty => continue,
+            };
+            let Ok(offset) = i32::try_from(collision.positions.len()) else {
+                return false;
+            };
+            for &index in indices {
+                let Some(index) = index.checked_add(offset) else {
+                    return false;
+                };
+                collision.indices.push(index);
+            }
+            collision.positions.extend_from_slice(positions);
+        }
+        self.collision_surface = collision;
+        true
+    }
+
     /// `true` when no render surface carries any geometry. Collision geometry
     /// is intentionally not considered by this visual-only query.
     pub fn is_empty(&self) -> bool {
@@ -352,6 +386,20 @@ mod tests {
     use crate::math::{Vector3f, Vector3i};
     use crate::meshers::transvoxel::structures::MeshArrays;
     use crate::storage::{ChannelId, VoxelBuffer};
+
+    #[test]
+    fn collision_fallback_preserves_explicit_collision_only_output() {
+        let mut output = MesherOutput::default();
+        output.collision_surface.positions = vec![
+            Vector3f::zero(),
+            Vector3f::new(1.0, 0.0, 0.0),
+            Vector3f::new(0.0, 0.0, 1.0),
+        ];
+        output.collision_surface.indices = vec![0, 1, 2];
+        assert!(output.copy_visuals_to_collision());
+        assert_eq!(output.collision_surface.positions.len(), 3);
+        assert_eq!(output.collision_surface.indices, vec![0, 1, 2]);
+    }
 
     /// A mesher that emits a fixed single-triangle transvoxel surface, used
     /// to exercise the trait plumbing without depending on real meshing math.

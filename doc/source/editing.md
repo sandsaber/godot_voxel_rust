@@ -68,12 +68,18 @@ block.
 | `do_sphere(center, radius, mode)` | Sphere edit. `mode`: `0` = Add, `1` = Remove. |
 | `do_box(min, max, mode)` | Axis-aligned box edit (inclusive bounds). |
 | `do_hemisphere(center, radius, flat_direction, smoothness, mode)` | Hemisphere brush; `mode`: 0 = Add, 1 = Remove. |
-| `do_smooth(center, radius, blur_radius)` | Box-blur smoothing pass. |
+| `do_smooth(center, radius, blur_radius)` | SDF box blur across data-block boundaries. |
 | `do_paste(position, buffer, channel_mask)` | Paste a `VoxelBuffer` (channels + per-voxel metadata) into the terrain; argument order matches upstream `paste`. |
 | `set_voxel(position, value)` | Single-voxel write on the tool's channel. |
 | `set_voxel_metadata(position, value)` / `get_voxel_metadata(position)` | Per-voxel metadata (nil/int/float/String/PackedByteArray; nil clears). |
 | `for_each_voxel_metadata_in_area(aabb, callback)` | Visit metadata in a `[min, max)` box (inverted boxes are empty). |
 | `run_blocky_random_tick(aabb, count, callback, batch, tags_mask)` | Tick random-tickable blocky voxels matching `tags_mask`; the scan budget bounds candidates. |
+
+Smoothing reads the brush area and its `blur_radius` border before writing.
+For streamed terrain, that whole area must be loaded; otherwise the operation
+makes no changes. The source snapshot is limited to 16,777,216 voxels;
+oversized requests report an error. Only voxels inside the brush sphere are
+changed, including when the sphere crosses a data-block boundary.
 
 ## SDF modifier nodes
 

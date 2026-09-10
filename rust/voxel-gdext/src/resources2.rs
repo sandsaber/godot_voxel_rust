@@ -662,7 +662,7 @@ impl VoxelModifierSphereGD {
                     let pz = origin_z + z as f32;
                     let shape = ((px - cx).powi(2) + (py - cy).powi(2) + (pz - cz).powi(2)).sqrt()
                         - self.radius;
-                    let blended = sdf_blend_inline(sdf, shape, op, self.smoothness);
+                    let blended = voxel_core::modifiers::sdf_blend(sdf, shape, op, self.smoothness);
                     if (blended - sdf).abs() > 1e-6 {
                         core.set_voxel_f(blended, x, y, z, SDF_CHANNEL);
                         changed += 1;
@@ -671,30 +671,6 @@ impl VoxelModifierSphereGD {
             }
         }
         changed
-    }
-}
-
-/// Smooth SDF blending, mirroring `voxel_core::modifiers::sdf_blend` (which is
-/// private). Used inline by [`VoxelModifierSphereGD::apply_to_buffer`] since
-/// the core API is SoA-oriented (slice in, slice out).
-fn sdf_blend_inline(
-    existing: f32,
-    shape: f32,
-    op: voxel_core::modifiers::SdfOperation,
-    smoothness: f32,
-) -> f32 {
-    use voxel_core::modifiers::SdfOperation;
-    if smoothness <= 0.0 {
-        return match op {
-            SdfOperation::Add => existing.min(shape),
-            SdfOperation::Subtract => existing.max(-shape),
-        };
-    }
-    let h = (smoothness - (shape - existing).abs()).max(0.0) / smoothness;
-    let m = shape + (existing - shape) * h; // lerp factor
-    match op {
-        SdfOperation::Add => m - smoothness * h * h,
-        SdfOperation::Subtract => m + smoothness * h * h,
     }
 }
 
@@ -1212,6 +1188,7 @@ impl INode3D for VoxelLodTerrainGD {
         let view_cap = self.view_distance_value;
         let viewers = crate::terrain::collect_child_viewers(
             self.base().get_children().iter_shared(),
+            self.base().get_global_transform(),
             "VoxelLodTerrain",
             |viewer_distance| paging_view_distance(viewer_distance, view_cap),
             self.generate_collision,
@@ -1506,6 +1483,7 @@ impl VoxelLodTerrainGD {
     #[func]
     fn set_generate_collision(&mut self, enabled: bool) {
         self.generate_collision = enabled;
+        self.refresh_collision_bodies();
     }
 
     // -----------------------------------------------------------------
@@ -2537,7 +2515,7 @@ impl VoxelLodTerrainGD {
             self.collision_margin_value,
         );
         for rendered in self.mesh_instances.values_mut() {
-            crate::terrain::apply_collision_settings_to_instance(&mut rendered.instance, settings);
+            crate::terrain::apply_render_activity(rendered, self.generate_collision, settings);
         }
     }
 }
