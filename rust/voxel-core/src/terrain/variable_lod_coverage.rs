@@ -764,6 +764,44 @@ impl CoveragePreview {
 pub(super) struct ValidatedCoveragePreview(CoveragePreview);
 
 impl ValidatedCoveragePreview {
+    /// Retire readiness together with a physical mesh removal. Ancestor nodes
+    /// may still carry descendant summaries, so remove only their payload
+    /// identity, not the structural coverage node.
+    pub(super) fn retire_payloads(
+        &mut self,
+        locations: impl Iterator<Item = MeshBlockLocation>,
+    ) -> Result<(), CoverageInvariantError> {
+        for location in locations {
+            let key = CoverageKey::from_location(location);
+            let Some(node) = self.0.next.nodes.get(&key) else {
+                continue;
+            };
+            if node.visual_active
+                || node.collision_active
+                || node.demand.resident != 0
+                || node.visual_coverage_owners != 0
+                || node.collision_coverage_owners != 0
+            {
+                return Err(CoverageInvariantError::InvalidEviction { location });
+            }
+            if node.accepted_snapshot.is_none() {
+                continue;
+            }
+            let mut node = node.clone();
+            node.accepted_snapshot = None;
+            let unchanged = Arc::ptr_eq(&self.0.base, &self.0.next);
+            let next = Arc::make_mut(&mut self.0.next);
+            if unchanged {
+                next.revision = next
+                    .revision
+                    .checked_add(1)
+                    .ok_or(CoverageInvariantError::RevisionOverflow)?;
+            }
+            next.nodes.insert(key, node);
+        }
+        Ok(())
+    }
+
     pub(super) const fn result(&self) -> &CoverageReconcileResult {
         self.0.result()
     }
@@ -3112,23 +3150,11 @@ fn replay_topology_groups(
         .collect::<BTreeSet<_>>();
     #[cfg(debug_assertions)]
     let mut debug_nodes = {
-        // Pending groups observe their old topology until their own atomic
-        // replay, while the complete before-topology owner phase is already
-        // installed for every group in the batch.
-        let mut nodes = next_nodes.clone();
-        for group in groups {
-            for location in std::iter::once(&group.anchor)
-                .chain(&group.activate)
-                .chain(&group.deactivate)
-            {
-                let key = CoverageKey::from_location(*location);
-                if let Some(old_node) = old_state.nodes.get(&key) {
-                    nodes.insert(key, old_node.clone());
-                } else {
-                    nodes.remove(&key);
-                }
-            }
-        }
+        // Future groups must observe the old readiness as well as the old
+        // activity. Starting from next_nodes exposed newly-ready descendants
+        // before another root's activation had been replayed, falsely
+        // reporting a hole for otherwise valid multi-root completion batches.
+        let mut nodes = old_state.nodes.clone();
         for (&key, next_node) in &next_nodes {
             let Some(mut node) = nodes.get(&key).cloned() else {
                 continue;
@@ -3137,7 +3163,7 @@ fn replay_topology_groups(
             node.collision_coverage_owners = next_node.collision_coverage_owners;
             nodes.insert(key, node);
         }
-        nodes
+        [nodes.clone(), nodes]
     };
     for (group_index, group) in groups.iter().enumerate() {
         work.groups_validated += 1;
@@ -3258,6 +3284,9 @@ fn replay_topology_groups(
 
         #[cfg(debug_assertions)]
         {
+            // Visual replay must not expose new collision readiness before
+            // the collision groups have reached their own activation point.
+            let debug_nodes = &mut debug_nodes[usize::from(feature_rank(group.feature))];
             for location in std::iter::once(&group.anchor)
                 .chain(&group.activate)
                 .chain(&group.deactivate)
@@ -3449,6 +3478,32 @@ mod tests {
     ) -> CoverageReconcileResult {
         let preview = coverage.preview_reconcile(inputs).unwrap();
         coverage.apply_preview(preview).unwrap()
+    }
+
+    #[test]
+    fn simultaneous_feature_bootstrap_keeps_intermediate_frontiers_separate() {
+        let mut coverage = VariableLodCoverage::try_new(3).unwrap();
+        let mut demands = Vec::new();
+        let mut ready = Vec::new();
+        for root in [first_root(), second_root()] {
+            demands.push(demand(root, counts(1, 1, 1, 1, 1)));
+            ready.push(accepted(root, snapshot(1, true, true)));
+            for child in children(root) {
+                demands.push(demand(child, counts(1, 1, 1, 1, 1)));
+                ready.push(accepted(child, snapshot(1, true, true)));
+                for leaf in children(child) {
+                    demands.push(demand(leaf, counts(1, 1, 1, 0, 0)));
+                    ready.push(accepted(leaf, snapshot(1, true, true)));
+                }
+            }
+        }
+        commit(&mut coverage, &demands);
+        let result = commit(&mut coverage, &ready);
+        assert!(!result.topology.groups.is_empty());
+        for feature in [CoverageFeature::Visual, CoverageFeature::Collision] {
+            assert_partition(&coverage, feature);
+            assert_eq!(active_locations_in(&coverage.state, feature).len(), 128);
+        }
     }
 
     fn only_root() -> MeshBlockLocation {

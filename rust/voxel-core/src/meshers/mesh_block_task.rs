@@ -486,6 +486,13 @@ impl MeshBlockTask {
             mesh_arrays_pool: self.mesh_arrays_pool.as_deref(),
         };
         mesher.build(&mut surfaces, &input);
+        if input.collision_hint
+            && !mesher.is_generating_collision_surface()
+            && !surfaces.copy_visuals_to_collision()
+        {
+            self.complete_dropped();
+            return;
+        }
 
         // MESH-1 parity: re-check dependency validity AFTER build. If the
         // mesher/generator was swapped mid-flight (between the initial check
@@ -1814,7 +1821,7 @@ mod tests {
         );
         assert_eq!(
             output.upload().collision_state(),
-            super::PayloadState::Empty
+            super::PayloadState::NonEmpty
         );
         assert!(output
             .upload()

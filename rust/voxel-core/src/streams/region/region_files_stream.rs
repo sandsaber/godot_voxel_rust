@@ -9,7 +9,7 @@ use crate::streams::{
     LoadResult, SaveMode, StreamResult, VoxelLoadQuery, VoxelSaveQuery, VoxelStream,
     VoxelStreamError,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
@@ -22,6 +22,29 @@ type RegionRegistry = HashMap<PathBuf, Weak<SharedRegionFile>>;
 // short-held registry lock lets the entry's own mutex serialize lazy open and
 // file I/O without serializing unrelated region files.
 static REGION_REGISTRY: OnceLock<Mutex<RegionRegistry>> = OnceLock::new();
+
+// Serialize first-save format decisions across streams, including filesystem
+// aliases. Once committed, the forest format is immutable for live streams.
+type ForestInitRegistry = HashMap<PathBuf, Weak<Mutex<()>>>;
+static FOREST_INIT_REGISTRY: OnceLock<Mutex<ForestInitRegistry>> = OnceLock::new();
+
+fn forest_init_lock(directory: &Path) -> Result<Arc<Mutex<()>>, VoxelStreamError> {
+    std::fs::create_dir_all(directory)
+        .map_err(|e| VoxelStreamError::Io(format!("create {}: {e}", directory.display())))?;
+    let path = std::fs::canonicalize(directory)
+        .map_err(|e| VoxelStreamError::Io(format!("resolve {}: {e}", directory.display())))?;
+    let mut registry = FOREST_INIT_REGISTRY
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    if let Some(lock) = registry.get(&path).and_then(Weak::upgrade) {
+        return Ok(lock);
+    }
+    registry.retain(|_, lock| lock.strong_count() > 0);
+    let lock = Arc::new(Mutex::new(()));
+    registry.insert(path, Arc::downgrade(&lock));
+    Ok(lock)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RegionKey {
@@ -344,8 +367,8 @@ impl RegionFilesStream {
 
     fn ensure_meta_loaded(&self) -> Result<bool, VoxelStreamError> {
         let mut state = self.lock_meta();
-        if state.loaded {
-            return Ok(state.saved);
+        if state.saved {
+            return Ok(true);
         }
         match RegionForestMeta::load(&self.directory) {
             Ok(Some(meta)) => {
@@ -405,27 +428,29 @@ impl RegionFilesStream {
             }
             candidate
         };
-        // Write outside the meta lock: filesystem I/O must not hold up
-        // concurrent meta readers.
-        candidate
-            .save(&self.directory)
+        // Re-read under the directory lock: another stream may have saved
+        // since this instance last observed an absent sidecar. Do not ever
+        // overwrite that format with this instance's candidate settings.
+        let init_lock = forest_init_lock(&self.directory)?;
+        let _init_guard = init_lock.lock().unwrap_or_else(PoisonError::into_inner);
+        let committed = RegionForestMeta::load(&self.directory)
             .map_err(|error| VoxelStreamError::Io(error.to_string()))?;
-        let mut state = self.lock_meta();
-        if !state.saved {
-            state.meta = candidate;
-            state.saved = true;
-            state.loaded = true;
-        } else if !state.meta.matches_buffer(buffer) {
-            // Lost the first-save race: this thread's candidate bytes may be
-            // the ones on disk while the winner's format is authoritative.
-            // Restore the committed meta so the file cannot poison the next
-            // session with a format no block matches.
-            state
-                .meta
+        let meta = if let Some(meta) = committed {
+            meta
+        } else {
+            candidate
                 .save(&self.directory)
                 .map_err(|error| VoxelStreamError::Io(error.to_string()))?;
+            candidate
+        };
+        let matches = meta.matches_buffer(buffer);
+        let mut state = self.lock_meta();
+        state.meta = meta;
+        state.loaded = true;
+        state.saved = true;
+        if !matches {
             return Err(VoxelStreamError::BlockFormatMismatch(
-                "lost the first-save race to a different format".to_string(),
+                "locked forest meta does not match the buffer".to_string(),
             ));
         }
         Ok(state.meta.clone())
@@ -651,19 +676,26 @@ fn visit_region_files(
     if !root.is_dir() {
         return Ok(());
     }
-    // Root-level r.*.vxr is the legacy LOD0 layout. When lod0/ also exists,
-    // the current layout is authoritative (same precedence as loads) —
-    // walking both copies the same world positions twice.
-    let has_lod0_dir = root.join("lod0").is_dir();
-    if !has_lod0_dir {
-        visit_region_dir(root, 0, &mut visit)?;
-    }
+    // Precedence is per region, just like get_or_open_region: a lod0 tree
+    // does not make unrelated legacy files obsolete.
+    let mut current_lod0 = HashSet::new();
     for lod in 0..=MAX_LOD as u8 {
         let lod_dir = root.join(format!("lod{lod}"));
         if lod_dir.is_dir() {
-            visit_region_dir(&lod_dir, lod, &mut visit)?;
+            visit_region_dir(&lod_dir, lod, &mut |path, lod, position| {
+                if lod == 0 {
+                    current_lod0.insert(position);
+                }
+                visit(path, lod, position)
+            })?;
         }
     }
+    visit_region_dir(root, 0, &mut |path, lod, position| {
+        if current_lod0.contains(&position) {
+            return Ok(());
+        }
+        visit(path, lod, position)
+    })?;
     Ok(())
 }
 
@@ -841,6 +873,103 @@ mod tests {
         let result =
             stream.load_voxel_block(VoxelLoadQuery::new(&mut block, position, lod_index))?;
         Ok((result, block))
+    }
+
+    #[test]
+    fn first_savers_with_different_depths_commit_one_forest_format() {
+        let dir = TestDir::new();
+        let first = Arc::new(RegionFilesStream::new(dir.path().to_path_buf()));
+        let second = Arc::new(RegionFilesStream::new(dir.path().to_path_buf()));
+        assert_eq!(
+            load(&first, Vector3i::zero(), 0).unwrap().0,
+            LoadResult::NotFound
+        );
+        assert_eq!(
+            load(&second, Vector3i::zero(), 0).unwrap().0,
+            LoadResult::NotFound
+        );
+        let start = Arc::new(Barrier::new(2));
+        let threads: Vec<_> = [first.clone(), second.clone()]
+            .into_iter()
+            .enumerate()
+            .map(|(index, stream)| {
+                let start = start.clone();
+                std::thread::spawn(move || {
+                    let mut block = sample_block(index as u64 + 1);
+                    if index == 1 {
+                        block.set_channel_depth(
+                            ChannelId::Type.index(),
+                            crate::storage::ChannelDepth::Bit32,
+                        );
+                    }
+                    block.set_voxel(index as u64 + 1, 1, 2, 3, ChannelId::Type.index());
+                    start.wait();
+                    (
+                        index,
+                        save(&stream, Vector3i::new(index as i32, 0, 0), 0, &block),
+                    )
+                })
+            })
+            .collect();
+        let results: Vec<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+        assert_eq!(results.iter().filter(|(_, r)| r.is_ok()).count(), 1);
+        assert!(results
+            .iter()
+            .any(|(_, r)| matches!(r, Err(VoxelStreamError::BlockFormatMismatch(_)))));
+        first.flush().unwrap();
+        second.flush().unwrap();
+        drop((first, second));
+        let reopened = RegionFilesStream::new(dir.path().to_path_buf());
+        let winner = results.iter().find(|(_, r)| r.is_ok()).unwrap().0;
+        let (result, block) = load(&reopened, Vector3i::new(winner as i32, 0, 0), 0).unwrap();
+        assert_eq!(result, LoadResult::Found);
+        assert_eq!(
+            block.get_voxel(1, 2, 3, ChannelId::Type.index()),
+            winner as u64 + 1
+        );
+        assert!(RegionForestMeta::load(dir.path())
+            .unwrap()
+            .unwrap()
+            .matches_buffer(&block));
+    }
+
+    #[test]
+    fn conversion_prefers_current_duplicate_but_keeps_other_legacy_regions() {
+        let dir = TestDir::new();
+        let dest = TestDir::new();
+        {
+            let stream = RegionFilesStream::with_settings(dir.path().to_path_buf(), 16, 512);
+            save(&stream, Vector3i::zero(), 0, &sample_block(1)).unwrap();
+            stream.flush().unwrap();
+        }
+        std::fs::copy(
+            dir.path().join("lod0/r.0.0.0.vxr"),
+            dir.path().join("r.0.0.0.vxr"),
+        )
+        .unwrap();
+        {
+            let stream = RegionFilesStream::with_settings(dir.path().to_path_buf(), 16, 512);
+            save(&stream, Vector3i::zero(), 0, &sample_block(2)).unwrap();
+            stream.flush().unwrap();
+        }
+        let copied = RegionFilesStream::convert_directory(
+            dir.path().to_path_buf(),
+            dest.path().to_path_buf(),
+            32,
+            512,
+        )
+        .unwrap();
+        assert_eq!(copied, 1);
+        let stream = RegionFilesStream::new(dest.path().to_path_buf());
+        assert_eq!(
+            load(&stream, Vector3i::zero(), 0).unwrap().1.get_voxel(
+                1,
+                2,
+                3,
+                ChannelId::Type.index()
+            ),
+            2
+        );
     }
 
     #[test]

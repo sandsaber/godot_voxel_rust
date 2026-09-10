@@ -8414,7 +8414,9 @@ mod modifier_smoothness_parity {
             })
             .collect();
 
-        let mut sdf_hard = vec![-5.0f32; positions.len()];
+        // The constant field must actually intersect the sphere blend band.
+        // At -5 the closest sphere sample (-3) is already outside it.
+        let mut sdf_hard = vec![-1.0f32; positions.len()];
         let mut s1 = ModifierStack::new();
         s1.add(Box::new(SphereModifier {
             center: Vector3f::new(2.0, 2.0, 2.0),
@@ -8424,7 +8426,7 @@ mod modifier_smoothness_parity {
         }));
         s1.apply(&mut sdf_hard, &positions);
 
-        let mut sdf_smooth = vec![-5.0f32; positions.len()];
+        let mut sdf_smooth = vec![-1.0f32; positions.len()];
         let mut s2 = ModifierStack::new();
         s2.add(Box::new(SphereModifier {
             center: Vector3f::new(2.0, 2.0, 2.0),

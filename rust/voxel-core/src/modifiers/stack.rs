@@ -102,23 +102,11 @@ pub fn sdf_blend(existing: f32, shape: f32, op: SdfOperation, smoothness: f32) -
         };
     }
     match op {
-        SdfOperation::Add => sdf_smooth_union(existing, shape, smoothness),
-        SdfOperation::Subtract => sdf_smooth_subtract(existing, shape, smoothness),
+        SdfOperation::Add => crate::math::sdf::sdf_smooth_union(existing, shape, smoothness),
+        SdfOperation::Subtract => {
+            crate::math::sdf::sdf_smooth_subtract(existing, shape, smoothness)
+        }
     }
-}
-
-/// Smooth union: `min(a, b)` blended over `smoothness` distance.
-/// Matches `math::sdf_smooth_union`.
-fn sdf_smooth_union(a: f32, b: f32, s: f32) -> f32 {
-    let h = (s - (b - a).abs() * 0.5).clamp(0.0, s);
-    b - h + h * h / s
-}
-
-/// Smooth subtract: `max(a, -b)` blended over `smoothness` distance.
-/// Matches `math::sdf_smooth_subtract`.
-fn sdf_smooth_subtract(a: f32, b: f32, s: f32) -> f32 {
-    let h = (s - (a + b).abs() * 0.5).clamp(0.0, s);
-    -b + h + h * h / s
 }
 
 #[cfg(test)]

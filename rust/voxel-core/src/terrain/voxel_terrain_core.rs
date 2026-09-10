@@ -563,6 +563,7 @@ pub enum VoxelTerrainRuntimeError {
     ShutdownEpochOverflow,
     RequestGenerationOverflow,
     ShutdownRetryPending,
+    SmoothEditTooLarge,
     LoadRetryCountOverflow {
         location: BlockLocation,
     },
@@ -673,6 +674,7 @@ impl std::fmt::Display for VoxelTerrainRuntimeError {
             Self::CompletionDrainStalled => {
                 write!(f, "terrain completion drain made no ownership progress")
             }
+            Self::SmoothEditTooLarge => write!(f, "smoothing snapshot exceeds 16 million voxels"),
             Self::RequestEpochOverflow => write!(f, "terrain request epoch exhausted"),
             Self::ShutdownEpochOverflow => write!(f, "terrain shutdown epoch exhausted"),
             Self::RequestGenerationOverflow => {
@@ -2908,6 +2910,9 @@ struct VariableLodRuntimeState {
     coordinator: ClipboxCoordinator,
     coverage: VariableLodCoverage,
     coverage_holds: CoverageHoldLedger,
+    // Accepted payloads must be fed back into coverage even when the viewer
+    // is stationary. Retain this queue through failed planner transactions.
+    pending_mesh_acceptances: Vec<MeshBlockLocation>,
 }
 
 /// One resident mesh block for the debug overlay.
@@ -3182,6 +3187,7 @@ impl VoxelTerrainCore {
                 coordinator,
                 coverage,
                 coverage_holds: CoverageHoldLedger::default(),
+                pending_mesh_acceptances: Vec::new(),
             }),
         ))
     }
@@ -3247,6 +3253,7 @@ impl VoxelTerrainCore {
                 coordinator,
                 coverage,
                 coverage_holds: CoverageHoldLedger::default(),
+                pending_mesh_acceptances: Vec::new(),
             }),
         )
     }
@@ -3587,26 +3594,167 @@ impl VoxelTerrainCore {
         {
             return Ok(0);
         }
-        if channel_index >= crate::storage::voxel_buffer::MAX_CHANNELS {
+        if channel_index != crate::storage::ChannelId::Sdf.index() || blur_radius == 0 {
             return Ok(0);
         }
-        let min = Vector3i::new(
+        if self.shutdown_epoch.is_some() {
+            return Err(VoxelTerrainRuntimeError::ShutdownRetryPending);
+        }
+        let settings = self.data.settings_snapshot();
+        let bounds = settings.bounds_in_voxels;
+        // Capture the entire source, including the filter halo, before the
+        // first per-block edit. Later blocks must not sample earlier writes.
+        let mut lo = [0i32; 3];
+        let mut hi = [0i32; 3];
+        for (axis, value) in [center.x, center.y, center.z].into_iter().enumerate() {
+            let lower = ((value - radius).floor() as i32).saturating_sub(blur_radius);
+            let upper = ((value + radius).ceil() as i32)
+                .saturating_add(blur_radius)
+                .saturating_add(1);
+            let bmin = [bounds.position.x, bounds.position.y, bounds.position.z][axis];
+            let bsize = [bounds.size.x, bounds.size.y, bounds.size.z][axis];
+            lo[axis] = lower.max(bmin);
+            hi[axis] = upper.min(bmin.saturating_add(bsize));
+            if hi[axis] <= lo[axis] {
+                return Ok(0);
+            }
+        }
+        let mut volume = 1u64;
+        for axis in 0..3 {
+            let extent = (i64::from(hi[axis]) - i64::from(lo[axis])) as u64;
+            volume = volume
+                .checked_mul(extent)
+                .ok_or(VoxelTerrainRuntimeError::SmoothEditTooLarge)?;
+            if extent > u64::from(crate::storage::voxel_buffer::MAX_SIZE)
+                || volume > 16 * 1024 * 1024
+            {
+                return Err(VoxelTerrainRuntimeError::SmoothEditTooLarge);
+            }
+        }
+        let start = Vector3i::new(lo[0], lo[1], lo[2]);
+        let end = Vector3i::new(hi[0], hi[1], hi[2]);
+        let size = end - start;
+        let mut source = VoxelBuffer::with_size(size);
+        source.set_channel_depth(channel_index, crate::storage::ChannelDepth::Bit32);
+        let block_size = self.data_block_size();
+        let first = Vector3i::new(
+            start.x.div_euclid(block_size),
+            start.y.div_euclid(block_size),
+            start.z.div_euclid(block_size),
+        );
+        let last = Vector3i::new(
+            (end.x - 1).div_euclid(block_size),
+            (end.y - 1).div_euclid(block_size),
+            (end.z - 1).div_euclid(block_size),
+        );
+        for bz in first.z..=last.z {
+            for by in first.y..=last.y {
+                for bx in first.x..=last.x {
+                    let position = Vector3i::new(bx, by, bz);
+                    let origin = position * block_size;
+                    let voxels = match self
+                        .data
+                        .block_snapshot(position, 0)
+                        .and_then(VoxelDataBlock::into_voxels)
+                    {
+                        Some(voxels) => voxels,
+                        None => {
+                            // A stream may hold edited data: do not substitute
+                            // generated voxels for an unloaded filter neighbour.
+                            if settings.streaming_enabled || !settings.full_load_completed {
+                                return Ok(0);
+                            }
+                            let mut voxels = VoxelBuffer::with_size(Vector3i::splat(block_size));
+                            settings.format.configure_buffer(&mut voxels);
+                            if let Some(generator) = settings.generator.as_ref() {
+                                generator.generate_block(crate::generators::base::VoxelQueryData {
+                                    buffer: &mut voxels,
+                                    origin_in_voxels: origin,
+                                    lod: 0,
+                                });
+                            }
+                            voxels
+                        }
+                    };
+                    for z in start.z.max(origin.z)..end.z.min(origin.z + block_size) {
+                        for y in start.y.max(origin.y)..end.y.min(origin.y + block_size) {
+                            for x in start.x.max(origin.x)..end.x.min(origin.x + block_size) {
+                                source.set_voxel_f(
+                                    voxels.get_voxel_f(
+                                        x - origin.x,
+                                        y - origin.y,
+                                        z - origin.z,
+                                        channel_index,
+                                    ),
+                                    x - start.x,
+                                    y - start.y,
+                                    z - start.z,
+                                    channel_index,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let local_center = crate::math::Vector3f::new(
+            center.x - start.x as f32,
+            center.y - start.y as f32,
+            center.z - start.z as f32,
+        );
+        // Clipping the kernel to the whole source avoids integer overflow for
+        // oversized blur radii, with the same average over in-bounds samples.
+        crate::edition::do_smooth(
+            &mut source,
+            channel_index,
+            local_center,
+            radius,
+            blur_radius.min(size.x.max(size.y).max(size.z)),
+        );
+        let edit_min = Vector3i::new(
             (center.x - radius).floor() as i32,
             (center.y - radius).floor() as i32,
             (center.z - radius).floor() as i32,
         );
-        let max = Vector3i::new(
+        let edit_max = Vector3i::new(
             (center.x + radius).ceil() as i32,
             (center.y + radius).ceil() as i32,
             (center.z + radius).ceil() as i32,
         );
-        self.try_edit_overlapping_blocks(min, max, |buffer, origin| {
-            let local_center = crate::math::Vector3f::new(
-                center.x - origin.x as f32,
-                center.y - origin.y as f32,
-                center.z - origin.z as f32,
-            );
-            crate::edition::do_smooth(buffer, channel_index, local_center, radius, blur_radius);
+        let edit_min = Vector3i::new(
+            edit_min.x.max(start.x),
+            edit_min.y.max(start.y),
+            edit_min.z.max(start.z),
+        );
+        let edit_max = Vector3i::new(
+            edit_max.x.min(end.x - 1),
+            edit_max.y.min(end.y - 1),
+            edit_max.z.min(end.z - 1),
+        );
+        self.try_edit_overlapping_blocks(edit_min, edit_max, |buffer, origin| {
+            for z in edit_min.z.max(origin.z)..=edit_max.z.min(origin.z + block_size - 1) {
+                for y in edit_min.y.max(origin.y)..=edit_max.y.min(origin.y + block_size - 1) {
+                    for x in edit_min.x.max(origin.x)..=edit_max.x.min(origin.x + block_size - 1) {
+                        let dx = x as f32 - center.x;
+                        let dy = y as f32 - center.y;
+                        let dz = z as f32 - center.z;
+                        if dx * dx + dy * dy + dz * dz <= radius * radius {
+                            buffer.set_voxel_f(
+                                source.get_voxel_f(
+                                    x - start.x,
+                                    y - start.y,
+                                    z - start.z,
+                                    channel_index,
+                                ),
+                                x - origin.x,
+                                y - origin.y,
+                                z - origin.z,
+                                channel_index,
+                            );
+                        }
+                    }
+                }
+            }
         })
     }
 
@@ -11202,7 +11350,7 @@ impl VoxelTerrainCore {
                 )
             }
             .map_err(VoxelTerrainRuntimeError::from)?;
-            let preview = preview
+            let mut preview = preview
                 .validate_for(
                     &self
                         .variable_lod
@@ -11218,6 +11366,11 @@ impl VoxelTerrainCore {
                 hold_resolution,
                 &data_preview,
             )?;
+            preview
+                .retire_payloads(prepared_physical.mesh_diffs.iter().filter_map(|diff| {
+                    matches!(diff.action, PreparedMapAction::Remove).then_some(diff.location)
+                }))
+                .map_err(VoxelTerrainRuntimeError::Coverage)?;
             let observations = std::mem::take(&mut prepared_physical.observations);
             physical_slice = Some(prepared_physical);
             Some(PreparedVariableCoveragePublication {
@@ -11699,16 +11852,31 @@ impl VoxelTerrainCore {
             )
             .map_err(VoxelTerrainRuntimeError::from)?;
 
+        let pending_acceptance_count = self
+            .variable_lod
+            .as_ref()
+            .expect("variable runtime exists")
+            .pending_mesh_acceptances
+            .len();
+        let mut deferred_acceptances = Vec::new();
+        deferred_acceptances
+            .try_reserve_exact(pending_acceptance_count)
+            .map_err(|_| VoxelTerrainRuntimeError::CompletionDrainCapacityFailed)?;
         let data_preview = self.data.begin_transaction_preview();
-        let needs_coverage_preview =
-            mesh_change_count != 0 || !coordinator_update.delta().changes.is_empty();
+        let needs_coverage_preview = pending_acceptance_count != 0
+            || mesh_change_count != 0
+            || !coordinator_update.delta().changes.is_empty();
         let mut physical_slice = None;
         let coverage_publication = if !needs_coverage_preview {
             None
         } else {
             let mut inputs = Vec::new();
             inputs
-                .try_reserve_exact(mesh_change_count)
+                .try_reserve_exact(
+                    mesh_change_count
+                        .checked_add(pending_acceptance_count)
+                        .ok_or(VoxelTerrainRuntimeError::CompletionDrainCapacityFailed)?,
+                )
                 .map_err(|_| VoxelTerrainRuntimeError::CompletionDrainCapacityFailed)?;
             inputs.extend(
                 coordinator_update
@@ -11724,6 +11892,53 @@ impl VoxelTerrainCore {
                         )
                     }),
             );
+            let mut accepted_locations = Vec::new();
+            accepted_locations
+                .try_reserve_exact(pending_acceptance_count)
+                .map_err(|_| VoxelTerrainRuntimeError::CompletionDrainCapacityFailed)?;
+            accepted_locations.extend_from_slice(
+                &self
+                    .variable_lod
+                    .as_ref()
+                    .expect("variable runtime exists")
+                    .pending_mesh_acceptances,
+            );
+            accepted_locations
+                .sort_unstable_by_key(|location| canonical_mesh_location_key(*location));
+            accepted_locations.dedup();
+            for location in accepted_locations {
+                let Some(upload) = self.mesh_maps[usize::from(location.lod_index)]
+                    .get(&location.position_in_blocks)
+                    .and_then(|entry| entry.accepted_upload.as_ref())
+                else {
+                    continue;
+                };
+                let root_lod = self.lod_count - 1;
+                if location.lod_index < root_lod {
+                    let root_position =
+                        location.position_in_blocks >> u32::from(root_lod - location.lod_index);
+                    let root_ready = self.mesh_maps[usize::from(root_lod)]
+                        .get(&root_position)
+                        .and_then(|entry| entry.accepted_upload.as_ref())
+                        .is_some_and(|root| root.features().contains(upload.features()));
+                    if !root_ready {
+                        // Bootstrap coverage from a ready coarsest fallback.
+                        // Fine mesh workers may finish first; keep their
+                        // acceptance pending rather than publishing an
+                        // uncovered ready leaf or losing its completion.
+                        deferred_acceptances.push(location);
+                        continue;
+                    }
+                }
+                inputs.push(CoverageInput::Accept {
+                    location,
+                    snapshot: AcceptedFeatureSnapshot {
+                        revision: upload.key().revision,
+                        visuals: upload.features().visuals,
+                        collisions: upload.features().collisions,
+                    },
+                });
+            }
             inputs.sort_unstable_by_key(|input| match input {
                 CoverageInput::SetDemand { location, .. }
                 | CoverageInput::Accept { location, .. }
@@ -11751,7 +11966,7 @@ impl VoxelTerrainCore {
                 )
             }
             .map_err(VoxelTerrainRuntimeError::from)?;
-            let preview = preview
+            let mut preview = preview
                 .validate_for(
                     &self
                         .variable_lod
@@ -11767,6 +11982,11 @@ impl VoxelTerrainCore {
                 hold_resolution,
                 &data_preview,
             )?;
+            preview
+                .retire_payloads(prepared_physical.mesh_diffs.iter().filter_map(|diff| {
+                    matches!(diff.action, PreparedMapAction::Remove).then_some(diff.location)
+                }))
+                .map_err(VoxelTerrainRuntimeError::Coverage)?;
             let observations = std::mem::take(&mut prepared_physical.observations);
             physical_slice = Some(prepared_physical);
             Some(PreparedVariableCoveragePublication {
@@ -11908,6 +12128,16 @@ impl VoxelTerrainCore {
             retirement,
         };
         self.commit_terrain_draft_no_fail(draft)?;
+        self.variable_lod
+            .as_mut()
+            .expect("variable runtime exists")
+            .pending_mesh_acceptances
+            .drain(..pending_acceptance_count);
+        self.variable_lod
+            .as_mut()
+            .expect("variable runtime exists")
+            .pending_mesh_acceptances
+            .extend(deferred_acceptances);
 
         // AFTER the publication fence: dispatch queued saves/checkpoints and
         // apply any direct mesh uploads that arrived. Deferring these keeps
@@ -14642,6 +14872,9 @@ impl VoxelTerrainCore {
             return Err(CompletionDrainError::InjectedMeshEventReservationFailure);
         }
         self.event_outbox.try_reserve(additional)?;
+        if let Some(runtime) = self.variable_lod.as_mut() {
+            runtime.pending_mesh_acceptances.try_reserve(additional)?;
+        }
         Ok(())
     }
 
@@ -16330,6 +16563,9 @@ impl VoxelTerrainCore {
             (_, false) => VoxelTerrainEvent::MeshBlockBecameEmpty(upload),
         };
         self.event_outbox.push_back(event);
+        if let Some(runtime) = self.variable_lod.as_mut() {
+            runtime.pending_mesh_acceptances.push(key.location);
+        }
         drop((retired, retired_request));
         Ok(true)
     }

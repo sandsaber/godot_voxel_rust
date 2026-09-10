@@ -254,3 +254,72 @@ fn stationary_viewer_remesh_keeps_variable_lod_and_collision_features() {
         );
     }
 }
+
+#[test]
+fn completed_meshes_activate_variable_coverage_without_viewer_motion() {
+    let mut core = make_variable_terrain();
+    for position in [
+        Vector3i::zero(),
+        Vector3i::new(96, 0, 0),
+        Vector3i::new(-96, 0, 0),
+    ] {
+        let update = viewer_with_demand(
+            1,
+            position,
+            MeshDemand {
+                visuals: true,
+                collisions: true,
+            },
+        );
+        let mut activated = false;
+        for _ in 0..64 {
+            let events = core.try_process(&[update]).unwrap();
+            activated |= events.iter().any(|event| {
+                matches!(event,
+                VoxelTerrainEvent::RenderTopologyChanged(batch) if !batch.groups.is_empty())
+            });
+            core.wait_for_pending_tasks();
+        }
+        assert!(
+            activated,
+            "mesh completion must publish coverage changes for stationary demand"
+        );
+        let mut visual_bounds = Vec::new();
+        let mut collision_count = 0;
+        for lod in 0..core.lod_count() {
+            for (position, entry) in core.mesh_blocks_at_lod(lod).iter() {
+                if entry.visual_active {
+                    let stride = 16 << lod;
+                    let bounds = Box3i::new(*position * stride, Vector3i::splat(stride));
+                    assert!(
+                        visual_bounds
+                            .iter()
+                            .all(|other: &Box3i| !other.intersects(&bounds)),
+                        "parent and child cannot be active together"
+                    );
+                    visual_bounds.push(bounds);
+                    assert!(entry.accepted_upload().is_some());
+                }
+                collision_count += usize::from(entry.collision_active);
+            }
+        }
+        assert!(
+            !visual_bounds.is_empty(),
+            "resident payloads must become active visuals"
+        );
+        assert!(
+            collision_count > 0,
+            "resident payloads must become active collision"
+        );
+    }
+    for _ in 0..32 {
+        core.try_process(&[]).unwrap();
+        core.wait_for_pending_tasks();
+    }
+    for lod in 0..core.lod_count() {
+        assert!(core
+            .mesh_blocks_at_lod(lod)
+            .values()
+            .all(|entry| !entry.visual_active && !entry.collision_active));
+    }
+}
