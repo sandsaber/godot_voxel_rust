@@ -124,10 +124,13 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          # The native build only needs command-line tools and the pinned NDK.
+          # The action's default packages include the unavailable legacy tools.
+          packages: ''
 
       - name: Install Android NDK
         run: |
-          yes | sdkmanager --licenses >/dev/null
           sdkmanager --install "ndk;${ANDROID_NDK_VERSION}"
           SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME}}"
           echo "ANDROID_NDK_HOME=${SDK_ROOT}/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
