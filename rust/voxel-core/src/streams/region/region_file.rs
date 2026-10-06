@@ -108,13 +108,18 @@ impl<F: VoxelFile> RegionFile<F> {
     /// Build an unopened handle with the given default format (used when
     /// creating new files).
     pub fn with_format(format: RegionFormat) -> Self {
+        Self::try_with_format(format)
+            .expect("RegionFile::with_format requires a valid region format")
+    }
+
+    fn try_with_format(format: RegionFormat) -> Result<Self, RegionError> {
         format
             .validate_result()
-            .expect("RegionFile::with_format requires a valid region format");
+            .map_err(|error| RegionError::BadHeader(error.to_string()))?;
         let block_count = format
             .block_count_checked()
-            .expect("validated region format has checked block count");
-        Self {
+            .map_err(|error| RegionError::BadHeader(error.to_string()))?;
+        Ok(Self {
             file: None,
             header: Header {
                 version: FORMAT_VERSION,
@@ -124,7 +129,7 @@ impl<F: VoxelFile> RegionFile<F> {
             sectors: Vec::new(),
             header_dirty: false,
             blocks_begin_offset: 0,
-        }
+        })
     }
 
     /// Whether a file is currently open.
@@ -187,9 +192,10 @@ impl<F: VoxelFile> RegionFile<F> {
     }
 
     /// How many sectors `size_in_bytes` of payload occupies.
-    fn sector_count_from_bytes(&self, size_in_bytes: usize) -> u32 {
+    fn sector_count_from_bytes(&self, size_in_bytes: usize) -> Result<u32, RegionError> {
         let sector_size = self.header.format.sector_size as usize;
-        size_in_bytes.div_ceil(sector_size) as u32
+        u32::try_from(size_in_bytes.div_ceil(sector_size))
+            .map_err(|_| RegionError::BadHeader("block sector count exceeds u32".into()))
     }
 
     // -------------------------------------------------------------------
@@ -198,6 +204,10 @@ impl<F: VoxelFile> RegionFile<F> {
 
     /// Write the header (magic + version + format + LUT) at offset 0.
     fn save_header(&mut self) -> Result<(), RegionError> {
+        self.header
+            .format
+            .validate_result()
+            .map_err(|error| RegionError::BadHeader(error.to_string()))?;
         let file = self.file.as_mut().expect("file open");
         file.seek(0).map_err(io)?;
 
@@ -628,22 +638,39 @@ impl<F: VoxelFile> RegionFile<F> {
         // Serialize + compress the block into a fresh payload.
         let mut payload = Vec::new();
         block_serializer::serialize_and_compress(block, &mut payload, compression_mode)?;
-        let written_size = 4 + payload.len(); // length prefix + payload
-        let new_sector_count = self.sector_count_from_bytes(written_size);
+        let written_size = 4usize
+            .checked_add(payload.len())
+            .ok_or_else(|| RegionError::BadHeader("block payload size overflow".into()))?;
+        u32::try_from(payload.len())
+            .map_err(|_| RegionError::BadHeader("block payload exceeds u32".into()))?;
+        let new_sector_count = self.sector_count_from_bytes(written_size)?;
 
         let lut_index = self.block_index(position).unwrap();
         let existing = self.header.blocks[lut_index];
         let sector_size = self.header.format.sector_size as u64;
+        // A representability rejection must leave both its old allocation and every
+        // following block untouched. For growth, compaction removes the old
+        // allocation before the replacement is appended.
+        let sector_index = if existing.is_present() && new_sector_count > existing.sector_count() {
+            self.sectors
+                .len()
+                .checked_sub(existing.sector_count() as usize)
+        } else if existing.is_present() {
+            Some(existing.sector_index() as usize)
+        } else {
+            Some(self.sectors.len())
+        }
+        .and_then(|index| u32::try_from(index).ok())
+        .ok_or_else(|| RegionError::BadHeader("block sector index exceeds u32".into()))?;
+        let new_info = RegionBlockInfo::try_new(sector_index, new_sector_count)
+            .map_err(|error| RegionError::BadHeader(error.to_string()))?;
 
         if !existing.is_present() {
             // Append at end of the data area.
             let block_offset = self.blocks_begin_offset + self.sectors.len() as u64 * sector_size;
             self.write_payload(block_offset, &payload)?;
 
-            let sector_index = ((block_offset - self.blocks_begin_offset) / sector_size) as u32;
-            self.header.blocks[lut_index] =
-                RegionBlockInfo::try_new(sector_index, new_sector_count)
-                    .map_err(|e| RegionError::BadHeader(e.to_string()))?;
+            self.header.blocks[lut_index] = new_info;
             for _ in 0..new_sector_count {
                 self.sectors.push(position);
             }
@@ -654,6 +681,7 @@ impl<F: VoxelFile> RegionFile<F> {
                 if new_sector_count < old_count {
                     self.remove_sectors_from_block(position, old_count - new_sector_count)?;
                 }
+                self.header.blocks[lut_index] = new_info;
                 let block_offset =
                     self.blocks_begin_offset + existing.sector_index() as u64 * sector_size;
                 // In-place write: no padding needed (sector count unchanged or
@@ -672,10 +700,7 @@ impl<F: VoxelFile> RegionFile<F> {
                 let block_offset =
                     self.blocks_begin_offset + self.sectors.len() as u64 * sector_size;
                 self.write_payload(block_offset, &payload)?;
-                let sector_index = ((block_offset - self.blocks_begin_offset) / sector_size) as u32;
-                self.header.blocks[lut_index] =
-                    RegionBlockInfo::try_new(sector_index, new_sector_count)
-                        .map_err(|e| RegionError::BadHeader(e.to_string()))?;
+                self.header.blocks[lut_index] = new_info;
                 for _ in 0..new_sector_count {
                     self.sectors.push(position);
                 }
@@ -728,7 +753,7 @@ impl RegionFile<StdVoxelFile> {
         create_if_not_found: bool,
         format: RegionFormat,
     ) -> Result<Self, RegionError> {
-        let mut rf = Self::with_format(format);
+        let mut rf = Self::try_with_format(format)?;
         match StdVoxelFile::open_rw(path) {
             Ok(file) => {
                 rf.file = Some(file);
@@ -1213,10 +1238,10 @@ mod tests {
             sector_size: 64,
             ..small_format()
         });
-        assert_eq!(rf.sector_count_from_bytes(1), 1);
-        assert_eq!(rf.sector_count_from_bytes(64), 1);
-        assert_eq!(rf.sector_count_from_bytes(65), 2);
-        assert_eq!(rf.sector_count_from_bytes(128), 2);
+        assert_eq!(rf.sector_count_from_bytes(1), Ok(1));
+        assert_eq!(rf.sector_count_from_bytes(64), Ok(1));
+        assert_eq!(rf.sector_count_from_bytes(65), Ok(2));
+        assert_eq!(rf.sector_count_from_bytes(128), Ok(2));
     }
 
     #[test]

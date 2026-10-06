@@ -142,7 +142,7 @@ impl RegionFormat {
         if self.block_size_po2 == 0 {
             return Err(RegionFormatError::InvalidBlockSizePo2(self.block_size_po2));
         }
-        if self.sector_size == 0 {
+        if self.sector_size == 0 || self.sector_size > u16::MAX as u32 {
             return Err(RegionFormatError::InvalidSectorSize(self.sector_size));
         }
 

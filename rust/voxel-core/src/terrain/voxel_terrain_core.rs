@@ -3211,10 +3211,11 @@ impl VoxelTerrainCore {
         settings
             .validate_for_bounds(block_size, self.data.bounds())
             .map_err(VariableLodConstructionError::LodMath)?;
-        let coordinator = ClipboxCoordinator::new(settings, self.data.bounds())
+        runtime
+            .coordinator
+            .reconfigure_distances(settings)
             .map_err(VariableLodConstructionError::Coordinator)?;
         runtime.settings = settings;
-        runtime.coordinator = coordinator;
         Ok(())
     }
 
@@ -11787,6 +11788,18 @@ impl VoxelTerrainCore {
         // completion that has arrived by this tick visible to the planner.
         self.legacy_variable_apply_durable_fifo()?;
 
+        if !dispatch_tasks {
+            // As in fixed LOD, disabling automatic loading freezes viewer
+            // demand while already-started work can finish. Do not prepare
+            // InFlight owners for tasks which will never be dispatched.
+            let deferred_keys = std::mem::take(&mut self.deferred_save_dispatch_keys);
+            self.dispatch_queued_saves_except(&deferred_keys);
+            if !std::mem::take(&mut self.deferred_checkpoint_dispatch) {
+                self.dispatch_pending_checkpoint();
+            }
+            return self.legacy_variable_apply_direct_fifo();
+        }
+
         // Build the paired-viewer publication from the incoming viewer updates
         // (Section 2). The coordinator/coverage model owns residency; the
         // paired viewers are kept consistent for telemetry/shutdown bookkeeping.
@@ -12004,7 +12017,7 @@ impl VoxelTerrainCore {
             pending_mesh_queues,
             data_operations,
             data_snapshots,
-            mut scheduled_tasks,
+            scheduled_tasks,
             persistence,
             events_to_append,
             next_request_generation,
@@ -12044,13 +12057,6 @@ impl VoxelTerrainCore {
             next_stats: self.stats,
             observations: PreparedVariablePhysicalObservations::default(),
         });
-
-        // Honor the dispatch gate: when tasks should not be dispatched, drop
-        // the prepared tasks before reservation (mirrors the fixed path's
-        // `dispatch_tasks` semantics).
-        if !dispatch_tasks {
-            scheduled_tasks.clear();
-        }
 
         self.try_reserve_prepared_runtime_publication(
             &mesh_diffs,

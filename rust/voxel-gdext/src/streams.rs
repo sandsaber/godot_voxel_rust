@@ -206,8 +206,13 @@ impl VoxelStreamRegionFiles {
         let sector_size = new_settings
             .get("sector_size")
             .and_then(|value| value.try_to::<i32>().ok())
-            .unwrap_or(self.sector_size_value)
-            .max(1);
+            .unwrap_or(self.sector_size_value);
+        if !(1..=u16::MAX as i32).contains(&sector_size) {
+            godot_error!(
+                "VoxelStreamRegionFiles.convert_files: invalid sector_size {sector_size}; expected 1..=65535"
+            );
+            return;
+        }
         let requested_block_po2 = new_settings
             .get("block_size_po2")
             .and_then(|value| value.try_to::<i32>().ok())
@@ -315,7 +320,13 @@ impl VoxelStreamRegionFiles {
 
     #[func]
     fn set_sector_size(&mut self, size: i32) {
-        self.sector_size_value = size.max(1);
+        if !(1..=u16::MAX as i32).contains(&size) {
+            godot_error!(
+                "VoxelStreamRegionFiles.sector_size: invalid value {size}; expected 1..=65535"
+            );
+            return;
+        }
+        self.sector_size_value = size;
     }
 }
 

@@ -32,7 +32,7 @@ fastnoise-lite = "1.1"
 
 # Persistent ordered maps keep transactional variable-LOD coverage previews
 # cheap while preserving deterministic iteration order.
-imbl = "=7.0.1"
+imbl = "=7.0.2"
 
 # Optional ZSTD support. Off by default so the default build stays pure-Rust;
 # enable for parity with the C++ CompressedData::COMPRESSION_ZSTD path. The

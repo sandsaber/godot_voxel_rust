@@ -1560,10 +1560,29 @@ impl VoxelBlockyLibraryGD {
         idx
     }
 
-    /// Bake side-culling / AO tables. Must be called after models change
-    /// before the library is used by `VoxelMesherBlocky`.
+    /// Re-read the model resources, then bake side-culling / AO tables. Must
+    /// be called after a stored model resource changes before the library is
+    /// used by `VoxelMesherBlocky`.
     #[func]
     fn bake(&mut self) {
+        self.library.models = self
+            .godot_models
+            .iter()
+            .enumerate()
+            .map(|(index, model)| {
+                if index == 0 {
+                    voxel_core::meshers::blocky::BakedModel::default()
+                } else {
+                    model
+                        .as_ref()
+                        .map(baked_model_from_resource)
+                        .unwrap_or_default()
+                }
+            })
+            .collect();
+        // `bake_library` sets true occlusion bits but does not clear bits from
+        // an earlier bake when the matrix retains its size.
+        self.library.side_pattern_culling = Default::default();
         voxel_core::meshers::blocky::bake_library(&mut self.library);
         self.baked = true;
     }
@@ -1639,8 +1658,9 @@ impl VoxelBlockyLibraryGD {
         array
     }
 
-    /// Replace the entire model array (canonical `models` property setter).
-    /// Each entry must be a `VoxelBlockyModel` or `VoxelBlockyModelCube`.
+    /// Replace the model array (canonical `models` property setter). A null
+    /// first entry represents the reserved air ID 0; subsequent null entries
+    /// remain empty slots so existing voxel type IDs keep their positions.
     #[func]
     fn set_models(&mut self, models: VarArray) {
         self.library.models.clear();
@@ -1649,13 +1669,20 @@ impl VoxelBlockyLibraryGD {
             .models
             .push(voxel_core::meshers::blocky::BakedModel::default());
         self.godot_models.push(None);
-        for item in models.iter_shared() {
-            let Ok(resource) = item.try_to::<Gd<Resource>>() else {
+        for (index, item) in models.iter_shared().enumerate() {
+            let resource = item.try_to::<Gd<Resource>>().ok();
+            if index == 0 && resource.is_none() {
+                // `get_models()` includes the reserved air slot. Also keep
+                // accepting arrays starting directly with a model, which
+                // historically appended that model at ID 1.
                 continue;
-            };
-            let baked = baked_model_from_resource(&resource);
+            }
+            let baked = resource
+                .as_ref()
+                .map(baked_model_from_resource)
+                .unwrap_or_default();
             self.library.models.push(baked);
-            self.godot_models.push(Some(resource));
+            self.godot_models.push(resource);
         }
         self.model_count = self.library.models.len() as i32;
         self.baked = false;
@@ -1696,6 +1723,7 @@ impl VoxelBlockyLibraryGD {
     pub fn core_library(&self) -> voxel_core::meshers::blocky::BakedLibrary {
         let mut library = self.library.clone();
         if !self.baked {
+            library.side_pattern_culling = Default::default();
             voxel_core::meshers::blocky::bake_library(&mut library);
         }
         library

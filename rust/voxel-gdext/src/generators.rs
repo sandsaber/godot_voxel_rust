@@ -1564,7 +1564,16 @@ impl VoxelGeneratorImage {
             godot_error!("VoxelGeneratorImage.set_image: {reason}");
             return false;
         }
-        let mut values = Vec::with_capacity((width * height) as usize);
+        let Some(count) = width
+            .checked_mul(height)
+            .and_then(|count| usize::try_from(count).ok())
+        else {
+            godot_error!(
+                "VoxelGeneratorImage.set_image: image dimensions exceed the supported range"
+            );
+            return false;
+        };
+        let mut values = Vec::with_capacity(count);
         for z in 0..height {
             for x in 0..width {
                 values.push(image_pixel_height(image.get_pixel(x, z)));
@@ -1579,7 +1588,10 @@ impl VoxelGeneratorImage {
     /// Returns `false` if `data.len() != width * height`.
     #[func]
     fn set_heights(&mut self, data: PackedByteArray, width: i32, height: i32) -> bool {
-        if width <= 0 || height <= 0 || data.len() != (width * height) as usize {
+        let count = width
+            .checked_mul(height)
+            .and_then(|count| usize::try_from(count).ok());
+        if width <= 0 || height <= 0 || count != Some(data.len()) {
             return false;
         }
         self.values = data.as_slice().iter().map(|&b| b as f32 / 255.0).collect();

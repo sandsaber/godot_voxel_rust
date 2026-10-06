@@ -69,14 +69,14 @@ terrain.add_child(viewer)   # viewer must be a child of the terrain
 ### Verified
 
 Tested headless against Godot 4.7.1.stable on Linux x86_64 (2026-07-30).
-The `smoke_test/` Godot project ships eight runnable checks plus a driver script.
+The `smoke_test/` Godot project ships ten runnable checks plus a driver script.
 
 **Reproducing on a clean checkout** — the compiled library is a git-ignored build
 artifact, so build it first. The driver does everything:
 
 ```sh
 cd rust
-./voxel-gdext/smoke_test/run_smoke_test.sh          # debug build + all 8 checks
+./voxel-gdext/smoke_test/run_smoke_test.sh          # debug build + all 10 checks
 ./voxel-gdext/smoke_test/run_smoke_test.sh --release
 ```
 
@@ -108,6 +108,15 @@ It (1) `cargo build`s `voxel-gdext`, (2) copies the `.so`/`.dylib` next to the
   materials/palette modes/`generate_mesh_from_image` (orientation pinned),
   Blocky `build_mesh` with a library, palette properties, and
   `VoxelRaycastResult` member composition.
+- **`review_blocky_library.tscn`** — rebaking edited resources and preserving
+  sparse model IDs across model-array roundtrips.
+- **`review_runtime.tscn`** — live LOD distance changes, active-volume bounds
+  protection, advancing/reproducible random ticks and invalid heightmap sizes.
+
+Configure `VoxelLodTerrain.voxel_bounds` before adding the node to the scene
+tree. Live volume resizing is unsupported: attempts are rejected while the
+current bounds, running core and unsaved edits are preserved. LOD distances
+can be changed while the terrain is running.
 
 ## Android
 

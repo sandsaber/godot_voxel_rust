@@ -2234,8 +2234,8 @@ impl VoxelLodTerrainGD {
         }
     }
 
-    /// Bounds (in voxels) within which volume data can exist. Stored
-    /// faithfully.
+    /// Bounds (in voxels) within which volume data can exist. Configure these
+    /// before the core is created; live volume resizing is not supported.
     #[func]
     fn get_voxel_bounds(&self) -> Aabb {
         self.voxel_bounds_value
@@ -2243,12 +2243,15 @@ impl VoxelLodTerrainGD {
 
     #[func]
     fn set_voxel_bounds(&mut self, bounds: Aabb) {
-        self.voxel_bounds_value = bounds;
         if self.core.is_some() {
-            // Bounds are baked into SharedVoxelData at construction.
-            self.core = None;
-            self.base_mut().request_ready();
+            if bounds != self.voxel_bounds_value {
+                godot_error!(
+                    "VoxelLodTerrain.set_voxel_bounds: cannot resize an active volume; configure bounds before adding the terrain to the tree"
+                );
+            }
+            return;
         }
+        self.voxel_bounds_value = bounds;
     }
 }
 

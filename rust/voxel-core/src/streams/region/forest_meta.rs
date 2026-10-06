@@ -58,7 +58,7 @@ impl RegionForestMeta {
         Self {
             block_size_po2: block_size_po2.clamp(1, 8),
             region_size_po2: region_size_po2(region_size),
-            sector_size: sector_size.max(1),
+            sector_size,
             ..Self::default()
         }
     }
@@ -152,9 +152,9 @@ impl RegionForestMeta {
                 self.region_size_po2
             )));
         }
-        if self.sector_size == 0 {
+        if self.sector_size == 0 || self.sector_size > u16::MAX as u32 {
             return Err(ForestMetaError::Invalid(
-                "sector_size must be positive".into(),
+                "sector_size must fit in the region header (1..=65535)".into(),
             ));
         }
         Ok(())

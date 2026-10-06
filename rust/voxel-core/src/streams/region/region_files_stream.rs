@@ -162,7 +162,6 @@ impl RegionFilesStream {
         block_size_po2: u8,
     ) -> Self {
         let region_size = region_size.clamp(1, 255);
-        let sector_size = sector_size.max(1);
         let block_size_po2 = block_size_po2.clamp(1, 8);
         Self {
             directory: normalize_directory(directory),
@@ -226,6 +225,11 @@ impl RegionFilesStream {
         new_sector_size: u32,
         new_block_size_po2: u8,
     ) -> Result<u32, VoxelStreamError> {
+        if new_sector_size == 0 || new_sector_size > u16::MAX as u32 {
+            return Err(VoxelStreamError::CorruptData(format!(
+                "invalid sector_size {new_sector_size}: expected 1..=65535"
+            )));
+        }
         let dest = RegionFilesStream::with_block_size(
             destination,
             new_region_size,
@@ -426,6 +430,13 @@ impl RegionFilesStream {
                     buffer.size()
                 )));
             }
+            candidate
+                .validate()
+                .map_err(|error| VoxelStreamError::CorruptData(error.to_string()))?;
+            candidate
+                .to_region_format()
+                .validate_result()
+                .map_err(|error| VoxelStreamError::CorruptData(error.to_string()))?;
             candidate
         };
         // Re-read under the directory lock: another stream may have saved

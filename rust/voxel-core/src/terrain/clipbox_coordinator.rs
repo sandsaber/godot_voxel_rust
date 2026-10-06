@@ -95,6 +95,7 @@ pub enum CoordinatorError {
     },
     RevisionOverflow,
     StalePreparedIdentity,
+    StructuralSettingsChange,
 }
 
 impl From<LodMathError> for CoordinatorError {
@@ -125,6 +126,7 @@ struct ViewerClipboxState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CoordinatorState {
     revision: u64,
+    applied_settings: LodClipboxSettings,
     viewers: OrdMap<ViewerId, Arc<ViewerClipboxState>>,
     aggregate: OrdMap<DemandKey, DemandCounts>,
 }
@@ -283,10 +285,39 @@ impl ClipboxCoordinator {
             bounds_voxels,
             state: Arc::new(CoordinatorState {
                 revision: 0,
+                applied_settings: settings,
                 viewers: OrdMap::new(),
                 aggregate: OrdMap::new(),
             }),
         })
+    }
+
+    /// Keep the committed residency baseline while invalidating cached viewer
+    /// clipboxes. The next prepared update reconciles the old demand against
+    /// the new distances, including viewers whose positions did not change.
+    pub(super) fn reconfigure_distances(
+        &mut self,
+        settings: LodClipboxSettings,
+    ) -> Result<(), CoordinatorError> {
+        if settings.lod_count != self.settings.lod_count
+            || settings.data_block_size != self.settings.data_block_size
+            || settings.mesh_block_size != self.settings.mesh_block_size
+        {
+            return Err(CoordinatorError::StructuralSettingsChange);
+        }
+        compute_lod_clipboxes(
+            Vector3i::zero(),
+            Vector3i::zero(),
+            self.bounds_voxels,
+            settings,
+        )?;
+        if self.settings != settings {
+            // Prepared tokens also depend on settings, not just aggregate
+            // counts. Give the unchanged baseline a fresh identity.
+            self.state = Arc::new((*self.state).clone());
+            self.settings = settings;
+        }
+        Ok(())
     }
 
     pub fn revision(&self) -> u64 {
@@ -363,7 +394,9 @@ impl ClipboxCoordinator {
 
         for viewer in viewers {
             let previous = self.state.viewers.get(&viewer.id).map(Arc::as_ref);
-            if previous.is_some_and(|state| state.update == *viewer) {
+            if self.state.applied_settings == self.settings
+                && previous.is_some_and(|state| state.update == *viewer)
+            {
                 continue;
             }
             let next = reconcile_viewer_transition(
@@ -392,6 +425,7 @@ impl ClipboxCoordinator {
             base: self.state.clone(),
             next: Arc::new(CoordinatorState {
                 revision: next_revision,
+                applied_settings: self.settings,
                 viewers: next_viewers,
                 aggregate: next_aggregate,
             }),
@@ -415,7 +449,8 @@ impl ClipboxCoordinator {
     }
 
     fn is_exact_viewer_snapshot(&self, viewers: &[ClipboxViewerUpdate]) -> bool {
-        viewers.len() == self.state.viewers.len()
+        self.state.applied_settings == self.settings
+            && viewers.len() == self.state.viewers.len()
             && viewers.iter().all(|viewer| {
                 self.state
                     .viewers
@@ -2317,5 +2352,41 @@ mod tests {
         );
         assert_eq!(underflow, underflow_before);
         assert_eq!(underflow.state_identity_for_test(), underflow_identity);
+    }
+
+    #[test]
+    fn reconfigure_distances_invalidates_tokens_and_retains_the_committed_baseline() {
+        let mut coordinator = test_coordinator();
+        let updates = [viewer(1, Vector3i::zero(), true, false)];
+        coordinator.update_viewers(&updates).unwrap();
+        let old_aggregate = coordinator.state.aggregate.clone();
+        let old_revision = coordinator.revision();
+        let stale = coordinator.prepare_update(&[]).unwrap();
+        let mut next_settings = settings();
+        next_settings.secondary_distance_voxels = 32;
+        coordinator.reconfigure_distances(next_settings).unwrap();
+        assert_eq!(coordinator.state.aggregate, old_aggregate);
+        assert_eq!(coordinator.revision(), old_revision);
+        assert_eq!(
+            coordinator.apply_prepared(stale),
+            Err(CoordinatorError::StalePreparedIdentity)
+        );
+
+        let prepared = coordinator.prepare_update(&updates).unwrap();
+        assert!(!prepared.delta().changes.is_empty());
+        // Discarding a prepared update cannot consume the pending settings
+        // change or alter the baseline used on a retry.
+        let expected_delta = prepared.delta().clone();
+        drop(prepared);
+        assert_eq!(coordinator.state.aggregate, old_aggregate);
+        assert_eq!(
+            coordinator.update_viewers(&updates).unwrap(),
+            expected_delta
+        );
+        assert!(coordinator
+            .update_viewers(&updates)
+            .unwrap()
+            .changes
+            .is_empty());
     }
 }

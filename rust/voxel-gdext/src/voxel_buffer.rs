@@ -2099,6 +2099,7 @@ pub struct VoxelToolTerrainGD {
     value: u64,
     /// Seed for random-tick draws (see `run_blocky_random_tick`).
     random_seed: u32,
+    random_rng: voxel_core::instancing::scatter::SimpleRng,
 }
 
 #[godot_api]
@@ -2112,6 +2113,7 @@ impl IRefCounted for VoxelToolTerrainGD {
             channel: ChannelId::Sdf.index(),
             value: 1,
             random_seed: 0,
+            random_rng: voxel_core::instancing::scatter::SimpleRng::new(0),
         }
     }
 }
@@ -2155,8 +2157,8 @@ impl VoxelToolTerrainGD {
         i64::try_from(self.value).unwrap_or(0)
     }
 
-    /// Seed for `run_blocky_random_tick` draws. Same seed + same candidates
-    /// produce the same ticks; different seeds cover different subsets.
+    /// Reset the random-tick sequence. The same seed and candidates replay the
+    /// same sequence; successive calls advance it independently for each tool.
     #[func]
     fn set_seed(&mut self, seed: i64) {
         let Ok(seed) = u32::try_from(seed) else {
@@ -2164,6 +2166,7 @@ impl VoxelToolTerrainGD {
             return;
         };
         self.random_seed = seed;
+        self.random_rng = voxel_core::instancing::scatter::SimpleRng::new(seed);
     }
 
     #[func]
@@ -2599,11 +2602,10 @@ impl VoxelToolTerrainGD {
         // permanently starve the rest. `batch` spreads the draws across
         // invocations for statistical coverage; `voxel_count` caps total
         // callbacks this call. Deterministic under a fixed seed.
-        let mut rng = voxel_core::instancing::scatter::SimpleRng::new(self.random_seed);
         let draws = batch.min(limit).min(candidates.len());
         let mut picked: Vec<usize> = (0..candidates.len()).collect();
         for i in 0..draws {
-            let j = i + (rng.next_u32() as usize) % (picked.len() - i);
+            let j = i + (self.random_rng.next_u32() as usize) % (picked.len() - i);
             picked.swap(i, j);
             let (pos, value) = &candidates[picked[i]];
             let gpos = godot::builtin::Vector3i::new(pos.x, pos.y, pos.z);
