@@ -17,6 +17,28 @@ use voxel_core::storage::{ChannelId, MetadataValue, VoxelBuffer, VoxelFormat};
 pub(crate) const MAX_SCRIPT_ITEMS: usize = 65_536;
 pub(crate) const MAX_SCRIPT_VOXELS: u64 = 2_097_152;
 
+fn random_tick_bounds(area: Aabb) -> Result<(Vector3i, Vector3i), &'static str> {
+    if !area.size.is_finite() {
+        return Err("area size must be finite");
+    }
+    let min = crate::terrain::world_to_voxel_position(area.position)?;
+    let last_voxel = |origin: f32, extent: f32| {
+        // Keep the exclusive endpoint and subtraction in f64. Casting first
+        // can saturate to i32::MIN and overflow when subtracting one.
+        let last = (f64::from(origin) + f64::from(extent)).ceil() - 1.0;
+        if !(f64::from(i32::MIN)..=f64::from(i32::MAX)).contains(&last) {
+            return Err("area endpoint must be within i32 range");
+        }
+        Ok(last as i32)
+    };
+    let max = Vector3i::new(
+        last_voxel(area.position.x, area.size.x)?,
+        last_voxel(area.position.y, area.size.y)?,
+        last_voxel(area.position.z, area.size.z)?,
+    );
+    Ok((min, max))
+}
+
 pub(crate) fn validate_channel(channel: i32) -> Result<usize, &'static str> {
     let channel = usize::try_from(channel).map_err(|_| "channel must be non-negative")?;
     if channel >= voxel_core::storage::voxel_buffer::MAX_CHANNELS {
@@ -1281,6 +1303,50 @@ mod validation_tests {
     use voxel_core::storage::voxel_buffer::{MAX_CHANNELS, MAX_SIZE};
 
     #[test]
+    fn random_tick_bounds_reject_nonfinite_and_out_of_range_coordinates() {
+        for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -3.0e9, 3.0e9] {
+            assert!(
+                random_tick_bounds(Aabb::new(Vector3::new(value, 0.0, 0.0), Vector3::ONE)).is_err()
+            );
+            assert!(
+                random_tick_bounds(Aabb::new(Vector3::ZERO, Vector3::new(value, 1.0, 1.0)))
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn random_tick_bounds_preserve_inclusive_endpoints_at_i32_limits() {
+        let min = i32::MIN as f32;
+        assert_eq!(
+            random_tick_bounds(Aabb::new(Vector3::new(min, 0.0, 0.0), Vector3::ONE)),
+            Ok((Vector3i::new(i32::MIN, 0, 0), Vector3i::new(i32::MIN, 0, 0)))
+        );
+        assert_eq!(
+            random_tick_bounds(Aabb::new(
+                Vector3::new(2_147_483_520.0, 0.0, 0.0),
+                Vector3::new(128.0, 1.0, 1.0)
+            )),
+            Ok((
+                Vector3i::new(2_147_483_520, 0, 0),
+                Vector3i::new(i32::MAX, 0, 0)
+            ))
+        );
+        assert!(random_tick_bounds(Aabb::new(
+            Vector3::new(min, 0.0, 0.0),
+            Vector3::new(0.0, 1.0, 1.0)
+        ))
+        .is_err());
+        assert_eq!(
+            random_tick_bounds(Aabb::new(
+                Vector3::new(-1.5, 0.0, 0.0),
+                Vector3::new(2.0, 1.0, 1.0)
+            )),
+            Ok((Vector3i::new(-2, 0, 0), Vector3i::new(0, 0, 0)))
+        );
+    }
+
+    #[test]
     fn validate_channel_rejects_values_outside_the_core_channel_range() {
         assert!(validate_channel(-1).is_err());
         assert!(validate_channel(MAX_CHANNELS as i32).is_err());
@@ -2508,15 +2574,15 @@ impl VoxelToolTerrainGD {
     }
 
     /// Picks voxels within `area` and calls `callback(position, value)` on a
-    /// strided subset. `voxel_count` is the maximum number of callbacks;
-    /// `batch_count` controls the stride. When a `VoxelMesherBlocky` library
+    /// random subset. `voxel_count` and `batch_count` cap the callbacks.
+    /// Callbacks may read or edit through this same tool. When a `VoxelMesherBlocky` library
     /// is attached, only `random_tickable` models whose `tags_mask` intersects
     /// `tags_mask` are candidates (`tags_mask == 0` means any tag). Without a
     /// library, non-zero voxels on the tool channel are candidates and a
     /// non-zero `tags_mask` filters by `(value & tags_mask) != 0`.
-    #[func]
+    #[func(gd_self)]
     fn run_blocky_random_tick(
-        &mut self,
+        mut this: Gd<Self>,
         area: Aabb,
         voxel_count: i32,
         callback: Callable,
@@ -2535,26 +2601,13 @@ impl VoxelToolTerrainGD {
             return;
         }
         let batch = usize::try_from(batch_count.max(1)).unwrap_or(1);
-        let min = Vector3i::new(
-            area.position.x.floor() as i32,
-            area.position.y.floor() as i32,
-            area.position.z.floor() as i32,
-        );
-        let max = Vector3i::new(
-            (area.position.x + area.size.x).ceil() as i32 - 1,
-            (area.position.y + area.size.y).ceil() as i32 - 1,
-            (area.position.z + area.size.z).ceil() as i32 - 1,
-        );
-        if !area.position.x.is_finite()
-            || !area.position.y.is_finite()
-            || !area.position.z.is_finite()
-            || !area.size.x.is_finite()
-            || !area.size.y.is_finite()
-            || !area.size.z.is_finite()
-        {
-            godot_error!("VoxelToolTerrain.run_blocky_random_tick: area must be finite");
-            return;
-        }
+        let (min, max) = match random_tick_bounds(area) {
+            Ok(bounds) => bounds,
+            Err(reason) => {
+                godot_error!("VoxelToolTerrain.run_blocky_random_tick: {reason}");
+                return;
+            }
+        };
         // Bound the scan, not just the results: the box is iterated per
         // voxel on the main thread, so a giant AABB must be rejected up
         // front instead of hanging the frame.
@@ -2568,7 +2621,6 @@ impl VoxelToolTerrainGD {
             );
             return;
         }
-        let channel = self.channel;
         let mask = tags_mask as u32;
         // The candidate filter runs during the scan: collecting any non-zero
         // voxel first and filtering afterwards let dense untickable material
@@ -2578,21 +2630,25 @@ impl VoxelToolTerrainGD {
                             value: u64| {
             voxel_core::edition::ops::voxel_is_random_tick_candidate(value, mask, library)
         };
-        let candidates = if let Some(terrain) = self.terrain.as_ref() {
-            let bound = terrain.bind();
-            let library = bound.blocky_library();
-            bound.collect_voxels_in_box(min, max, channel, MAX_SCRIPT_ITEMS, |value| {
-                is_candidate(library.as_ref(), value)
-            })
-        } else if let Some(terrain) = self.lod_terrain.as_ref() {
-            let bound = terrain.bind();
-            let library = bound.blocky_library();
-            bound.collect_voxels_in_box(min, max, channel, MAX_SCRIPT_ITEMS, |value| {
-                is_candidate(library.as_ref(), value)
-            })
-        } else {
-            godot_error!("VoxelToolTerrain.run_blocky_random_tick: no terrain is bound");
-            return;
+        let candidates = {
+            let tool = this.bind();
+            let channel = tool.channel;
+            if let Some(terrain) = tool.terrain.as_ref() {
+                let bound = terrain.bind();
+                let library = bound.blocky_library();
+                bound.collect_voxels_in_box(min, max, channel, MAX_SCRIPT_ITEMS, |value| {
+                    is_candidate(library.as_ref(), value)
+                })
+            } else if let Some(terrain) = tool.lod_terrain.as_ref() {
+                let bound = terrain.bind();
+                let library = bound.blocky_library();
+                bound.collect_voxels_in_box(min, max, channel, MAX_SCRIPT_ITEMS, |value| {
+                    is_candidate(library.as_ref(), value)
+                })
+            } else {
+                godot_error!("VoxelToolTerrain.run_blocky_random_tick: no terrain is bound");
+                return;
+            }
         };
         if candidates.is_empty() {
             return;
@@ -2605,11 +2661,12 @@ impl VoxelToolTerrainGD {
         let draws = batch.min(limit).min(candidates.len());
         let mut picked: Vec<usize> = (0..candidates.len()).collect();
         for i in 0..draws {
-            let j = i + (self.random_rng.next_u32() as usize) % (picked.len() - i);
+            let j = i + (this.bind_mut().random_rng.next_u32() as usize) % (picked.len() - i);
             picked.swap(i, j);
             let (pos, value) = &candidates[picked[i]];
             let gpos = godot::builtin::Vector3i::new(pos.x, pos.y, pos.z);
             let gval = i64::try_from(*value).unwrap_or(0);
+            // Both the terrain snapshot borrow and the RNG borrow have ended.
             callback.call(&[gpos.to_variant(), gval.to_variant()]);
         }
     }

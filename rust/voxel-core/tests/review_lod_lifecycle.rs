@@ -6,7 +6,7 @@ use voxel_core::meshers::TransvoxelMesher;
 use voxel_core::storage::{ChannelId, VoxelBuffer, VoxelData};
 use voxel_core::streams::{LoadResult, MemoryStream, VoxelLoadQuery, VoxelStream};
 use voxel_core::terrain::lod_clipbox::LodClipboxSettings;
-use voxel_core::terrain::{MeshDemand, ViewerUpdate, VoxelTerrainCore};
+use voxel_core::terrain::{MeshDemand, ViewerUpdate, VoxelTerrainCore, VoxelTerrainEvent};
 
 fn core() -> (VoxelTerrainCore, Arc<MemoryStream>) {
     let mut data = VoxelData::new();
@@ -162,6 +162,124 @@ fn disabled_ticks_finish_loads_without_losing_queued_meshes_or_dirty_blocks() {
         LoadResult::Found
     );
     assert_eq!(saved.get_voxel(0, 0, 0, ChannelId::Type.index()), 91);
+}
+
+#[test]
+fn disabled_ticks_activate_completed_meshes_without_following_moved_viewers() {
+    let viewer_demand = |core: &VoxelTerrainCore| {
+        (0..core.lod_count())
+            .map(|lod| {
+                core.mesh_blocks_at_lod(lod)
+                    .iter()
+                    .filter(|(_, entry)| entry.resident_viewers != 0)
+                    .map(|(position, entry)| {
+                        (
+                            *position,
+                            (
+                                entry.resident_viewers,
+                                entry.visual_viewers,
+                                entry.collision_viewers,
+                            ),
+                        )
+                    })
+                    .collect::<std::collections::HashMap<_, _>>()
+            })
+            .collect::<Vec<_>>()
+    };
+    let (mut core, _) = core();
+    let mut viewers = viewer();
+    viewers[0].demand.collisions = true;
+    core.try_process(&viewers).unwrap();
+    core.wait_for_pending_tasks();
+    core.try_process(&viewers).unwrap();
+    core.wait_for_pending_tasks();
+    let original_demand = viewer_demand(&core);
+
+    core.automatic_loading_enabled = false;
+    let mut moved_viewers = viewers;
+    moved_viewers[0].world_position_voxels = Vector3i::splat(96);
+    let events = core.try_process(&moved_viewers).unwrap();
+    assert!(events.iter().any(|event| event.mesh_descriptor().is_some()));
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, VoxelTerrainEvent::RenderTopologyChanged(_))));
+    let snapshot = core.debug_snapshot();
+    assert!(snapshot.mesh_blocks.iter().any(|block| block.visual_active));
+    assert!(snapshot
+        .mesh_blocks
+        .iter()
+        .any(|block| block.collision_active));
+    assert_eq!(viewer_demand(&core), original_demand);
+    assert_eq!(core.pending_task_count(), 0);
+    for _ in 0..3 {
+        assert!(core.try_process(&moved_viewers).unwrap().is_empty());
+        assert_eq!(core.debug_snapshot(), snapshot);
+        assert_eq!(core.pending_task_count(), 0);
+    }
+
+    core.automatic_loading_enabled = true;
+    settle(&mut core, &viewers);
+    assert_eq!(viewer_demand(&core), original_demand);
+    settle(&mut core, &moved_viewers);
+    assert_ne!(viewer_demand(&core), original_demand);
+}
+
+#[test]
+fn disabled_ticks_defer_distance_changes_until_stationary_resume() {
+    let (mut core, _) = core();
+    let viewers = viewer();
+    settle(&mut core, &viewers);
+    let original = core.debug_snapshot();
+    let original_data_count = core.data().block_positions(1).len();
+    core.automatic_loading_enabled = false;
+    let mut settings = core.variable_lod_settings().unwrap();
+    settings.secondary_distance_voxels = 32;
+    core.try_reconfigure_variable_clipboxes(settings).unwrap();
+    for _ in 0..3 {
+        assert!(core.try_process(&viewers).unwrap().is_empty());
+        assert_eq!(core.debug_snapshot(), original);
+        assert_eq!(core.pending_task_count(), 0);
+    }
+    core.automatic_loading_enabled = true;
+    settle(&mut core, &viewers);
+    assert!(core.data().block_positions(1).len() > original_data_count);
+}
+
+#[test]
+fn disabled_ticks_keep_remesh_work_queued_while_accepting_other_completions() {
+    let (mut core, _) = core();
+    let mut viewers = viewer();
+    viewers[0].demand.collisions = true;
+    core.try_process(&viewers).unwrap();
+    core.wait_for_pending_tasks();
+    core.try_process(&viewers).unwrap();
+    core.wait_for_pending_tasks();
+    core.try_edit_voxel(91, Vector3i::zero(), ChannelId::Type.index())
+        .unwrap()
+        .unwrap();
+    core.automatic_loading_enabled = false;
+    let events = core.try_process(&viewers).unwrap();
+    assert!(events.iter().any(|event| event.mesh_descriptor().is_some()));
+    let queued_meshes = |core: &VoxelTerrainCore| {
+        (0..core.lod_count())
+            .map(|lod| {
+                core.mesh_blocks_at_lod(lod)
+                    .values()
+                    .filter(|entry| entry.is_in_update_list)
+                    .count()
+            })
+            .sum::<usize>()
+    };
+    let queued = queued_meshes(&core);
+    assert!(queued > 0);
+    for _ in 0..3 {
+        core.try_process(&viewers).unwrap();
+        assert_eq!(core.pending_task_count(), 0);
+        assert_eq!(queued_meshes(&core), queued);
+    }
+    core.automatic_loading_enabled = true;
+    settle(&mut core, &viewers);
+    assert_eq!(queued_meshes(&core), 0);
 }
 
 #[test]

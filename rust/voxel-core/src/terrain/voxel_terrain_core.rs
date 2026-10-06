@@ -10199,6 +10199,7 @@ impl VoxelTerrainCore {
         coverage_inputs: &[CoverageInput],
         hold_resolution: PreparedCoverageHoldResolution,
         data_preview: &SharedVoxelDataTransactionPreview,
+        dispatch_tasks: bool,
     ) -> Result<(PreparedVariablePhysicalSlice, PreparedCoverageHoldPhases), VariableModeTestError>
     {
         let mut mesh_shadows = BTreeMap::new();
@@ -10266,6 +10267,21 @@ impl VoxelTerrainCore {
                     lod_index: resource.lod_index(),
                 },
             )?;
+        }
+        if dispatch_tasks {
+            for (lod, positions) in self.blocks_pending_load.iter().enumerate() {
+                for &position in positions {
+                    ensure_variable_data_shadow(
+                        self,
+                        data_preview,
+                        &mut data_shadows,
+                        BlockLocation {
+                            position,
+                            lod_index: lod as u8,
+                        },
+                    )?;
+                }
+            }
         }
         for group in &coverage_preview.result().topology.groups {
             for location in group.activate.iter().chain(&group.deactivate).copied() {
@@ -10881,8 +10897,8 @@ impl VoxelTerrainCore {
                     entry.request_state,
                     LoadRequestState::NotFound | LoadRequestState::Exhausted
                 ) && residency_grew);
-            let dispatch = entry.request_state == LoadRequestState::Queued || needs_fresh;
-            if dispatch {
+            let needs_dispatch = entry.request_state == LoadRequestState::Queued || needs_fresh;
+            if needs_dispatch {
                 if needs_fresh {
                     let (generation, request) = allocate_physical_request(
                         self.request_epoch,
@@ -10892,25 +10908,30 @@ impl VoxelTerrainCore {
                     entry.physical_request = Some(request);
                     entry.retry_count = 0;
                 }
-                entry.request_state = LoadRequestState::InFlight;
-                let request = entry
-                    .physical_request
-                    .as_ref()
-                    .expect("queued variable load retained its validated request")
-                    .clone();
-                scheduled_tasks.push(ScheduledTask::new(
-                    Box::new(
-                        LoadBlockForTerrainTask::new(
-                            shadow.location.position,
-                            shadow.location.lod_index,
-                            entry.request_generation,
-                            self.data.clone(),
-                            self.stream.clone(),
-                        )
-                        .with_request_control(request.tag, request.cancellation),
-                    ),
-                    TaskLane::Parallel,
-                ));
+                if dispatch_tasks {
+                    entry.request_state = LoadRequestState::InFlight;
+                    let request = entry
+                        .physical_request
+                        .as_ref()
+                        .expect("queued variable load retained its validated request")
+                        .clone();
+                    scheduled_tasks.push(ScheduledTask::new(
+                        Box::new(
+                            LoadBlockForTerrainTask::new(
+                                shadow.location.position,
+                                shadow.location.lod_index,
+                                entry.request_generation,
+                                self.data.clone(),
+                                self.stream.clone(),
+                            )
+                            .with_request_control(request.tag, request.cancellation),
+                        ),
+                        TaskLane::Parallel,
+                    ));
+                } else {
+                    entry.request_state = LoadRequestState::Queued;
+                    next_pending_load[lod].push(shadow.location.position);
+                }
             }
             let expected_generation = shadow
                 .expected_loading
@@ -10997,7 +11018,7 @@ impl VoxelTerrainCore {
                 entry.request_generation = generation;
                 entry.physical_request = Some(request);
             }
-            if !data_ready {
+            if !data_ready || !dispatch_tasks {
                 entry.is_in_update_list = true;
                 next_pending_mesh[lod].push(shadow.location.position_in_blocks);
                 continue;
@@ -11366,6 +11387,7 @@ impl VoxelTerrainCore {
                 &inputs,
                 hold_resolution,
                 &data_preview,
+                true,
             )?;
             preview
                 .retire_payloads(prepared_physical.mesh_diffs.iter().filter_map(|diff| {
@@ -11788,21 +11810,10 @@ impl VoxelTerrainCore {
         // completion that has arrived by this tick visible to the planner.
         self.legacy_variable_apply_durable_fifo()?;
 
-        if !dispatch_tasks {
-            // As in fixed LOD, disabling automatic loading freezes viewer
-            // demand while already-started work can finish. Do not prepare
-            // InFlight owners for tasks which will never be dispatched.
-            let deferred_keys = std::mem::take(&mut self.deferred_save_dispatch_keys);
-            self.dispatch_queued_saves_except(&deferred_keys);
-            if !std::mem::take(&mut self.deferred_checkpoint_dispatch) {
-                self.dispatch_pending_checkpoint();
-            }
-            return self.legacy_variable_apply_direct_fifo();
-        }
-
         // Build the paired-viewer publication from the incoming viewer updates
         // (Section 2). The coordinator/coverage model owns residency; the
         // paired viewers are kept consistent for telemetry/shutdown bookkeeping.
+        let viewers = if dispatch_tasks { viewers } else { &[] };
         let mut next_paired_viewers = Vec::new();
         next_paired_viewers
             .try_reserve_exact(viewers.len())
@@ -11842,13 +11853,20 @@ impl VoxelTerrainCore {
             });
         }
 
-        let coordinator_update = self
+        let coordinator = &self
             .variable_lod
             .as_ref()
             .unwrap_or_else(|| unreachable!("variable planner requires variable LOD"))
-            .coordinator
-            .prepare_update(&clipbox_viewers)
-            .map_err(VoxelTerrainRuntimeError::Coordinator)?;
+            .coordinator;
+        // Pausing freezes viewer demand, not completion-driven coverage.
+        // Retain the exact baseline so pending distance changes also wait.
+        let coordinator_update = if dispatch_tasks {
+            coordinator
+                .prepare_update(&clipbox_viewers)
+                .map_err(VoxelTerrainRuntimeError::Coordinator)?
+        } else {
+            coordinator.prepare_unchanged()
+        };
         let mesh_change_count = coordinator_update
             .delta()
             .changes
@@ -11878,7 +11896,12 @@ impl VoxelTerrainCore {
         let data_preview = self.data.begin_transaction_preview();
         let needs_coverage_preview = pending_acceptance_count != 0
             || mesh_change_count != 0
-            || !coordinator_update.delta().changes.is_empty();
+            || !coordinator_update.delta().changes.is_empty()
+            || (dispatch_tasks
+                && self
+                    .blocks_pending_load
+                    .iter()
+                    .any(|queue| !queue.is_empty()));
         let mut physical_slice = None;
         let coverage_publication = if !needs_coverage_preview {
             None
@@ -11994,6 +12017,7 @@ impl VoxelTerrainCore {
                 &inputs,
                 hold_resolution,
                 &data_preview,
+                dispatch_tasks,
             )?;
             preview
                 .retire_payloads(prepared_physical.mesh_diffs.iter().filter_map(|diff| {
@@ -12110,7 +12134,7 @@ impl VoxelTerrainCore {
             .prepare_transaction(data_operations, &data_snapshots)
             .map_err(|error| VoxelTerrainRuntimeError::DataMutation(error.into_parts().0))?;
         let draft = TerrainTransactionDraft {
-            paired_viewer_publication: Some(next_paired_viewers),
+            paired_viewer_publication: dispatch_tasks.then_some(next_paired_viewers),
             mode: PreparedTerrainMode::Variable(Box::new(VariableLodTransactionDraft {
                 coordinator_update: Some(coordinator_update),
                 coverage_publication,
@@ -12158,7 +12182,9 @@ impl VoxelTerrainCore {
         // resident after the last delta is dispatched here with the same
         // MeshBlockTask hints the planner uses, so remesh features cannot
         // drift from the production path.
-        self.enqueue_ready_mesh_block_tasks()?;
+        if dispatch_tasks {
+            self.enqueue_ready_mesh_block_tasks()?;
+        }
         Ok(())
     }
 

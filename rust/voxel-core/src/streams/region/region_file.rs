@@ -410,6 +410,18 @@ impl<F: VoxelFile> RegionFile<F> {
                 )));
             }
         }
+        // The reverse map and compaction logic use physical sector indices
+        // into a packed allocation. Reject holes instead of silently dropping
+        // them while rebuilding that map and overwriting a later block.
+        let mut next_sector = 0;
+        for (start, end, _) in occupied {
+            if start != next_sector {
+                return Err(RegionError::BadHeader(format!(
+                    "LUT sector gap {next_sector}..{start} is not supported"
+                )));
+            }
+            next_sector = end;
+        }
 
         Ok(())
     }

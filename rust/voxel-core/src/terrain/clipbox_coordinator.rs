@@ -364,16 +364,7 @@ impl ClipboxCoordinator {
         // Vec only adjust counters/store dangling capacity. It is also
         // replayable because base and next have the same identity.
         if self.is_exact_viewer_snapshot(viewers) {
-            return Ok(PreparedCoordinatorUpdate {
-                base: self.state.clone(),
-                next: self.state.clone(),
-                delta: ResidentDemandDelta {
-                    revision: self.state.revision,
-                    changes: Vec::new(),
-                },
-                #[cfg(test)]
-                work: CoordinatorWorkCounters::default(),
-            });
+            return Ok(self.prepare_unchanged());
         }
 
         let mut accumulator = TransitionAccumulator::default();
@@ -436,6 +427,21 @@ impl ClipboxCoordinator {
             #[cfg(test)]
             work: accumulator.work,
         })
+    }
+
+    /// Preserve committed demand while loading is paused, even when distance
+    /// settings have changed and still need reconciliation after resuming.
+    pub(super) fn prepare_unchanged(&self) -> PreparedCoordinatorUpdate {
+        PreparedCoordinatorUpdate {
+            base: self.state.clone(),
+            next: self.state.clone(),
+            delta: ResidentDemandDelta {
+                revision: self.state.revision,
+                changes: Vec::new(),
+            },
+            #[cfg(test)]
+            work: CoordinatorWorkCounters::default(),
+        }
     }
 
     pub(super) fn apply_prepared(
@@ -2371,6 +2377,15 @@ mod tests {
             coordinator.apply_prepared(stale),
             Err(CoordinatorError::StalePreparedIdentity)
         );
+
+        let paused_state = coordinator.state.clone();
+        let unchanged = coordinator.prepare_unchanged();
+        assert!(coordinator
+            .apply_prepared(unchanged)
+            .unwrap()
+            .changes
+            .is_empty());
+        assert!(Arc::ptr_eq(&coordinator.state, &paused_state));
 
         let prepared = coordinator.prepare_update(&updates).unwrap();
         assert!(!prepared.delta().changes.is_empty());

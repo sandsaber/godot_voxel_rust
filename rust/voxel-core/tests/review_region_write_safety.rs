@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use voxel_core::math::Vector3i;
 use voxel_core::storage::{MetadataValue, VoxelBuffer};
 use voxel_core::streams::compressed_data::Compression;
-use voxel_core::streams::region::{RegionFile, RegionFormat};
+use voxel_core::streams::region::{RegionError, RegionFile, RegionFormat};
 use voxel_core::streams::{RegionFilesStream, VoxelSaveQuery, VoxelStream};
 
 static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
@@ -143,4 +143,40 @@ fn conversion_rejects_invalid_sector_size_without_creating_destination() {
     )
     .is_err());
     assert!(!target.exists());
+}
+
+#[test]
+fn gapped_regions_are_rejected_without_modifying_the_file() {
+    for gap_before_block in [0usize, 1] {
+        let dir = TestDir::new();
+        let path = dir.path().join("gapped.vxr");
+        let format = small_format(512);
+        let data_start = format.header_size_v3();
+        let lut_start = data_start - format.block_count_checked().unwrap() * 4;
+        {
+            let mut region = RegionFile::open_with_format(&path, true, format).unwrap();
+            region
+                .save_block(Vector3i::zero(), &block(11), Compression::None)
+                .unwrap();
+            region
+                .save_block(Vector3i::new(0, 1, 0), &block(22), Compression::None)
+                .unwrap();
+        }
+        let mut bytes = std::fs::read(&path).unwrap();
+        let entry_offset = lut_start + gap_before_block * 4;
+        let entry = u32::from_le_bytes(bytes[entry_offset..entry_offset + 4].try_into().unwrap());
+        let gap_offset = data_start + (entry >> 8) as usize * 512;
+        bytes.splice(gap_offset..gap_offset, vec![0; 512]);
+        for index in gap_before_block..2 {
+            let offset = lut_start + index * 4;
+            let entry = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+            bytes[offset..offset + 4].copy_from_slice(&(entry + (1 << 8)).to_le_bytes());
+        }
+        std::fs::write(&path, &bytes).unwrap();
+
+        assert!(
+            matches!(RegionFile::open(&path, false), Err(RegionError::BadHeader(message)) if message.contains("gap"))
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }
 }

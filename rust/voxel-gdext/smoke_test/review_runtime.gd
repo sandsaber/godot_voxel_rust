@@ -77,6 +77,28 @@ func _bounds_and_random_tick() -> void:
 	other.set_channel(0)
 	other.set_seed(123)
 	_ok(_ticks(other) == first, "each tool owns its random sequence")
+	var callback_counts := [0, 0]
+	tool.set_voxel(Vector3i.ONE, 77)
+	tool.run_blocky_random_tick(AABB(Vector3.ONE, Vector3.ONE), 1,
+		func(pos, value):
+			callback_counts[0] += 1
+			_ok(tool.get_voxel(pos) == value, "callback can read through the same tool")
+			tool.set_voxel(pos, 88)
+			tool.run_blocky_random_tick(AABB(Vector3.ONE, Vector3.ONE), 1,
+				func(nested_pos, nested_value):
+					callback_counts[1] += 1
+					_ok(nested_value == 88, "nested tick sees the callback edit")
+					tool.set_voxel(nested_pos, 99), 1, 0), 1, 0)
+	_ok(callback_counts == [1, 1] and tool.get_voxel(Vector3i.ONE) == 99,
+		"callbacks can edit and invoke nested ticks through the same tool")
+	var invalid_callbacks := [0]
+	for coordinate in [-3.0e9, 3.0e9, -INF, INF, NAN]:
+		tool.run_blocky_random_tick(AABB(Vector3(coordinate, 0, 0), Vector3.ONE), 1,
+			func(_pos, _value): invalid_callbacks[0] += 1, 1, 0)
+	tool.run_blocky_random_tick(AABB(Vector3.ZERO, Vector3(3.0e9, 1, 1)), 1,
+		func(_pos, _value): invalid_callbacks[0] += 1, 1, 0)
+	_ok(invalid_callbacks[0] == 0, "invalid tick bounds return without panic or callbacks")
+	_ok(_ticks(tool).size() == 4, "tool remains usable after invalid tick bounds")
 	terrain.queue_free()
 	await get_tree().process_frame
 
